@@ -15,7 +15,7 @@ namespace DbgTest.Script
 {
 class Context
 {
-    public void Initialize(string caller_trace, bool LinesStartAt1 = true, bool ColumnsStartAt1 = true)
+    public void Initialize(string caller_trace, bool LinesStartAt1 = true, bool ColumnsStartAt1 = true, bool SupportsMemoryReferences = false)
     {
         processId = -1;
         threadId = -1;
@@ -46,6 +46,7 @@ class Context
         initializeRequest.arguments.pathFormat = "path";
         initializeRequest.arguments.linesStartAt1 = LinesStartAt1;
         initializeRequest.arguments.columnsStartAt1 = ColumnsStartAt1;
+        initializeRequest.arguments.supportsMemoryReferences = SupportsMemoryReferences;
         initializeRequest.arguments.supportsVariableType = true;
         initializeRequest.arguments.supportsVariablePaging = true;
         initializeRequest.arguments.supportsRunInTerminalRequest = true;
@@ -1041,6 +1042,37 @@ class Context
         Assert.Equal(ExpectedResult, fixedVal, @"__FILE__:__LINE__" + "\n" + caller_trace);
 
         return evaluateResponse.body.variablesReference;
+    }
+
+    public void CheckMemoryReference(string caller_trace, Int64 frameId, string Expression, bool NullReference)
+    {
+        EvaluateRequest evaluateRequest = new EvaluateRequest();
+        evaluateRequest.arguments.expression = Expression;
+        evaluateRequest.arguments.frameId = frameId;
+        var ret = DAPDebugger.Request(evaluateRequest);
+        Assert.True(ret.Success, @"__FILE__:__LINE__" + "\n" + caller_trace);
+
+        EvaluateResponse evaluateResponse = JsonConvert.DeserializeObject<EvaluateResponse>(ret.ResponseStr)!;
+
+        Assert.True(evaluateResponse.body.memoryReference != null, @"__FILE__:__LINE__" + "\n" + caller_trace);
+
+        if (NullReference)
+            Assert.Equal("0x0000000000000000", evaluateResponse.body.memoryReference!, @"__FILE__:__LINE__" + "\n" + caller_trace);
+        else
+            Assert.NotEqual("0x0000000000000000", evaluateResponse.body.memoryReference!, @"__FILE__:__LINE__" + "\n" + caller_trace);
+    }
+
+    public void CheckNoMemoryReference(string caller_trace, Int64 frameId, string Expression)
+    {
+        EvaluateRequest evaluateRequest = new EvaluateRequest();
+        evaluateRequest.arguments.expression = Expression;
+        evaluateRequest.arguments.frameId = frameId;
+        var ret = DAPDebugger.Request(evaluateRequest);
+        Assert.True(ret.Success, @"__FILE__:__LINE__" + "\n" + caller_trace);
+
+        EvaluateResponse evaluateResponse = JsonConvert.DeserializeObject<EvaluateResponse>(ret.ResponseStr)!;
+
+        Assert.True(evaluateResponse.body.memoryReference == null, @"__FILE__:__LINE__" + "\n" + caller_trace);
     }
 
     public void CheckErrorAtRequest(string caller_trace, Int64 frameId, string Expression, string errMsgStart)

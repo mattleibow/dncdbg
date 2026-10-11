@@ -31,6 +31,7 @@ public class InitializeRequestArguments
     public bool? linesStartAt1;
     public bool? columnsStartAt1;
     public string pathFormat = string.Empty;
+    public bool? supportsMemoryReferences;
     public bool? supportsVariableType;
     public bool? supportsVariablePaging;
     public bool? supportsRunInTerminalRequest;

@@ -115,6 +115,7 @@ public class EvaluateResponseBody
     public string type = string.Empty;
     public VariablePresentationHint presentationHint = new();
     public int variablesReference;
+    public string? memoryReference;
     public int? namedVariables;
     public int? indexedVariables;
 }

@@ -5,7 +5,7 @@ Upcoming changes compared to the previous version.
 - Added `linesStartAt1`, `columnsStartAt1` and `supportsMemoryReferences` support in Initialize Request.
 
 #### Added
-- Added TestStartAt0.
+- Added TestStartAt0 and TestMemoryReferences.
 
 <br>
 <br>

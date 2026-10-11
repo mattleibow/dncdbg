@@ -74,6 +74,10 @@ void SetLinesStartAt1(bool state);
 bool GetColumnsStartAt1();
 void SetColumnsStartAt1(bool state);
 
+// Support for memory references, provided by the DAP protocol ("initialize" request).
+bool GetSupportsMemoryReferences();
+void SetSupportsMemoryReferences(bool state);
+
 } // namespace dncdbg::Config
 
 #endif // DEBUGGER_CONFIG_H

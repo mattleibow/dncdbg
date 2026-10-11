@@ -196,6 +196,12 @@ bool &GetColumnsStartAt1State()
     return columnsStartAt1;
 }
 
+bool &GetSupportsMemoryReferencesState()
+{
+    static bool supportsMemoryReferences{false};
+    return supportsMemoryReferences;
+}
+
 } // unnamed namespace
 
 // Establishes the baseline values by reading the settings from the process environment.
@@ -357,6 +363,16 @@ bool GetColumnsStartAt1()
 void SetColumnsStartAt1(bool state)
 {
     GetColumnsStartAt1State() = state;
+}
+
+bool GetSupportsMemoryReferences()
+{
+    return GetSupportsMemoryReferencesState();
+}
+
+void SetSupportsMemoryReferences(bool state)
+{
+    GetSupportsMemoryReferencesState() = state;
 }
 
 } // namespace dncdbg::Config

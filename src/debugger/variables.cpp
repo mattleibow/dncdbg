@@ -236,8 +236,12 @@ void FixupInheritedNames(std::vector<VariableMember> &members)
 
 HRESULT CreatePinnedHandle(ICorDebugValue *pValue, ICorDebugHandleValue **ppHandleValue)
 {
-    HRESULT Status = S_OK;
+    if (!Config::GetSupportsMemoryReferences())
+    {
+        return E_NOTIMPL;
+    }
 
+    HRESULT Status = S_OK;
     CorElementType elemType = ELEMENT_TYPE_MAX;
     IfFailRet(pValue->GetType(&elemType));
 
@@ -268,8 +272,9 @@ HRESULT CreatePinnedHandle(ICorDebugValue *pValue, ICorDebugHandleValue **ppHand
 
 HRESULT GetMemoryReference(ICorDebugValue *pInputValue, std::string &memoryReference)
 {
-    // Note: in case of error during evaluation, pInputValue could be nullptr.
-    if (pInputValue == nullptr)
+    // Note: in case of error during evaluation, pInputValue could be nullptr. Memory references are
+    // also skipped when the client does not support them, returning success without a reference.
+    if (pInputValue == nullptr || !Config::GetSupportsMemoryReferences())
     {
         return S_OK;
     }

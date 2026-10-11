@@ -523,12 +523,15 @@ HRESULT HandleCommand(const std::string &command, const nlohmann::json &argument
 
                 // clientID, clientName, adapterID - not in use now
 
-                // Note: supportsMemoryReferences is ignored, since memoryReference is always provided regardless of this capability.
-
                 // `linesStartAt1` and `columnsStartAt1` - whether the client uses 1-based line and
                 // column numbering (both default to true when omitted).
                 Config::SetLinesStartAt1(arguments.value("linesStartAt1", true));
                 Config::SetColumnsStartAt1(arguments.value("columnsStartAt1", true));
+
+                // `supportsMemoryReferences` - whether the client supports the `memoryReference` property
+                // on variables (defaults to false when omitted). When false, no memory references are
+                // provided and values are not pinned via GC handles.
+                Config::SetSupportsMemoryReferences(arguments.value("supportsMemoryReferences", false));
 
                 ManagedDebugger::InitializeDebugSession();
                 AddCapabilitiesTo(responseBody);

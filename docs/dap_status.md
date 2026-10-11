@@ -177,7 +177,7 @@ How to read the blocks below:
 ❌  supportsVariableType?: boolean;
 ❌  supportsVariablePaging?: boolean;
 ❌  supportsRunInTerminalRequest?: boolean;
-❌  supportsMemoryReferences?: boolean;
+✅  supportsMemoryReferences?: boolean;
 ❌  supportsProgressReporting?: boolean;
 ❌  supportsInvalidatedEvent?: boolean;
 ❌  supportsMemoryEvent?: boolean;

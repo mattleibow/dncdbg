@@ -12,7 +12,7 @@
 #include <specstrings_undef.h>
 #endif
 
-#include "debugger/evalhelpers.h"
+#include "types/types.h"
 #include <string>
 
 namespace dncdbg

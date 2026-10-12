@@ -4,9 +4,9 @@
 // See the LICENSE file in the project root for more information.
 
 #include "debugger/evaluation/walkers/walkers.h"
-#include "debugger/evalhelpers.h"
 #include "debugger/evaluation/evalhelpers/evalexec.h"
 #include "debugger/evaluation/evalhelpers/metadata.h"
+#include "debugger/evaluation/evalhelpers/value.h"
 #include "debugger/frames.h"
 #include "debuginfo/debuginfo.h"
 #include "metadata/helpers.h"
@@ -31,7 +31,7 @@ HRESULT WalkPrimaryConstructorParameterFields(IMetaDataImport *pMDImport, ICorDe
     HRESULT Status = S_OK;
     BOOL isNull = FALSE;
     ToRelease<ICorDebugValue> trValue;
-    IfFailRet(DereferenceAndUnboxValue(pInputValue, &trValue, &isNull));
+    IfFailRet(EvalValueHelpers::DereferenceAndUnboxValue(pInputValue, &trValue, &isNull));
     if (isNull == TRUE)
     {
         return S_OK;
@@ -69,7 +69,7 @@ HRESULT WalkPrimaryConstructorParameterFields(IMetaDataImport *pMDImport, ICorDe
         const auto getValue = [&](ICorDebugValue **ppResultValue, std::string *) -> HRESULT
         {
             trValue.Free();
-            IfFailRet(DereferenceAndUnboxValue(pInputValue, &trValue, nullptr));
+            IfFailRet(EvalValueHelpers::DereferenceAndUnboxValue(pInputValue, &trValue, nullptr));
             ToRelease<ICorDebugObjectValue> trObjValue;
             IfFailRet(trValue->QueryInterface(IID_ICorDebugObjectValue, reinterpret_cast<void **>(&trObjValue)));
             IfFailRet(trObjValue->GetFieldValue(pClass, fieldDef, ppResultValue));

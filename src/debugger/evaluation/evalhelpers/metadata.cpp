@@ -4,8 +4,8 @@
 // See the LICENSE file in the project root for more information.
 
 #include "debugger/evaluation/evalhelpers/metadata.h"
+#include "debugger/evaluation/evalhelpers/value.h"
 #include "debugger/evaluation/walkers/walkers.h"
-#include "debugger/evalhelpers.h"
 #include "debugger/frames.h"
 #include "debuginfo/debuginfo.h"
 #include "metadata/helpers.h"
@@ -419,6 +419,16 @@ HRESULT ResolveTypeParameters(const std::vector<std::string> &params, ICorDebugT
     return S_OK;
 }
 
+mdMethodDef GetMethodToken(IMetaDataImport *pMDImport, mdTypeDef typeDef, const WSTRING &methodName)
+{
+    ULONG numMethods = 0;
+    HCORENUM mEnum = nullptr;
+    mdMethodDef methodDef = mdMethodDefNil;
+    pMDImport->EnumMethodsWithName(&mEnum, typeDef, methodName.c_str(), &methodDef, 1, &numMethods);
+    pMDImport->CloseEnum(mEnum);
+    return methodDef;
+}
+
 } // unnamed namespace
 
 // Note, could return S_CAN_EXIT for fast exit.
@@ -466,7 +476,7 @@ HRESULT FindThisProxyFieldValue(IMetaDataImport *pMDImport, ICorDebugClass *pCla
     HRESULT Status = S_OK;
     BOOL isNull = FALSE;
     ToRelease<ICorDebugValue> trValue;
-    IfFailRet(DereferenceAndUnboxValue(pInputValue, &trValue, &isNull));
+    IfFailRet(EvalValueHelpers::DereferenceAndUnboxValue(pInputValue, &trValue, &isNull));
     if (isNull == TRUE)
     {
         return E_INVALIDARG;
@@ -934,6 +944,31 @@ HRESULT FindTypeModule(std::vector<std::string> &identifiers, ICorDebugThread *p
     }
 
     return S_OK;
+}
+
+HRESULT FindFunctionInModule(ICorDebugThread *pThread, const std::string &moduleFileName, const WSTRING &typeName,
+                             const WSTRING &methodName, ICorDebugFunction **ppFunction)
+{
+    HRESULT Status = S_OK;
+    ToRelease<ICorDebugModule> trModule;
+    IfFailRet(Modules::GetModuleWithName(pThread, moduleFileName, &trModule));
+
+    ToRelease<IUnknown> trUnknown;
+    IfFailRet(trModule->GetMetaDataInterface(IID_IMetaDataImport, &trUnknown));
+    ToRelease<IMetaDataImport> trMDImport;
+    IfFailRet(trUnknown->QueryInterface(IID_IMetaDataImport, reinterpret_cast<void **>(&trMDImport)));
+
+    mdTypeDef typeDef = mdTypeDefNil;
+    IfFailRet(trMDImport->FindTypeDefByName(typeName.c_str(), mdTypeDefNil, &typeDef));
+
+    const mdMethodDef methodDef = GetMethodToken(trMDImport, typeDef, methodName);
+
+    if (methodDef == mdMethodDefNil)
+    {
+        return E_FAIL;
+    }
+
+    return trModule->GetFunctionFromToken(methodDef, ppFunction);
 }
 
 HRESULT GetFQDisplayRealCodeTypeName(ICorDebugFrame *pFrame, std::string &displayTypeName)

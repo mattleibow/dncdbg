@@ -5,7 +5,7 @@
 
 #include "debugger/evaluation/walkers/walkers.h"
 #include "debugger/evaluation/evalhelpers/metadata.h"
-#include "debugger/evalhelpers.h"
+#include "debugger/evaluation/evalhelpers/value.h"
 #include "debuginfo/debuginfo.h"
 #include "metadata/helpers.h"
 #include "utils/hresult.h"
@@ -25,7 +25,7 @@ HRESULT WalkGeneratedClassFields(IMetaDataImport *pMDImport, ICorDebugValue *pIn
     HRESULT Status = S_OK;
     BOOL isNull = FALSE;
     ToRelease<ICorDebugValue> trValue;
-    IfFailRet(DereferenceAndUnboxValue(pInputValue, &trValue, &isNull));
+    IfFailRet(EvalValueHelpers::DereferenceAndUnboxValue(pInputValue, &trValue, &isNull));
     if (isNull == TRUE)
     {
         return S_OK;
@@ -66,7 +66,7 @@ HRESULT WalkGeneratedClassFields(IMetaDataImport *pMDImport, ICorDebugValue *pIn
             {
                 // Get the value again, since it could be neutered by an eval call in `cb` on a previous iteration.
                 trValue.Free();
-                IfFailRet(DereferenceAndUnboxValue(pInputValue, &trValue, &isNull));
+                IfFailRet(EvalValueHelpers::DereferenceAndUnboxValue(pInputValue, &trValue, &isNull));
                 ToRelease<ICorDebugObjectValue> trObjValue;
                 IfFailRet(trValue->QueryInterface(IID_ICorDebugObjectValue, reinterpret_cast<void **>(&trObjValue)));
                 IfFailRet(trObjValue->GetFieldValue(trClass, fieldDef, ppResultValue));

@@ -54,6 +54,10 @@ HRESULT FindType(std::vector<std::string> &identifiers, int &nextIdentifier, ICo
 HRESULT FindTypeModule(std::vector<std::string> &identifiers, ICorDebugThread *pThread,
                        const PDB::ImportsAndAliases &pdbImports, ICorDebugModule **ppModule);
 
+// Find the method `methodName` of the type `typeName` in the module with the given file name.
+HRESULT FindFunctionInModule(ICorDebugThread *pThread, const std::string &moduleFileName, const WSTRING &typeName,
+                             const WSTRING &methodName, ICorDebugFunction **ppFunction);
+
 // Get the fully-qualified "display" type name of the real (user) code, resolving async state-machine methods back to their kickoff method.
 HRESULT GetFQDisplayRealCodeTypeName(ICorDebugFrame *pFrame, std::string &displayTypeName);
 // Get the fully-qualified "display" method name of the real (user) code, resolving async state-machine methods back to their kickoff method.

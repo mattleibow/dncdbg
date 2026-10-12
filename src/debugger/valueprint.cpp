@@ -4,8 +4,9 @@
 // See the LICENSE file in the project root for more information.
 
 #include "debugger/valueprint.h"
-#include "debugger/evalhelpers.h"
 #include "debugger/evaluation/evalhelpers/evalexec.h"
+#include "debugger/evaluation/evalhelpers/textwitheval.h"
+#include "debugger/evaluation/evalhelpers/value.h"
 #include "metadata/attributes.h"
 #include "metadata/corhelpers.h"
 #include "metadata/helpers.h"
@@ -31,7 +32,7 @@ HRESULT PrintDebuggerDisplayAttribute(ICorDebugThread *pThread, ICorDebugValue *
     HRESULT Status = S_OK;
 
     ToRelease<ICorDebugValue> trValue;
-    IfFailRet(DereferenceAndUnboxValue(pInputValue, &trValue, nullptr));
+    IfFailRet(EvalValueHelpers::DereferenceAndUnboxValue(pInputValue, &trValue, nullptr));
 
     ToRelease<ICorDebugValue2> trValue2;
     IfFailRet(trValue->QueryInterface(IID_ICorDebugValue2, reinterpret_cast<void **>(&trValue2)));
@@ -74,8 +75,8 @@ HRESULT PrintDebuggerDisplayAttribute(ICorDebugThread *pThread, ICorDebugValue *
     }
 
     std::vector<std::pair<std::string, bool>> textWithEvalParts;
-    CreateTextWithEvalParts(textWithEval, textWithEvalParts);
-    BuildTextWithEval(pThread, pInputValue, textWithEvalParts, output);
+    EvalTextHelpers::CreateTextWithEvalParts(textWithEval, textWithEvalParts);
+    EvalTextHelpers::BuildTextWithEval(pThread, pInputValue, textWithEvalParts, output);
     return S_OK;
 }
 
@@ -84,7 +85,7 @@ HRESULT PrintEnumValue(ICorDebugValue *pInputValue, const void *enumValue, std::
     HRESULT Status = S_OK;
 
     ToRelease<ICorDebugValue> trValue;
-    IfFailRet(DereferenceAndUnboxValue(pInputValue, &trValue, nullptr));
+    IfFailRet(EvalValueHelpers::DereferenceAndUnboxValue(pInputValue, &trValue, nullptr));
 
     ToRelease<ICorDebugValue2> trValue2;
     IfFailRet(trValue->QueryInterface(IID_ICorDebugValue2, reinterpret_cast<void **>(&trValue2)));
@@ -518,7 +519,7 @@ HRESULT PrintValue(ICorDebugThread *pThread, ICorDebugValue *pInputValue, Format
     {
         BOOL isNull = TRUE;
         ToRelease<ICorDebugValue> trValue;
-        IfFailRet(DereferenceAndUnboxValue(trCurrentValue, &trValue, &isNull));
+        IfFailRet(EvalValueHelpers::DereferenceAndUnboxValue(trCurrentValue, &trValue, &isNull));
 
         if (isNull == TRUE)
         {
@@ -650,7 +651,7 @@ HRESULT PrintValue(ICorDebugThread *pThread, ICorDebugValue *pInputValue, Format
             {
                 ToRelease<ICorDebugValue> trValueValue;
                 bool hasValue = false;
-                IfFailRet(GetNullableValue(trValue, &trValueValue, hasValue));
+                IfFailRet(EvalValueHelpers::GetNullableValue(trValue, &trValueValue, hasValue));
 
                 if (hasValue)
                 {
@@ -687,7 +688,7 @@ HRESULT PrintValue(ICorDebugThread *pThread, ICorDebugValue *pInputValue, Format
             else if (metadataTypeName == "System.Collections.Generic.DebugViewDictionaryItem`2")
             {
                 ToRelease<ICorDebugValue> trItemValue;
-                IfFailRet(GetDictionaryItemValue(pThread, trValue, specifier, &trItemValue));
+                IfFailRet(EvalValueHelpers::GetDictionaryItemValue(pThread, trValue, specifier, &trItemValue));
                 // Iterative handling: set trCurrentValue to the inner value and continue the loop
                 trCurrentValue = trItemValue.Detach();
                 continue;
@@ -699,7 +700,7 @@ HRESULT PrintValue(ICorDebugThread *pThread, ICorDebugValue *pInputValue, Format
                     return S_OK;
                 }
 
-                if (IsEnumeration(trValue))
+                if (EvalValueHelpers::IsEnumeration(trValue))
                 {
                     return PrintEnumValue(trValue, genericValue.data(), output);
                 }

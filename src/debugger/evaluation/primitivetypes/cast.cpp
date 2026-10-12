@@ -3,7 +3,7 @@
 // See the LICENSE file in the project root for more information.
 
 #include "debugger/evaluation/primitivetypes/types.h"
-#include "debugger/evalhelpers.h"
+#include "debugger/evaluation/evalhelpers/value.h"
 #include "utils/hresult.h"
 #include "utils/torelease.h"
 #include <limits>
@@ -87,7 +87,7 @@ HRESULT ForceCastToUint(ICorDebugValue *pInputValue, uint32_t &number)
 
     BOOL isNull = FALSE;
     ToRelease<ICorDebugValue> trValue;
-    IfFailRet(DereferenceAndUnboxValue(pInputValue, &trValue, &isNull));
+    IfFailRet(EvalValueHelpers::DereferenceAndUnboxValue(pInputValue, &trValue, &isNull));
     if (isNull == TRUE)
     {
         return E_INVALIDARG;

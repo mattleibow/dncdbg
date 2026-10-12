@@ -4,12 +4,12 @@
 // See the LICENSE file in the project root for more information.
 
 #include "debugger/evalstackmachine.h"
-#include "debugger/evalhelpers.h"
 #include "debugger/evaluation/evalhelpers/debuginfo.h"
 #include "debugger/evaluation/evalhelpers/evalexec.h"
 #include "debugger/evaluation/evalhelpers/evalresolver.h"
 #include "debugger/evaluation/evalhelpers/systemtypes.h"
 #include "debugger/evaluation/evalhelpers/metadata.h"
+#include "debugger/evaluation/evalhelpers/value.h"
 #include "debugger/evaluation/primitivetypes/types.h"
 #include "debugger/evaluation/walkers/walkers.h"
 #include "debugger/valueprint.h"
@@ -375,7 +375,7 @@ HRESULT GetRealValueWithType(ICorDebugValue *pValue, ICorDebugValue **ppResultVa
     HRESULT Status = S_OK;
     // Dereference and unbox value, since we need real value.
     ToRelease<ICorDebugValue> trRealValue;
-    IfFailRet(DereferenceAndUnboxValue(pValue, &trRealValue));
+    IfFailRet(EvalValueHelpers::DereferenceAndUnboxValue(pValue, &trRealValue));
     CorElementType elemType = ELEMENT_TYPE_MAX;
     IfFailRet(trRealValue->GetType(&elemType));
     // Note, in case of class (string is class), we must use reference instead.
@@ -734,7 +734,7 @@ HRESULT BinaryOperator(const Parser::Opcode &opcode, std::list<EvalStackEntry> &
             ToRelease<ICorDebugValue> trStrValue;
             if (elemType == ELEMENT_TYPE_STRING)
             {
-                IfFailRet(DereferenceAndUnboxValue(pValue, &trStrValue, &isNull));
+                IfFailRet(EvalValueHelpers::DereferenceAndUnboxValue(pValue, &trStrValue, &isNull));
                 if (isNull == TRUE)
                 {
                     return S_OK;
@@ -970,7 +970,7 @@ HRESULT InvocationExpression(const Parser::Opcode &opcode, std::list<EvalStackEn
     for (uint32_t i = 0; i < argCount; ++i)
     {
         ToRelease<ICorDebugValue> trValueArg;
-        IfFailRet(DereferenceAndUnboxValue(trArgs.at(i), &trValueArg, nullptr));
+        IfFailRet(EvalValueHelpers::DereferenceAndUnboxValue(trArgs.at(i), &trValueArg, nullptr));
         IfFailRet(GetArgData(trValueArg, funcArgs.at(i).metadataTypeName, funcArgs.at(i).elemType));
     }
 
@@ -1265,7 +1265,7 @@ HRESULT ObjectCreationExpression(const Parser::Opcode &opcode, std::list<EvalSta
     for (uint32_t i = 0; i < argCount; ++i)
     {
         ToRelease<ICorDebugValue> trValueArg;
-        IfFailRet(DereferenceAndUnboxValue(trArgs.at(i), &trValueArg, nullptr));
+        IfFailRet(EvalValueHelpers::DereferenceAndUnboxValue(trArgs.at(i), &trValueArg, nullptr));
         IfFailRet(GetArgData(trValueArg, funcArgs.at(i).metadataTypeName, funcArgs.at(i).elemType));
     }
 
@@ -1358,7 +1358,7 @@ HRESULT ElementAccessHelper(const Parser::Opcode &opcode, std::list<EvalStackEnt
 
     ToRelease<ICorDebugValue> trRealValue;
     BOOL isNull = FALSE;
-    IfFailRet(DereferenceAndUnboxValue(trObjectValue, &trRealValue, &isNull));
+    IfFailRet(EvalValueHelpers::DereferenceAndUnboxValue(trObjectValue, &trRealValue, &isNull));
     if (isNull == TRUE)
     {
         if (preventBindingOnNull)
@@ -1389,7 +1389,7 @@ HRESULT ElementAccessHelper(const Parser::Opcode &opcode, std::list<EvalStackEnt
         evalStack.front().realDisplayTypeName.clear();
         evalStack.front().identifiers.clear();
         evalStack.front().setterData = std::move(setterData);
-        Status = GetArrayElement(trRealValue, indexes, &evalStack.front().trValue);
+        Status = EvalValueHelpers::GetArrayElement(trRealValue, indexes, &evalStack.front().trValue);
     }
     else if (elemType == ELEMENT_TYPE_STRING ||
              elemType == ELEMENT_TYPE_CLASS ||
@@ -1399,7 +1399,7 @@ HRESULT ElementAccessHelper(const Parser::Opcode &opcode, std::list<EvalStackEnt
         for (uint32_t i = 0; i < argCount; ++i)
         {
             ToRelease<ICorDebugValue> trValueArg;
-            IfFailRet(DereferenceAndUnboxValue(trIndexValues.at(i), &trValueArg, nullptr));
+            IfFailRet(EvalValueHelpers::DereferenceAndUnboxValue(trIndexValues.at(i), &trValueArg, nullptr));
             IfFailRet(GetArgData(trValueArg, funcArgs.at(i).metadataTypeName, funcArgs.at(i).elemType));
         }
 
@@ -1664,7 +1664,7 @@ HRESULT SizeOfExpression(const Parser::Opcode &/*opcode*/, std::list<EvalStackEn
         if (elType == ELEMENT_TYPE_CLASS)
         {
             ToRelease<ICorDebugValue> trValue;
-            IfFailRet(DereferenceAndUnboxValue(evalStack.front().trValue, &trValue, nullptr));
+            IfFailRet(EvalValueHelpers::DereferenceAndUnboxValue(evalStack.front().trValue, &trValue, nullptr));
             IfFailRet(trValue->GetSize(&size));
         }
         else
@@ -1690,7 +1690,7 @@ HRESULT SizeOfExpression(const Parser::Opcode &/*opcode*/, std::list<EvalStackEn
 
                 IfFailRet(trType->GetClass(&trClass));
                 IfFailRet(EvalExec::CreateValueType(ed.pThread, trClass, nullptr, &trValueRef));
-                IfFailRet(DereferenceAndUnboxValue(trValueRef, &trValue, nullptr));
+                IfFailRet(EvalValueHelpers::DereferenceAndUnboxValue(trValueRef, &trValue, nullptr));
                 IfFailRet(trValue->GetSize(&size));
             }
             else

@@ -5,7 +5,7 @@
 
 #include "debugger/breakpoints/breakpoints_source.h"
 #include "debugger/breakpoints/internal_helpers.h"
-#include "debugger/evalhelpers.h"
+#include "debugger/evaluation/evalhelpers/textwitheval.h"
 #include "debuginfo/debuginfo.h"
 #include "debuginfo/pdb.h"
 #include "debuginfo/sourcereference.h"
@@ -369,10 +369,10 @@ HRESULT CheckBreakpointHit(ICorDebugThread *pThread, ICorDebugBreakpoint *pBreak
             {
                 if (b.logMessageParts.empty())
                 {
-                    CreateTextWithEvalParts(b.logMessage, b.logMessageParts);
+                    EvalTextHelpers::CreateTextWithEvalParts(b.logMessage, b.logMessageParts);
                 }
                 std::string message;
-                BuildTextWithEval(pThread, nullptr, b.logMessageParts, message);
+                EvalTextHelpers::BuildTextWithEval(pThread, nullptr, b.logMessageParts, message);
                 message += '\n';
                 OutputEvent event(OutputCategory::Console, message);
                 event.source = Source(sourceFilePath, sourceReference);

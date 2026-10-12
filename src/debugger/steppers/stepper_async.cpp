@@ -7,7 +7,8 @@
 #include "debugger/steppers/stepper_simple.h"
 #include "debugger/evaluation/evalhelpers/evalexec.h"
 #include "debuginfo/asyncinfo.h"
-#include "debugger/evalhelpers.h"
+#include "debugger/evaluation/evalhelpers/metadata.h"
+#include "debugger/evaluation/evalhelpers/value.h"
 #include "debugger/threads.h"
 #include "metadata/helpers.h"
 #include "utils/hresult.h"
@@ -137,7 +138,7 @@ HRESULT GetAsyncTBuilder(ICorDebugFrame *pFrame, ICorDebugValue **ppValue_builde
 
     // Find '<>t__builder' field.
     ToRelease<ICorDebugValue> trValue_this;
-    IfFailRet(DereferenceAndUnboxValue(trRefValue_this, &trValue_this, nullptr));
+    IfFailRet(EvalValueHelpers::DereferenceAndUnboxValue(trRefValue_this, &trValue_this, nullptr));
     ToRelease<ICorDebugValue2> trValue2_this;
     IfFailRet(trValue_this->QueryInterface(IID_ICorDebugValue2, reinterpret_cast<void **>(&trValue2_this)));
     ToRelease<ICorDebugType> trType_this;
@@ -192,7 +193,7 @@ HRESULT GetAsyncTBuilder(ICorDebugFrame *pFrame, ICorDebugValue **ppValue_builde
     {
         return E_FAIL;
     }
-    IfFailRet(DereferenceAndUnboxValue(trRefValue_t_builder, ppValue_builder, nullptr));
+    IfFailRet(EvalValueHelpers::DereferenceAndUnboxValue(trRefValue_t_builder, ppValue_builder, nullptr));
 
     return S_OK;
 }
@@ -385,7 +386,7 @@ HRESULT CreateBreakpointIntoNotifyDebuggerOfWaitCompletion(ICorDebugThread *pThr
     static const WSTRING typeName(W("System.Threading.Tasks.Task"));
     static const WSTRING methodName(W("NotifyDebuggerOfWaitCompletion"));
     ToRelease<ICorDebugFunction> trFunc;
-    IfFailRet(FindFunctionInModule(pThread, moduleFileName, typeName, methodName, &trFunc));
+    IfFailRet(EvalMetadataHelpers::FindFunctionInModule(pThread, moduleFileName, typeName, methodName, &trFunc));
 
     ToRelease<ICorDebugModule> trModule;
     IfFailRet(trFunc->GetModule(&trModule));
@@ -681,7 +682,7 @@ HRESULT ManagedCallbackBreakpoint(ICorDebugThread *pThread)
         ToRelease<ICorDebugValue> trValue;
         BOOL isNull = FALSE;
         if (SUCCEEDED(GetAsyncIdReference(pThread, trFrame, &trValueRef)) &&
-            SUCCEEDED(DereferenceAndUnboxValue(trValueRef, &trValue, &isNull)) && (isNull == FALSE))
+            SUCCEEDED(EvalValueHelpers::DereferenceAndUnboxValue(trValueRef, &trValue, &isNull)) && (isNull == FALSE))
         {
             trValue->GetAddress(&currentAsyncId);
         }
@@ -695,7 +696,7 @@ HRESULT ManagedCallbackBreakpoint(ICorDebugThread *pThread)
         ToRelease<ICorDebugValue> trValueAsyncId;
         if ((asyncStep->m_trHandleValueAsyncId != nullptr) && // Note, we could fail with m_trHandleValueAsyncId on a previous breakpoint for some reason.
             SUCCEEDED(asyncStep->m_trHandleValueAsyncId->Dereference(&trDereferencedValue)) &&
-            SUCCEEDED(DereferenceAndUnboxValue(trDereferencedValue, &trValueAsyncId, &isNull)) && (isNull == FALSE))
+            SUCCEEDED(EvalValueHelpers::DereferenceAndUnboxValue(trDereferencedValue, &trValueAsyncId, &isNull)) && (isNull == FALSE))
         {
             trValueAsyncId->GetAddress(&prevAsyncId);
         }

@@ -5,8 +5,10 @@
 
 #include "debugger/variables.h"
 #include "config/config.h"
-#include "debugger/evalhelpers.h"
 #include "debugger/evaluation/evalhelpers/evalexec.h"
+#include "debugger/evaluation/evalhelpers/formatspecifier.h"
+#include "debugger/evaluation/evalhelpers/textwitheval.h"
+#include "debugger/evaluation/evalhelpers/value.h"
 #include "debugger/evaluation/walkers/walkers.h"
 #include "debugger/evalstackmachine.h"
 #include "debugger/valueprint.h"
@@ -142,8 +144,8 @@ HRESULT FillValueAndType(ICorDebugThread *pThread, FormatSpecifier specifier, co
     if (!member.customDisplayTextWithEval.empty())
     {
         std::vector<std::pair<std::string, bool>> textWithEvalParts;
-        CreateTextWithEvalParts(member.customDisplayTextWithEval, textWithEvalParts);
-        BuildTextWithEval(pThread, member.trValue, textWithEvalParts, var.value);
+        EvalTextHelpers::CreateTextWithEvalParts(member.customDisplayTextWithEval, textWithEvalParts);
+        EvalTextHelpers::BuildTextWithEval(pThread, member.trValue, textWithEvalParts, var.value);
         return S_OK;
     }
 
@@ -248,7 +250,7 @@ HRESULT CreatePinnedHandle(ICorDebugValue *pValue, ICorDebugHandleValue **ppHand
     // Note, reference objects (class, array, szarray, byref) may be moved or invalidated by the GC/runtime during
     // evaluations (which happen during break), so pin heap values via a GC handle that survives across
     // continue-break cycles (same behavior as MS vsdbg).
-    // DereferenceAndUnboxValue produces the inner heap object in trValue, so ICorDebugHeapValue2 must be queried
+    // EvalValueHelpers::DereferenceAndUnboxValue produces the inner heap object in trValue, so ICorDebugHeapValue2 must be queried
     // on it (not on pValue, which may be a byref/ELEMENT_TYPE_BYREF and does not support IID_ICorDebugHeapValue2).
     if (elemType == ELEMENT_TYPE_CLASS ||
         elemType == ELEMENT_TYPE_ARRAY ||
@@ -257,7 +259,7 @@ HRESULT CreatePinnedHandle(ICorDebugValue *pValue, ICorDebugHandleValue **ppHand
     {
         BOOL isNull = FALSE;
         ToRelease<ICorDebugValue> trValue;
-        IfFailRet(DereferenceAndUnboxValue(pValue, &trValue, &isNull));
+        IfFailRet(EvalValueHelpers::DereferenceAndUnboxValue(pValue, &trValue, &isNull));
         ToRelease<ICorDebugHeapValue2> trHeapValue2;
         if (isNull == FALSE && trValue != nullptr)
         {
@@ -313,14 +315,14 @@ HRESULT SetValue(ICorDebugThread *pThread, FrameLevel frameLevel, ToRelease<ICor
     {
         ToRelease<ICorDebugValue> trValueValue;
         ToRelease<ICorDebugValue> trHasValueValue;
-        IfFailRet(GetNullableValue(trPrevValue, &trValueValue, &trHasValueValue));
+        IfFailRet(EvalValueHelpers::GetNullableValue(trPrevValue, &trValueValue, &trHasValueValue));
 
         if (value == "null")
         {
             // Note: System.Nullable<T> can only wrap value types, so the value field cannot be assigned
             // null; zero its storage to reset it to default(T).
             ToRelease<ICorDebugValue> trEditableValue;
-            IfFailRet(DereferenceAndUnboxValue(trValueValue, &trEditableValue, nullptr));
+            IfFailRet(EvalValueHelpers::DereferenceAndUnboxValue(trValueValue, &trEditableValue, nullptr));
             ToRelease<ICorDebugGenericValue> trGenericValue;
             IfFailRet(trEditableValue->QueryInterface(IID_ICorDebugGenericValue, reinterpret_cast<void **>(&trGenericValue)));
             uint32_t cbSize = 0;
@@ -786,7 +788,7 @@ HRESULT Evaluate(ICorDebugProcess *pProcess, FrameId frameId, const std::string 
 
     FormatSpecifier specifier = FormatSpecifier::None;
     std::string expression;
-    ParseFormatSpecifier(expressionWithFormat, expression, specifier);
+    EvalFormatSpecifiers::ParseFormatSpecifier(expressionWithFormat, expression, specifier);
 
     ToRelease<ICorDebugValue> trResultValue;
     const FrameLevel frameLevel = frameId.GetLevel();
@@ -854,7 +856,7 @@ HRESULT SetExpression(ICorDebugProcess *pProcess, FrameId frameId, const std::st
 
     FormatSpecifier specifier = FormatSpecifier::None;
     std::string expression;
-    ParseFormatSpecifier(expressionWithFormat, expression, specifier);
+    EvalFormatSpecifiers::ParseFormatSpecifier(expressionWithFormat, expression, specifier);
 
     ToRelease<ICorDebugValue> trValue;
     bool editable = false;

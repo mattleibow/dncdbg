@@ -8,9 +8,9 @@
 #include "debugger/evaluation/evalhelpers/evalwaiter.h"
 #include "debugger/evaluation/evalhelpers/metadata.h"
 #include "debugger/evaluation/evalhelpers/systemtypes.h"
+#include "debugger/evaluation/evalhelpers/value.h"
 #include "debugger/evaluation/primitivetypes/types.h"
 #include "debugger/evaluation/walkers/walkers.h"
-#include "debugger/evalhelpers.h"
 #include "debugger/valueprint.h"
 #include "metadata/corhelpers.h"
 #include "metadata/helpers.h"
@@ -253,7 +253,7 @@ HRESULT CreateLiteralValueImpl(ICorDebugThread *pThread, PCCOR_SIGNATURE pSig, P
 
             BOOL isNull = FALSE;
             ToRelease<ICorDebugValue> trValue;
-            IfFailRet(DereferenceAndUnboxValue(trBoxedValue, &trValue, &isNull));
+            IfFailRet(EvalValueHelpers::DereferenceAndUnboxValue(trBoxedValue, &trValue, &isNull));
 
             ToRelease<ICorDebugGenericValue> trGenericValue;
             IfFailRet(trValue->QueryInterface(IID_ICorDebugGenericValue, reinterpret_cast<void **>(&trGenericValue)));
@@ -592,7 +592,7 @@ HRESULT CallOverriddenToString(ICorDebugThread *pThread, ICorDebugValue *pInputV
     IfFailRet(CallFunction(pThread, trFunc, trInputType.GetPtr(), nullptr, &pInputValue,
                            1, specifier, &trRefValue));
     ToRelease<ICorDebugValue> trValue;
-    IfFailRet(DereferenceAndUnboxValue(trRefValue, &trValue, nullptr));
+    IfFailRet(EvalValueHelpers::DereferenceAndUnboxValue(trRefValue, &trValue, nullptr));
     return PrintStringValue(trValue, output);
 }
 
@@ -668,7 +668,7 @@ HRESULT CallStaticConstructor(ICorDebugThread *pThread, ICorDebugType *pType, Fo
             static const std::string moduleFileName("System.Private.CoreLib.dll");
             static const WSTRING gcTypeName(W("System.GC"));
             static const WSTRING suppressFinalizeMethodName(W("SuppressFinalize"));
-            IfFailRet(FindFunctionInModule(pThread, moduleFileName, gcTypeName, suppressFinalizeMethodName, &trSuppressFinalize));
+            IfFailRet(EvalMetadataHelpers::FindFunctionInModule(pThread, moduleFileName, gcTypeName, suppressFinalizeMethodName, &trSuppressFinalize));
             if (trSuppressFinalize == nullptr)
             {
                 return E_FAIL;
@@ -955,7 +955,7 @@ HRESULT CreateValueType(ICorDebugThread *pThread, ICorDebugClass *pValueTypeClas
     }
 
     ToRelease<ICorDebugValue> trEditableValue;
-    IfFailRet(DereferenceAndUnboxValue(*ppValue, &trEditableValue, nullptr));
+    IfFailRet(EvalValueHelpers::DereferenceAndUnboxValue(*ppValue, &trEditableValue, nullptr));
 
     ToRelease<ICorDebugGenericValue> trGenericValue;
     IfFailRet(trEditableValue->QueryInterface(IID_ICorDebugGenericValue, reinterpret_cast<void **>(&trGenericValue)));

@@ -6,7 +6,7 @@
 #include "debugger/frames.h"
 #include "config/config.h"
 #include "debugger/evaluation/evalhelpers/metadata.h"
-#include "debugger/evalhelpers.h"
+#include "debugger/evaluation/evalhelpers/value.h"
 #include "debuginfo/debuginfo.h"
 #include "debuginfo/sourcereference.h"
 #include "metadata/helpers.h"
@@ -281,7 +281,7 @@ HRESULT WalkFrames(ICorDebugThread *pThread, const WalkFramesCallback &cb)
         }
 
         ToRelease<ICorDebugValue> trExceptionValue;
-        IfFailRet(DereferenceAndUnboxValue(trExceptionValueRef, &trExceptionValue));
+        IfFailRet(EvalValueHelpers::DereferenceAndUnboxValue(trExceptionValueRef, &trExceptionValue));
         ToRelease<ICorDebugExceptionObjectValue> trExceptionObjectValue;
         IfFailRet(trExceptionValue->QueryInterface(IID_ICorDebugExceptionObjectValue, reinterpret_cast<void **>(&trExceptionObjectValue)));
         ToRelease<ICorDebugExceptionObjectCallStackEnum> trExceptionObjectCallStackEnum;
@@ -563,7 +563,7 @@ HRESULT GetFrameAt(ICorDebugThread *pThread, FrameLevel level, ICorDebugFrame **
 
         ToRelease<ICorDebugValue> trExceptionValue;
         ToRelease<ICorDebugExceptionObjectValue> trExceptionObjectValue;
-        if (FAILED(DereferenceAndUnboxValue(trExceptionValueRef, &trExceptionValue)) ||
+        if (FAILED(EvalValueHelpers::DereferenceAndUnboxValue(trExceptionValueRef, &trExceptionValue)) ||
             FAILED(trExceptionValue->QueryInterface(IID_ICorDebugExceptionObjectValue, reinterpret_cast<void **>(&trExceptionObjectValue))))
         {
             return false;

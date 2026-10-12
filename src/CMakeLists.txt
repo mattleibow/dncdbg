@@ -37,9 +37,12 @@ set(DNCDBG_SOURCES
     debugger/evaluation/evalhelpers/evalexec.cpp
     debugger/evaluation/evalhelpers/evalresolver.cpp
     debugger/evaluation/evalhelpers/evalwaiter.cpp
+    debugger/evaluation/evalhelpers/formatspecifier.cpp
     debugger/evaluation/evalhelpers/metadata.cpp
     debugger/evaluation/evalhelpers/systemtypes.cpp
+    debugger/evaluation/evalhelpers/textwitheval.cpp
     debugger/evaluation/evalhelpers/typeproxy.cpp
+    debugger/evaluation/evalhelpers/value.cpp
     debugger/evaluation/primitivetypes/binaryoperators.cpp
     debugger/evaluation/primitivetypes/cast.cpp
     debugger/evaluation/primitivetypes/types.cpp
@@ -55,7 +58,6 @@ set(DNCDBG_SOURCES
     debugger/steppers/stepper_simple.cpp
     debugger/steppers/steppers.cpp
     debugger/callbacksqueue.cpp
-    debugger/evalhelpers.cpp
     debugger/evalstackmachine.cpp
     debugger/frames.cpp
     debugger/goto.cpp

@@ -5,11 +5,11 @@
 
 #include "debugger/evaluation/walkers/walkers.h"
 #include "config/config.h"
-#include "debugger/evalhelpers.h"
 #include "debugger/evaluation/evalhelpers/evalexec.h"
 #include "debugger/evaluation/evalhelpers/metadata.h"
 #include "debugger/evaluation/evalhelpers/systemtypes.h"
 #include "debugger/evaluation/evalhelpers/typeproxy.h"
+#include "debugger/evaluation/evalhelpers/value.h"
 #include "debugger/evaluation/primitivetypes/types.h"
 #include "debugger/frames.h"
 #include "metadata/attributes.h"
@@ -260,7 +260,7 @@ HRESULT WalkMembers(ICorDebugValue *pInputValue, ICorDebugThread *pThread, Frame
                     bool provideSetterData, FormatSpecifier specifier, const WalkMembersCallback &cb)
 {
     // Same behavior as MS vsdbg and the MSVS C# debugger: don't show enumeration members.
-    if (IsEnumeration(pInputValue))
+    if (EvalValueHelpers::IsEnumeration(pInputValue))
     {
         return S_OK;
     }
@@ -314,7 +314,7 @@ HRESULT WalkMembers(ICorDebugValue *pInputValue, ICorDebugThread *pThread, Frame
     {
         BOOL isNull = FALSE;
         ToRelease<ICorDebugValue> trValue;
-        IfFailRet(DereferenceAndUnboxValue(pFrontValue, &trValue, &isNull));
+        IfFailRet(EvalValueHelpers::DereferenceAndUnboxValue(pFrontValue, &trValue, &isNull));
         if (trValue == nullptr)
         {
             return isNull == TRUE ? S_OK : E_FAIL;
@@ -404,7 +404,7 @@ HRESULT WalkMembers(ICorDebugValue *pInputValue, ICorDebugThread *pThread, Frame
             {
                 ToRelease<ICorDebugValue> trValueValue;
                 bool hasValue = false;
-                IfFailRet(GetNullableValue(trValue, &trValueValue, hasValue));
+                IfFailRet(EvalValueHelpers::GetNullableValue(trValue, &trValueValue, hasValue));
 
                 if (walkContainer)
                 {
@@ -609,7 +609,7 @@ HRESULT WalkMembers(ICorDebugValue *pInputValue, ICorDebugThread *pThread, Frame
                         {
                             // Re-acquire trValue from pFrontValue, since it could be neutered by an eval call in `cb` on a previous iteration.
                             trValue.Free();
-                            IfFailRet(DereferenceAndUnboxValue(pFrontValue, &trValue, &isNull));
+                            IfFailRet(EvalValueHelpers::DereferenceAndUnboxValue(pFrontValue, &trValue, &isNull));
                             ToRelease<ICorDebugObjectValue> trObjValue;
                             IfFailRet(trValue->QueryInterface(IID_ICorDebugObjectValue, reinterpret_cast<void **>(&trObjValue)));
                             IfFailRet(trObjValue->GetFieldValue(trClass, fieldDef, ppResultValue));
@@ -824,7 +824,7 @@ HRESULT WalkStaticMembers(ICorDebugType *pInputType, ICorDebugThread *pThread, F
     }
 
     // Same behavior as MS vsdbg and the MSVS C# debugger: don't show enumeration members.
-    if (IsEnumeration(pInputType))
+    if (EvalValueHelpers::IsEnumeration(pInputType))
     {
         return S_OK;
     }
@@ -853,7 +853,7 @@ HRESULT WalkStaticMembers(ICorDebugType *pInputType, ICorDebugThread *pThread, F
 
         BOOL isNull = FALSE;
         ToRelease<ICorDebugValue> trDerefValue;
-        if (FAILED(DereferenceAndUnboxValue(pValue, &trDerefValue, &isNull)) ||
+        if (FAILED(EvalValueHelpers::DereferenceAndUnboxValue(pValue, &trDerefValue, &isNull)) ||
             trDerefValue == nullptr || isNull == TRUE)
         {
             return; // Nothing to unwrap.

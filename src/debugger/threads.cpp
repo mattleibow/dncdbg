@@ -5,7 +5,7 @@
 
 #include "debugger/threads.h"
 #include "debugger/breakpoints/breakpoints.h"
-#include "debugger/evalhelpers.h"
+#include "debugger/evaluation/evalhelpers/value.h"
 #include "debugger/evaluation/walkers/walkers.h"
 #include "debugger/valueprint.h"
 #include "utils/hresult.h"
@@ -51,7 +51,7 @@ std::string GetThreadName(ICorDebugThread *pThread)
 
             BOOL isNull = TRUE;
             ToRelease<ICorDebugValue> trValue;
-            IfFailRet(DereferenceAndUnboxValue(trResultValue, &trValue, &isNull));
+            IfFailRet(EvalValueHelpers::DereferenceAndUnboxValue(trResultValue, &trValue, &isNull));
             if (isNull == FALSE)
             {
                 IfFailRet(PrintStringValue(trValue, threadName));

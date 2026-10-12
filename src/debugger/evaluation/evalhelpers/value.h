@@ -3,8 +3,8 @@
 // Distributed under the MIT License.
 // See the LICENSE file in the project root for more information.
 
-#ifndef DEBUGGER_EVALHELPERS_H
-#define DEBUGGER_EVALHELPERS_H
+#ifndef DEBUGGER_EVALUATION_EVALHELPERS_VALUE_H
+#define DEBUGGER_EVALUATION_EVALHELPERS_VALUE_H
 
 #include <cor.h>
 #include <cordebug.h>
@@ -13,30 +13,26 @@
 #endif
 
 #include "types/types.h"
-#include "utils/utf.h"
-#include <string>
-#include <type_traits>
 #include <vector>
 
-namespace dncdbg
+namespace dncdbg::EvalValueHelpers
 {
 
+// From strike.cpp
 HRESULT DereferenceAndUnboxValue(ICorDebugValue *pValue, ICorDebugValue **ppOutputValue, BOOL *pIsNull = nullptr);
+
 HRESULT GetNullableValue(ICorDebugValue *pValue, ICorDebugValue **ppValueValue, ICorDebugValue **ppHasValueValue);
 HRESULT GetNullableValue(ICorDebugValue *pValue, ICorDebugValue **ppValueValue, bool &hasValue);
+
 HRESULT GetDictionaryItemValue(ICorDebugThread *pThread, ICorDebugValue *pValue,
                                FormatSpecifier specifier, ICorDebugValue **ppItemValue);
-void ParseFormatSpecifier(const std::string &expressionWithFormat, std::string &expression, FormatSpecifier &specifier);
-HRESULT FindFunctionInModule(ICorDebugThread *pThread, const std::string &moduleFileName, const WSTRING &typeName,
-                             const WSTRING &methodName, ICorDebugFunction **ppFunction);
-void CreateTextWithEvalParts(const std::string &textWithEval, std::vector<std::pair<std::string, bool>> &textWithEvalParts);
-void BuildTextWithEval(ICorDebugThread *pThread, ICorDebugValue *pForcedThisValue,
-                       const std::vector<std::pair<std::string, bool>> &textWithEvalParts, std::string &output);
+
 HRESULT GetArrayElement(ICorDebugValue *pInputValue, std::vector<uint32_t> &indexes, ICorDebugValue **ppResultValue);
+
 // Check whether the base type is System.Enum.
 bool IsEnumeration(ICorDebugType *pInputType);
 bool IsEnumeration(ICorDebugValue *pInputValue);
 
-} // namespace dncdbg
+} // namespace dncdbg::EvalValueHelpers
 
-#endif // DEBUGGER_EVALHELPERS_H
+#endif // DEBUGGER_EVALUATION_EVALHELPERS_VALUE_H

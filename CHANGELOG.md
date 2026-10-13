@@ -7,6 +7,9 @@ Upcoming changes compared to the previous version.
 #### Added
 - Added TestStartAt0 and TestMemoryReferences.
 
+#### Changed
+- Split evalhelpers.h/.cpp into dedicated `evaluation/evalhelpers` modules (`formatspecifier`, `metadata`, `textwitheval` and `value` sources).
+
 <br>
 <br>
 

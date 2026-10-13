@@ -4,7 +4,7 @@
 
 #include "debugger/evaluation/evalhelpers/textwitheval.h"
 #include "debugger/evaluation/evalhelpers/formatspecifier.h"
-#include "debugger/evalstackmachine.h"
+#include "debugger/evaluation/stackmachine/stackmachine.h"
 #include "debugger/valueprint.h"
 #include "utils/torelease.h"
 

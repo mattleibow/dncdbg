@@ -5,7 +5,7 @@
 
 #include "debugger/breakpoints/internal_helpers.h"
 #include "config/config.h"
-#include "debugger/evalstackmachine.h"
+#include "debugger/evaluation/stackmachine/stackmachine.h"
 #include "debugger/valueprint.h"
 #include "metadata/attributes.h"
 #include "metadata/helpers.h"

@@ -709,6 +709,30 @@ HRESULT CreateArray(ICorDebugThread *pThread, ICorDebugType *pElementType,
     return S_OK;
 }
 
+HRESULT CreateBooleanValue(ICorDebugThread *pThread, ICorDebugValue **ppValue, bool setToTrue)
+{
+    HRESULT Status = S_OK;
+    ToRelease<ICorDebugEval> trEval;
+    IfFailRet(pThread->CreateEval(&trEval));
+    IfFailRet(trEval->CreateValue(ELEMENT_TYPE_BOOLEAN, nullptr, ppValue));
+
+    if (!setToTrue)
+    {
+        return S_OK;
+    }
+
+#ifdef DEBUG_INTERNAL_TESTS
+    uint32_t cbSize = 0;
+    IfFailRet((*ppValue)->GetSize(&cbSize));
+    assert(cbSize == 1);
+#endif // DEBUG_INTERNAL_TESTS
+    uint8_t boolValue = 1; // TRUE
+
+    ToRelease<ICorDebugGenericValue> trGenValue;
+    IfFailRet((*ppValue)->QueryInterface(IID_ICorDebugGenericValue, reinterpret_cast<void **>(&trGenValue)));
+    return trGenValue->SetValue(static_cast<void *>(&boolValue));
+}
+
 HRESULT CreateLiteralFieldValue(ICorDebugThread *pThread, PCCOR_SIGNATURE pSig, PCCOR_SIGNATURE pSigEnd, UVCP_CONSTANT pRawValue,
                                 ULONG rawValueLength, ICorDebugValue **ppLiteralValue, std::string &realDisplayTypeName)
 {
@@ -783,6 +807,18 @@ HRESULT CreateLiteralLocalValue(ICorDebugThread *pThread, PCCOR_SIGNATURE pSig, 
 
     return CreateLiteralValueImpl(pThread, pSig, pSigEnd, underlyingType, pRawValue, rawValueLength,
                                   ppLiteralValue, realDisplayTypeName, true);
+}
+
+HRESULT CreateNullValue(ICorDebugThread *pThread, ICorDebugValue **ppValue)
+{
+    HRESULT Status = S_OK;
+    ToRelease<ICorDebugEval> trEval;
+    IfFailRet(pThread->CreateEval(&trEval));
+    // ICorDebugEval::CreateValue
+    // If the value of elementType is ELEMENT_TYPE_CLASS, you get an "ICorDebugReferenceValue" (returned in ppValue)
+    // representing the null object reference. You can use this object to pass null to a function evaluation that has
+    // object reference parameters. You cannot set the ICorDebugValue to anything; it always remains null.
+    return trEval->CreateValue(ELEMENT_TYPE_CLASS, nullptr, ppValue);
 }
 
 // Creates a default (zero-initialized) value for the given signature element type.

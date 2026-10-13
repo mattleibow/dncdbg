@@ -3,8 +3,8 @@
 // Distributed under the MIT License.
 // See the LICENSE file in the project root for more information.
 
-#ifndef DEBUGGER_EVALSTACKMACHINE_H
-#define DEBUGGER_EVALSTACKMACHINE_H
+#ifndef DEBUGGER_EVALUATION_STACKMACHINE_STACKMACHINE_H
+#define DEBUGGER_EVALUATION_STACKMACHINE_STACKMACHINE_H
 
 #include <cor.h>
 #include <cordebug.h>
@@ -31,4 +31,4 @@ HRESULT SetValueByExpression(ICorDebugThread *pThread, FrameLevel frameLevel, IC
 
 } // namespace dncdbg::EvalStackMachine
 
-#endif // DEBUGGER_EVALSTACKMACHINE_H
+#endif // DEBUGGER_EVALUATION_STACKMACHINE_STACKMACHINE_H

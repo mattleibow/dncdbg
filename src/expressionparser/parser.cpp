@@ -200,7 +200,7 @@ HRESULT GenerateExecutionSteps(TSNode rootNode, const std::string &source, std::
     {"alias_qualified_name",
         [](TSNode /*node*/, const std::string &/*source*/, std::list<Opcode> &/*program*/, std::string &output, std::stack<WorkItem> &/*workStack*/) -> HRESULT
         {
-            // TODO implement in evalstackmachine.cpp before uncommenting this code
+            // TODO implement in evaluation/stackmachine before uncommenting this code
 
             // TSNode alias = ts_node_named_child(node, 0);
             // TSNode name = ts_node_named_child(node, 1);
@@ -311,7 +311,7 @@ HRESULT GenerateExecutionSteps(TSNode rootNode, const std::string &source, std::
             const std::string_view opText = GetNodeText(op, source);
             if (opText == "->")
             {
-                // TODO implement in evalstackmachine.cpp before uncommenting this code
+                // TODO implement in evaluation/stackmachine before uncommenting this code
                 // workStack.emplace(EmitAction{[](std::list<Opcode> &prog, std::string &/*out*/) -> HRESULT
                 // {
                 //     prog.emplace_back(SyntaxKind::PointerMemberAccessExpression);
@@ -525,14 +525,14 @@ HRESULT GenerateExecutionSteps(TSNode rootNode, const std::string &source, std::
             }
             else if (op == "++")
             {
-                // TODO implement in evalstackmachine.cpp before uncommenting this code
+                // TODO implement in evaluation/stackmachine before uncommenting this code
                 // kind = SyntaxKind::PreIncrementExpression;
                 output = "Pre-increment expression not implemented.";
                 return E_NOTIMPL;
             }
             else if (op == "--")
             {
-                // TODO implement in evalstackmachine.cpp before uncommenting this code
+                // TODO implement in evaluation/stackmachine before uncommenting this code
                 // kind = SyntaxKind::PreDecrementExpression;
                 output = "Pre-decrement expression not implemented.";
                 return E_NOTIMPL;
@@ -558,7 +558,7 @@ HRESULT GenerateExecutionSteps(TSNode rootNode, const std::string &source, std::
     {"postfix_unary_expression",
         [](TSNode node, const std::string &source, std::list<Opcode> &/*program*/, std::string &output, std::stack<WorkItem> &/*workStack*/) -> HRESULT
         {
-            // TODO implement in evalstackmachine.cpp before uncommenting this code
+            // TODO implement in evaluation/stackmachine before uncommenting this code
 
             // const TSNode operand = ts_node_named_child(node, 0);
             const std::string op = std::string(GetNodeText(ts_node_child(node, 1), source));
@@ -597,7 +597,7 @@ HRESULT GenerateExecutionSteps(TSNode rootNode, const std::string &source, std::
     {"cast_expression",
         [](TSNode /*node*/, const std::string &/*source*/, std::list<Opcode> &/*program*/, std::string &output, std::stack<WorkItem> &/*workStack*/) -> HRESULT
         {
-            // TODO implement in evalstackmachine.cpp before uncommenting this code
+            // TODO implement in evaluation/stackmachine before uncommenting this code
 
             // In Tree-sitter C#, cast_expression structure:
             // child 0: "("
@@ -624,7 +624,7 @@ HRESULT GenerateExecutionSteps(TSNode rootNode, const std::string &source, std::
     {"as_expression",
         [](TSNode /*node*/, const std::string &/*source*/, std::list<Opcode> &/*program*/, std::string &output, std::stack<WorkItem> &/*workStack*/) -> HRESULT
         {
-            // TODO implement in evalstackmachine.cpp before uncommenting this code
+            // TODO implement in evaluation/stackmachine before uncommenting this code
 
             // child 0: left expression node (can be anonymous)
             // child 1: "as" keyword
@@ -649,7 +649,7 @@ HRESULT GenerateExecutionSteps(TSNode rootNode, const std::string &source, std::
     {"is_expression",
         [](TSNode /*node*/, const std::string &/*source*/, std::list<Opcode> &/*program*/, std::string &output, std::stack<WorkItem> &/*workStack*/) -> HRESULT
         {
-            // TODO implement in evalstackmachine.cpp before uncommenting this code
+            // TODO implement in evaluation/stackmachine before uncommenting this code
 
             // child 0: left expression node (can be anonymous)
             // child 1: "is" keyword
@@ -690,7 +690,7 @@ HRESULT GenerateExecutionSteps(TSNode rootNode, const std::string &source, std::
     {"typeof_expression",
         [](TSNode /*node*/, const std::string &/*source*/, std::list<Opcode> &/*program*/, std::string &output, std::stack<WorkItem> &/*workStack*/) -> HRESULT
         {
-            // TODO implement in evalstackmachine.cpp before uncommenting this code
+            // TODO implement in evaluation/stackmachine before uncommenting this code
 
             // child 0: "typeof", child 1: "(", child 2: type node, child 3: ")"
             // const TSNode typeNode = ts_node_child(node, 2);
@@ -711,7 +711,7 @@ HRESULT GenerateExecutionSteps(TSNode rootNode, const std::string &source, std::
     {"conditional_expression",
         [](TSNode /*node*/, const std::string &/*source*/, std::list<Opcode> &/*program*/, std::string &output, std::stack<WorkItem> &/*workStack*/) -> HRESULT
         {
-            // TODO implement in evalstackmachine.cpp before uncommenting this code
+            // TODO implement in evaluation/stackmachine before uncommenting this code
 
             // In Tree-sitter C#, a conditional expression has exactly 5 children:
             // index 0: condition node
@@ -753,7 +753,7 @@ HRESULT GenerateExecutionSteps(TSNode rootNode, const std::string &source, std::
     {"checked_expression",
         [](TSNode /*node*/, const std::string &/*source*/, std::list<Opcode> &/*program*/, std::string &output, std::stack<WorkItem> &/*workStack*/) -> HRESULT
         {
-            // TODO implement in evalstackmachine.cpp before uncommenting this code
+            // TODO implement in evaluation/stackmachine before uncommenting this code
 
             // In Tree-sitter C#, checked_expression has exactly 4 children:
             // child 0: "checked" or "unchecked" keyword token

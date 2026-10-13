@@ -47,6 +47,14 @@ set(DNCDBG_SOURCES
     debugger/evaluation/primitivetypes/cast.cpp
     debugger/evaluation/primitivetypes/types.cpp
     debugger/evaluation/primitivetypes/unaryoperators.cpp
+    debugger/evaluation/stackmachine/handler_elementaccess.cpp
+    debugger/evaluation/stackmachine/handler_invocation.cpp
+    debugger/evaluation/stackmachine/handler_literals.cpp
+    debugger/evaluation/stackmachine/handler_names.cpp
+    debugger/evaluation/stackmachine/handler_operators.cpp
+    debugger/evaluation/stackmachine/internal_helpers.cpp
+    debugger/evaluation/stackmachine/run.cpp
+    debugger/evaluation/stackmachine/stackmachine.cpp
     debugger/evaluation/walkers/walker_extensionmethods.cpp
     debugger/evaluation/walkers/walker_generatedclassfields.cpp
     debugger/evaluation/walkers/walker_indexers.cpp
@@ -58,7 +66,6 @@ set(DNCDBG_SOURCES
     debugger/steppers/stepper_simple.cpp
     debugger/steppers/steppers.cpp
     debugger/callbacksqueue.cpp
-    debugger/evalstackmachine.cpp
     debugger/frames.cpp
     debugger/goto.cpp
     debugger/managedcallback.cpp

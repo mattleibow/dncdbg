@@ -37,11 +37,15 @@ HRESULT CallStaticConstructor(ICorDebugThread *pThread, ICorDebugType *pType, Fo
 HRESULT CreateArray(ICorDebugThread *pThread, ICorDebugType *pElementType,
                     std::vector<uint32_t> &dimensions, ICorDebugValue **ppEvalResult);
 
+HRESULT CreateBooleanValue(ICorDebugThread *pThread, ICorDebugValue **ppValue, bool setToTrue);
+
 HRESULT CreateLiteralFieldValue(ICorDebugThread *pThread, PCCOR_SIGNATURE pSig, PCCOR_SIGNATURE pSigEnd, UVCP_CONSTANT pRawValue,
                                 ULONG rawValueLength, ICorDebugValue **ppLiteralValue, std::string &realDisplayTypeName);
 
 HRESULT CreateLiteralLocalValue(ICorDebugThread *pThread, PCCOR_SIGNATURE pSig, PCCOR_SIGNATURE pSigEnd,
                                 ICorDebugValue **ppLiteralValue, std::string &realDisplayTypeName);
+
+HRESULT CreateNullValue(ICorDebugThread *pThread, ICorDebugValue **ppValue);
 
 HRESULT CreateStaticFieldDefaultValue(ICorDebugThread *pThread, const SigElementType &sigElementType,
                                       ICorDebugValue **ppResultValue, std::string &realDisplayTypeName);

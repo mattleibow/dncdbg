@@ -10,7 +10,7 @@
 #include "debugger/evaluation/evalhelpers/textwitheval.h"
 #include "debugger/evaluation/evalhelpers/value.h"
 #include "debugger/evaluation/walkers/walkers.h"
-#include "debugger/evalstackmachine.h"
+#include "debugger/evaluation/stackmachine/stackmachine.h"
 #include "debugger/valueprint.h"
 #include "types/types.h"
 #include "metadata/helpers.h"

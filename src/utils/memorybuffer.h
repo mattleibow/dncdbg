@@ -51,6 +51,13 @@ class MemoryBuffer
     // Returns true on success, false on failure.
     bool Open(const std::string &filePath);
 
+    // Releases the mapped memory back to the operating system by dropping the
+    // mapped pages, while keeping the buffer open. Data is re-read from the
+    // file on the next access.
+    // Note: on Windows the mapped view is recreated, so Data() may return a
+    // different pointer; always re-query Data() after calling this method.
+    void Flush();
+
     // Returns a pointer to the mapped file data, or nullptr if not opened.
     [[nodiscard]] const void *Data() const
     {

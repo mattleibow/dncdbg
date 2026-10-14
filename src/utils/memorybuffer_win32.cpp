@@ -73,6 +73,35 @@ bool MemoryBuffer::Open(const std::string &filePath)
     return true;
 }
 
+void MemoryBuffer::Flush()
+{
+    if (m_mappedData == nullptr)
+    {
+        return;
+    }
+
+    // Windows has no per-view equivalent of madvise(MADV_DONTNEED),
+    // so the view is recreated to release its pages back to the system.
+    if (!UnmapViewOfFile(m_mappedData))
+    {
+        LOGE(log << "Failed to unmap view of file");
+        return;
+    }
+
+    m_mappedData = MapViewOfFile(m_mappingHandle, FILE_MAP_READ, 0, 0, 0);
+    if (m_mappedData == nullptr)
+    {
+        // Release all resources so the object returns to a closed state and can be reopened.
+        m_fileSize = 0;
+        CloseHandle(m_mappingHandle);
+        m_mappingHandle = nullptr;
+        CloseHandle(m_fileHandle);
+        m_fileHandle = INVALID_HANDLE_VALUE;
+        LOGE(log << "Failed to map view of file");
+        return;
+    }
+}
+
 MemoryBuffer::~MemoryBuffer()
 {
     if (m_mappedData != nullptr)

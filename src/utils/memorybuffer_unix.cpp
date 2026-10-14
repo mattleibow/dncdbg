@@ -65,6 +65,21 @@ bool MemoryBuffer::Open(const std::string &filePath)
     return true;
 }
 
+void MemoryBuffer::Flush()
+{
+    if (m_mappedData == nullptr)
+    {
+        return;
+    }
+
+    // Drop the mapped pages, returning the memory to the kernel.
+    // The pages are re-read from the file on the next access.
+    if (madvise(m_mappedData, m_fileSize, MADV_DONTNEED) == -1)
+    {
+        LOGE(log << "Failed to release mapped memory back to the kernel");
+    }
+}
+
 MemoryBuffer::~MemoryBuffer()
 {
     if (m_mappedData != nullptr)

@@ -6,6 +6,7 @@
 #include "utils/logger.h"
 #include <charconv>
 #include <cstdlib>
+#include <limits>
 #include <optional>
 #include <string_view>
 #include <unordered_map>
@@ -34,6 +35,9 @@ constexpr std::string_view terminationTimeoutName = "DNCDBG_TERMINATION_TIMEOUT"
 constexpr uint32_t defaultTerminationTimeoutMs = 3000;
 constexpr std::string_view rootHiddenWalkLimitName = "DNCDBG_ROOTHIDDEN_WALK_LIMIT";
 constexpr uint32_t defaultRootHiddenWalkLimit = 32;
+constexpr std::string_view pdbMmapPolicyName = "DNCDBG_PDB_MMAP_POLICY";
+constexpr uint32_t defaultPdbMmapPolicy = pdbMmapFlushAfterInit;
+constexpr uint32_t maxAllowedPdbMmapPolicy = pdbMmapFlushAfterInit;
 
 // Parses a numeric environment variable value; returns std::nullopt if the value is not a valid number.
 std::optional<uint32_t> ParseEnvNumber(std::string_view envVal)
@@ -54,11 +58,19 @@ struct SessionValue
     uint32_t current;
     uint32_t initial;
 
-    void SetFromEnv(std::string_view envVal, std::string_view envName, uint32_t defaultValue)
+    void SetFromEnv(std::string_view envVal, std::string_view envName, uint32_t defaultValue, uint32_t maxAllowed)
     {
         if (const auto parsed = ParseEnvNumber(envVal); parsed.has_value())
         {
-            current = *parsed;
+            if (*parsed <= maxAllowed)
+            {
+                current = *parsed;
+            }
+            else
+            {
+                LOGE(log << "Environment variable " << envName << " exceeds the maximum allowed value, using the default value.");
+                current = defaultValue;
+            }
         }
         else
         {
@@ -68,11 +80,13 @@ struct SessionValue
     }
 };
 
-// Associates an environment variable name with its state and the default value used when parsing fails.
+// Associates an environment variable name with its state, the default value used when parsing fails
+// or the parsed value exceeds the maximum allowed value, and the maximum allowed value.
 struct EnvSetting
 {
     SessionValue *state;
     uint32_t defaultValue;
+    uint32_t maxAllowedValue;
 };
 
 SessionValue &GetStackTraceLimitState()
@@ -129,19 +143,27 @@ SessionValue &GetRootHiddenWalkLimitState()
     return rootHiddenWalkLimitState;
 }
 
-// Maps environment variable names to their state and the default value used when parsing fails.
+SessionValue &GetPdbMmapPolicyState()
+{
+    static SessionValue pdbMmapPolicyState{defaultPdbMmapPolicy, defaultPdbMmapPolicy};
+    return pdbMmapPolicyState;
+}
+
+// Maps environment variable names to their state, the default value used when parsing fails
+// or the parsed value exceeds the maximum allowed value, and the maximum allowed value.
 const std::unordered_map<std::string_view, EnvSetting> &GetEnvSettings()
 {
     static const std::unordered_map<std::string_view, EnvSetting> envSettings{
-        {stackTraceLimitName, {&GetStackTraceLimitState(), defaultStackTraceLimit}},
-        {dapRequestTimeoutName, {&GetDapRequestTimeoutState(), defaultDapRequestTimeoutMs}},
-        {normalEvalTimeoutName, {&GetNormalEvalTimeoutState(), defaultNormalEvalTimeoutMs}},
-        {abortEvalTimeoutName, {&GetAbortEvalTimeoutState(), defaultAbortEvalTimeoutMs}},
-        {httpRequestTimeoutName, {&GetHttpRequestTimeoutState(), defaultHttpRequestTimeoutMs}},
-        {membersPerPageLimitName, {&GetMembersPerPageLimitState(), defaultMembersPerPageLimit}},
-        {startupTimeoutName, {&GetStartupTimeoutState(), defaultStartupTimeoutMs}},
-        {terminationTimeoutName, {&GetTerminationTimeoutState(), defaultTerminationTimeoutMs}},
-        {rootHiddenWalkLimitName, {&GetRootHiddenWalkLimitState(), defaultRootHiddenWalkLimit}},
+        {stackTraceLimitName, {&GetStackTraceLimitState(), defaultStackTraceLimit, std::numeric_limits<uint32_t>::max()}},
+        {dapRequestTimeoutName, {&GetDapRequestTimeoutState(), defaultDapRequestTimeoutMs, std::numeric_limits<uint32_t>::max()}},
+        {normalEvalTimeoutName, {&GetNormalEvalTimeoutState(), defaultNormalEvalTimeoutMs, std::numeric_limits<uint32_t>::max()}},
+        {abortEvalTimeoutName, {&GetAbortEvalTimeoutState(), defaultAbortEvalTimeoutMs, std::numeric_limits<uint32_t>::max()}},
+        {httpRequestTimeoutName, {&GetHttpRequestTimeoutState(), defaultHttpRequestTimeoutMs, std::numeric_limits<uint32_t>::max()}},
+        {membersPerPageLimitName, {&GetMembersPerPageLimitState(), defaultMembersPerPageLimit, std::numeric_limits<uint32_t>::max()}},
+        {startupTimeoutName, {&GetStartupTimeoutState(), defaultStartupTimeoutMs, std::numeric_limits<uint32_t>::max()}},
+        {terminationTimeoutName, {&GetTerminationTimeoutState(), defaultTerminationTimeoutMs, std::numeric_limits<uint32_t>::max()}},
+        {rootHiddenWalkLimitName, {&GetRootHiddenWalkLimitState(), defaultRootHiddenWalkLimit, std::numeric_limits<uint32_t>::max()}},
+        {pdbMmapPolicyName, {&GetPdbMmapPolicyState(), defaultPdbMmapPolicy, maxAllowedPdbMmapPolicy}},
     };
     return envSettings;
 }
@@ -211,7 +233,7 @@ void Initialize()
     {
         if (const char *envVal = std::getenv(envName.data())) // NOLINT(bugprone-suspicious-stringview-data-usage)
         {
-            envSetting.state->SetFromEnv(envVal, envName, envSetting.defaultValue);
+            envSetting.state->SetFromEnv(envVal, envName, envSetting.defaultValue, envSetting.maxAllowedValue);
         }
         envSetting.state->initial = envSetting.state->current;
     }
@@ -236,7 +258,8 @@ void Initialize(const std::map<std::string, std::string> &env)
             continue;
         }
 
-        findSetting->second.state->SetFromEnv(envVal, findSetting->first, findSetting->second.defaultValue);
+        findSetting->second.state->SetFromEnv(envVal, findSetting->first, findSetting->second.defaultValue,
+                                              findSetting->second.maxAllowedValue);
     }
 }
 
@@ -283,6 +306,11 @@ uint32_t GetTerminationTimeoutMs()
 uint32_t GetRootHiddenWalkLimit()
 {
     return GetRootHiddenWalkLimitState().current;
+}
+
+uint32_t GetPdbMmapPolicy()
+{
+    return GetPdbMmapPolicyState().current;
 }
 
 bool IsRunningViaVsDbgUI()

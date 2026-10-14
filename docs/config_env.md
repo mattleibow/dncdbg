@@ -13,3 +13,4 @@ These environment variables can be set in the DNCDbg process environment before 
 | `DNCDBG_STARTUP_TIMEOUT` | timeout for executing a process launch or attach, in milliseconds (range 0 - 4294967295); defaults to 5000 ms (5 seconds) |
 | `DNCDBG_TERMINATION_TIMEOUT` | timeout for terminating a process, in milliseconds (range 0 - 4294967295); defaults to 3000 ms (3 seconds) |
 | `DNCDBG_ROOTHIDDEN_WALK_LIMIT` | maximum number of members marked with DebuggerBrowsableState.RootHidden that are unwrapped in a single walk (range 0 - 4294967295); zero disables unwrapping; defaults to 32 |
+| `DNCDBG_PDB_MMAP_POLICY` | policy for flushing memory-mapped PDB data after module symbol initialization (range 0 - 1); zero disables flushing; defaults to 1 |

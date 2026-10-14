@@ -4,6 +4,7 @@
 // See the LICENSE file in the project root for more information.
 
 #include "debuginfo/debuginfo.h"
+#include "config/config.h"
 #include "debuginfo/asyncinfo.h"
 #include "debuginfo/debugsources.h"
 #include "debuginfo/pdbreader.h"
@@ -738,6 +739,28 @@ void TryLoadModuleSymbols(ICorDebugModule *pModule, Module &module)
     PDBReader::GetStateMachineMethods(pdbHandle, moveNextToKickoff, kickoffToMoveNext);
 
     std::vector<Source> newSources = SourceReference::LoadModule(pdbHandle, modAddress);
+
+    // Release memory-mapped PDB pages once module symbol initialization reads are done, per the
+    // configured policy, so the pages are re-read from the backing file on demand instead of
+    // staying resident. The metadata handle references memory inside the mapped view, and Flush()
+    // may change the address of the mapped data (the Windows implementation recreates the mapped
+    // view), so re-create the handle if the mapped data location has changed.
+    if (Config::GetPdbMmapPolicy() == Config::pdbMmapFlushAfterInit)
+    {
+        const void *mappedDataBeforeFlush = memBuff.Data();
+        memBuff.Flush();
+        if (memBuff.Data() != mappedDataBeforeFlush)
+        {
+            md_destroy_handle(pdbHandle);
+            pdbHandle = nullptr;
+            if (!md_create_handle(memBuff.Data(), static_cast<uint32_t>(memBuff.Size()), &pdbHandle))
+            {
+                DAP::EmitOutputEvent({OutputCategory::StdErr,
+                    "Could not re-create the PDB handle after flushing memory-mapped data.\n"});
+                return;
+            }
+        }
+    }
 
     pModule->AddRef();
     PDBInfo pdbInfo{pdbHandle, std::move(memBuff), std::move(embeddedPDB), pModule,

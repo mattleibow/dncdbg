@@ -36,6 +36,12 @@ uint32_t GetTerminationTimeoutMs();
 // Maximum number of members marked with DebuggerBrowsableState.RootHidden that are unwrapped in
 // a single walk, provided by the DNCDBG_ROOTHIDDEN_WALK_LIMIT environment variable. Zero disables unwrapping.
 uint32_t GetRootHiddenWalkLimit();
+// Memory-mapped PDB data flush policy, provided by the DNCDBG_PDB_MMAP_POLICY environment variable.
+// Zero (pdbMmapNeverFlush) disables flushing; one (pdbMmapFlushAfterInit) releases the mapped pages
+// once module symbol initialization reads are done, so they are re-read from the backing file on demand.
+constexpr uint32_t pdbMmapNeverFlush = 0;
+constexpr uint32_t pdbMmapFlushAfterInit = 1;
+uint32_t GetPdbMmapPolicy();
 
 // The debugger runs under the VS Code IDE, which passes the "--interpreter=vscode" command-line option.
 bool IsRunningViaVsDbgUI();

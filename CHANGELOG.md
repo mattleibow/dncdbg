@@ -6,6 +6,7 @@ Upcoming changes compared to the previous version.
 
 #### Added
 - Added TestStartAt0 and TestMemoryReferences.
+- Added debugger configuration environment variable `DNCDBG_PDB_MMAP_POLICY`.
 
 #### Changed
 - Split evalhelpers.h/.cpp into dedicated `evaluation/evalhelpers` modules (`formatspecifier`, `metadata`, `textwitheval` and `value` sources).

@@ -12,12 +12,6 @@
 #include <dnmd_pdb.h>
 #endif
 
-// Implementations for missing bounds checking APIs.
-// See https://en.cppreference.com/w/c/error#Bounds_checking
-#if !defined(__STDC_LIB_EXT1__) && !defined(BUILD_WINDOWS)
-typedef size_t rsize_t;
-#endif // !__STDC_LIB_EXT1__
-
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof(*a))
 
 // Safe arithmetic to prevent size_t overflow in allocations.
@@ -49,13 +43,6 @@ static inline bool safe_mul_size(size_t a, size_t b, size_t* result)
 #define ASSERT_ASSUME(x) (void)(x)
 #endif
 
-// Mutable data
-typedef struct mddata__
-{
-    uint8_t* ptr;
-    size_t size;
-} mddata_t;
-
 // Const data
 typedef struct mdcdata__
 {
@@ -66,8 +53,6 @@ typedef struct mdcdata__
 // II.24.2.6 - 64 is the maximum value
 #define MDTABLE_MAX_COUNT ((size_t)mdtid_End)
 static_assert(MDTABLE_MAX_COUNT <= 64, "Specification sets max table count to 64");
-
-#define MDTABLE_MAX_COLUMN_COUNT 9
 
 // Macros for computing token types.
 #define CreateTokenType(tk) (mdToken)(((uint32_t)tk << 24) & 0xff000000)
@@ -138,10 +123,6 @@ typedef enum
 #define InsertCodedIndex(s) ((s << 24) & mdtc_cimask)
 #define ExtractCodedIndex(s) ((s & mdtc_cimask) >> 24)
 
-// Macros used to insert/extract the heap type
-#define InsertHeapType(h) ((h) & mdtc_hmask)
-#define ExtractHeapType(h) ((h) & mdtc_hmask)
-
 // Forward declare.
 struct mdcxt__;
 
@@ -152,7 +133,6 @@ typedef struct mdtable__
     uint8_t row_size_bytes;
     uint8_t column_count;
     bool is_sorted : 1;
-    bool is_adding_new_row : 1;
     uint8_t table_id;
     struct mdcxt__* cxt; // Non-null is indication of complete initialization
     mdtcol_t* column_details;
@@ -160,15 +140,10 @@ typedef struct mdtable__
 
 typedef mdcdata_t mdstream_t;
 
-typedef struct mdmem__ mdmem_t;
-
-typedef struct mdeditor__ mdeditor_t;
-
 typedef struct mdcxt__
 {
     uint32_t magic; // mdlib magic
     mdcdata_t raw_metadata; // metadata raw bytes
-    mdeditor_t* editor; // metadata editor
     mdcxt_flag_t context_flags;
 
     // Metadata root details - II.24.2.1
@@ -190,51 +165,27 @@ typedef struct mdcxt__
     // Metadata tables - II.22
     mdtable_t* tables;
 
-    // Additional memory used for dynamic operations
-    mdmem_t* mem;
 } mdcxt_t;
 
 // Extract a context from the mdhandle_t.
 mdcxt_t* extract_mdcxt(mdhandle_t md);
 
-// Allocate and free tracked memory.
-void* alloc_mdmem(mdcxt_t* cxt, size_t length);
-void free_mdmem(mdcxt_t* cxt, void* mem);
-
-// Merge the supplied delta into the context.
-bool merge_in_delta(mdcxt_t* cxt, mdcxt_t* delta);
-
 //
 // Streams
 //
 
-mdstream_t* get_heap_by_id(mdcxt_t* cxt, mdtcol_t heap_id);
-mdcxt_flag_t get_large_heap_flag(mdtcol_t heap_id);
-
 // Strings heap, #Strings - II.24.2.3
 bool try_get_string(mdcxt_t* cxt, size_t offset, char const** str);
-bool validate_strings_heap(mdcxt_t* cxt);
-uint32_t add_to_string_heap(mdcxt_t* cxt, char const* str);
-
-// User strings heap, #US - II.24.2.4
-bool try_get_user_string(mdcxt_t* cxt, size_t offset, mduserstring_t* str, size_t* next_offset);
-bool validate_user_string_heap(mdcxt_t* cxt);
-uint32_t add_to_user_string_heap(mdcxt_t* cxt, char16_t const* str);
 
 // Blob heap, #Blob - II.24.2.4
 bool try_get_blob(mdcxt_t* cxt, size_t offset, uint8_t const** blob, uint32_t* blob_len);
-bool validate_blob_heap(mdcxt_t* cxt);
-uint32_t add_to_blob_heap(mdcxt_t* cxt, uint8_t const* data, uint32_t length);
 
 // GUID heap, #GUID - II.24.2.5
 bool try_get_guid(mdcxt_t* cxt, size_t idx, mdguid_t* guid);
-bool validate_guid_heap(mdcxt_t* cxt);
-uint32_t add_to_guid_heap(mdcxt_t* cxt, mdguid_t guid);
 
 // Table heap, #~ - II.24.2.6
 // Note: This can only be done after all streams have been read in.
 bool initialize_tables(mdcxt_t* cxt);
-bool validate_tables(mdcxt_t* cxt);
 
 // PDB heap, #Pdb - https://github.com/dotnet/runtime/blob/main/docs/design/specs/PortablePdb-Metadata.md#pdb-stream
 typedef struct md_pdb__
@@ -279,23 +230,10 @@ typedef enum
 } md_coded_idx_t;
 
 // Manipulators for coded indices - II.24.2.6
-bool compose_coded_index(mdToken tk, mdtcol_t col_details, uint32_t* coded_index);
 bool decompose_coded_index(uint32_t cidx, mdtcol_t col_details, mdtable_id_t* table_id, uint32_t* table_row);
-bool is_coded_index_target(mdtcol_t col_details, mdtable_id_t table);
 
 // Get the column count for a table.
 uint8_t get_table_column_count(mdtable_id_t id);
-
-// II.22 Metadata logical format tables
-// Sort key info for tables
-
-typedef struct md_key_info__
-{
-    uint8_t index;
-    bool descending;
-} md_key_info_t;
-
-uint8_t get_table_keys(mdtable_id_t id, md_key_info_t const** keys);
 
 // Initialize the supplied table details
 bool initialize_table_details(
@@ -308,13 +246,7 @@ bool initialize_table_details(
 // Given the current table, consume the data stream assuming it contains the rows
 bool consume_table_rows(mdtable_t* table, uint8_t const** data, size_t* data_len);
 
-// Get whether or not the column in the table points into an indirect table
-bool table_is_indirect_table(mdtable_id_t table_id);
-// Get the indirection table for a given table
-mdtable_id_t get_corresponding_indirection_table(mdtable_id_t table_id);
-
 // Cursor manipulation
-
 
 // Internal function used to create a cursor.
 // Limited validation is done for the arguments.
@@ -366,21 +298,10 @@ static uint8_t col_to_index(col_index_t col_idx, mdtable_t const* table)
     return (uint8_t)idx;
 }
 
-static col_index_t index_to_col(uint8_t idx, mdtable_id_t table_id)
-{
-#ifdef DEBUG_TABLE_COLUMN_LOOKUP
-    return (col_index_t)((table_id << 8) | idx);
-#else
-    (void)table_id;
-    return (col_index_t)idx;
-#endif
-}
 #ifdef __GNUC__
 #pragma GCC diagnostic pop
 #endif
 
-// Copy data from a cursor to one row to a cursor to another row.
-bool copy_cursor(mdcursor_t dest, mdcursor_t src);
 
 // Single column access
 typedef struct access_cxt__
@@ -388,33 +309,10 @@ typedef struct access_cxt__
     mdtable_t* table;
     mdtcol_t col_details;
     uint8_t const* data;
-    uint8_t* writable_data;
 } access_cxt_t;
 
-bool create_access_context(mdcursor_t* cursor, col_index_t col_idx, bool make_writable, access_cxt_t* rcxt);
-bool write_column_data(access_cxt_t* acxt, uint32_t data);
+bool create_access_context(mdcursor_t* cursor, col_index_t col_idx, access_cxt_t* acxt);
 bool read_column_data(access_cxt_t* acxt, uint32_t* data);
-
-// Raw bulk table access
-typedef struct bulk_access_cxt__
-{
-    mdtable_t* table;
-    mdtcol_t col_details;
-    uint8_t const* start;
-    uint8_t const* data;
-    uint8_t const* end;
-    size_t data_len;
-    uint32_t data_len_col;
-    uint32_t next_row_stride;
-} bulk_access_cxt_t;
-
-bool create_bulk_access_context(mdcursor_t* cursor, col_index_t col_idx, uint32_t row_count, bulk_access_cxt_t* acxt);
-bool read_column_data_and_advance(bulk_access_cxt_t* acxt, uint32_t* data);
-bool next_row(bulk_access_cxt_t* acxt);
-
-// Internal functions used to read/write columns with minimal validation.
-bool get_column_value_as_heap_offset(mdcursor_t c, col_index_t col_idx, uint32_t* offset);
-bool set_column_value_as_heap_offset(mdcursor_t c, col_index_t col_idx, uint32_t offset);
 
 //
 // Manipulation of bits
@@ -430,49 +328,16 @@ size_t count_set_bits(uint64_t val);
 bool advance_stream(uint8_t const** data, size_t* data_len, size_t b);
 
 bool read_u8(uint8_t const** data, size_t* data_len, uint8_t* o);
-bool read_i8(uint8_t const** data, size_t* data_len, int8_t* o);
 bool read_u16(uint8_t const** data, size_t* data_len, uint16_t* o);
-bool read_i16(uint8_t const** data, size_t* data_len, int16_t* o);
 bool read_u32(uint8_t const** data, size_t* data_len, uint32_t* o);
-bool read_i32(uint8_t const** data, size_t* data_len, int32_t* o);
 bool read_u64(uint8_t const** data, size_t* data_len, uint64_t* o);
-bool read_i64(uint8_t const** data, size_t* data_len, int64_t* o);
 
 bool advance_output_stream(uint8_t** data, size_t* data_len, size_t b);
 
 bool write_u8(uint8_t** data, size_t* data_len, uint8_t o);
-bool write_i8(uint8_t** data, size_t* data_len, int8_t o);
-bool write_u16(uint8_t** data, size_t* data_len, uint16_t o);
-bool write_i16(uint8_t** data, size_t* data_len, int16_t o);
-bool write_u32(uint8_t** data, size_t* data_len, uint32_t o);
-bool write_i32(uint8_t** data, size_t* data_len, int32_t o);
-bool write_u64(uint8_t** data, size_t* data_len, uint64_t o);
-bool write_i64(uint8_t** data, size_t* data_len, int64_t o);
 
 // II.23.2
 bool decompress_u32(uint8_t const** data, size_t* data_len, uint32_t* o);
 bool decompress_i32(uint8_t const** data, size_t* data_len, int32_t* o);
-// compressed_len is an in/out parameter. If compress_u32 returns true, then
-// compressed_len is set to the number of bytes written to compressed.
-bool compress_u32(uint32_t data, uint8_t* compressed, size_t* compressed_len);
-
-// Editing
-bool create_and_fill_indirect_table(mdcxt_t* cxt, mdtable_id_t original_table, mdtable_id_t indirect_table);
-bool allocate_new_table(mdcxt_t* cxt, mdtable_id_t table_id);
-uint8_t* get_writable_table_data(mdtable_t* table, bool make_writable);
-bool initialize_new_table_details(mdcxt_t* cxt, mdtable_id_t id, mdtable_t* table);
-int32_t update_shifted_row_references(mdcursor_t* c, uint32_t count, uint8_t col_index, mdtable_id_t updated_table, uint32_t original_starting_table_index, uint32_t new_starting_table_index);
-bool insert_row_into_table(mdcxt_t* cxt, mdtable_id_t table_id, uint32_t row_index, mdcursor_t* new_row);
-#ifdef DNMD_PORTABLE_PDB
-bool update_referenced_type_system_table_row_count(mdcxt_t* cxt, mdtable_id_t updated_table, uint32_t new_max_row_count);
-#endif // DNMD_PORTABLE_PDB
-
-// Sort a row list (like FieldList, MethodList, ParamList, etc.) by the values specified in the given constant column on the target table.
-bool sort_list_by_column(mdcursor_t parent, col_index_t list_col, col_index_t col);
-
-// Add the heap with the specified id from the delta image to the cxt image.
-bool append_heap(mdcxt_t* cxt, mdcxt_t* delta, mdtcol_t heap_id);
-
-extern mdguid_t const empty_guid;
 
 #endif // _SRC_DNMD_INTERNAL_H_

@@ -105,32 +105,6 @@ static coded_index_entry_t const coded_index_map[] =
 #endif // DNMD_PORTABLE_PDB
 };
 
-bool compose_coded_index(mdToken tk, mdtcol_t col_details, uint32_t* coded_index)
-{
-    // See II.24.2.6
-    assert(coded_index != NULL);
-
-    // Use the embedded index into the coded index map.
-    size_t ci_idx = ExtractCodedIndex(col_details);
-    assert(ci_idx < ARRAY_SIZE(coded_index_map));
-    coded_index_entry_t const* ci_entry = &coded_index_map[ci_idx];
-
-    // Verify the supplied table type is valid for encoding.
-    mdtable_id_t tgt_table = ExtractTokenType(tk);
-    uint32_t row;
-    for (uint8_t i = 0; i < ci_entry->lookup_len; ++i)
-    {
-        // If the table is valid, construct the coded index.
-        if (ci_entry->lookup[i] == tgt_table)
-        {
-            row = RidFromToken(tk);
-            *coded_index = (row << ci_entry->bit_encoding_size) | (uint32_t)i;
-            return true;
-        }
-    }
-    return false;
-}
-
 bool decompose_coded_index(uint32_t cidx, mdtcol_t col_details, mdtable_id_t* table_id, uint32_t* table_row)
 {
     // See II.24.2.6
@@ -150,24 +124,6 @@ bool decompose_coded_index(uint32_t cidx, mdtcol_t col_details, mdtable_id_t* ta
     // Remove the encoded lookup index.
     *table_row = cidx >> ci_entry->bit_encoding_size;
     return true;
-}
-
-bool is_coded_index_target(mdtcol_t col_details, mdtable_id_t table)
-{
-    assert(table != mdtid_Unused);
-
-    size_t ci_idx = ExtractCodedIndex(col_details);
-    assert(ci_idx < ARRAY_SIZE(coded_index_map));
-    coded_index_entry_t const* ci_entry = &coded_index_map[ci_idx];
-    for (uint8_t i = 0; i < ci_entry->lookup_len; ++i)
-    {
-        // If the table is valid, construct the coded index.
-        if (ci_entry->lookup[i] == table)
-        {
-            return true;
-        }
-    }
-    return false;
 }
 
 // Look up table for column counts by table ID
@@ -241,107 +197,6 @@ uint8_t get_table_column_count(mdtable_id_t id)
     return table_column_counts[id];
 }
 
-// II.22 Metadata logical format tables
-// DNMD implements the augments to the metadata logical format in the ECMA-335 spec located at https://github.com/dotnet/runtime/blob/main/docs/design/specs/Ecma-335-Augments.md
-static md_key_info_t const keys_ClassLayout[] = { { mdtClassLayout_Parent, false } };
-static md_key_info_t const keys_Constant[] = { { mdtConstant_Parent, false } };
-static md_key_info_t const keys_CustomAttribute[] = { { mdtCustomAttribute_Parent, false } };
-static md_key_info_t const keys_DeclSecurity[] = { { mdtDeclSecurity_Parent, false } };
-static md_key_info_t const keys_FieldLayout[] = { { mdtFieldLayout_Field, false } };
-static md_key_info_t const keys_FieldMarshal[] = { { mdtFieldMarshal_Parent, false } };
-static md_key_info_t const keys_FieldRva[] = { { mdtFieldRva_Field, false } };
-static md_key_info_t const keys_GenericParam[] = { { mdtGenericParam_Owner, false }, { mdtGenericParam_Number, false } };
-static md_key_info_t const keys_GenericParamConstraint[] = { { mdtGenericParamConstraint_Owner, false } };
-static md_key_info_t const keys_ImplMap[] = { { mdtImplMap_MemberForwarded, false } };
-static md_key_info_t const keys_InterfaceImpl[] = { { mdtInterfaceImpl_Class, false } };
-static md_key_info_t const keys_MethodImpl[] = { { mdtMethodImpl_Class, false } };
-static md_key_info_t const keys_MethodSemantics[] = { { mdtMethodSemantics_Association, false } };
-static md_key_info_t const keys_NestedClass[] = { { mdtNestedClass_NestedClass, false } };
-
-#ifdef DNMD_PORTABLE_PDB
-// https://github.com/dotnet/runtime/blob/main/docs/design/specs/PortablePdb-Metadata.md
-static md_key_info_t const keys_LocalScope[] = { { mdtLocalScope_Method, false }, { mdtLocalScope_StartOffset, false }, { mdtLocalScope_Length, true } };
-static md_key_info_t const keys_StateMachineMethod[] = { { mdtStateMachineMethod_MoveNextMethod, false } };
-static md_key_info_t const keys_CustomDebugInformation[] = { { mdtCustomDebugInformation_Parent, false } };
-#endif
-
-typedef struct
-{
-    md_key_info_t const* keys;
-    uint8_t key_count;
-} keys_info_t;
-
-static keys_info_t const table_keys[] =
-{
-    { NULL, 0 },
-    { NULL, 0 },
-    { NULL, 0 },
-    { NULL, 0 },
-    { NULL, 0 },
-    { NULL, 0 },
-    { NULL, 0 },
-    { NULL, 0 },
-    { NULL, 0 },
-    { keys_InterfaceImpl, ARRAY_SIZE(keys_InterfaceImpl) },
-    { NULL, 0 },
-    { keys_Constant, ARRAY_SIZE(keys_Constant) },
-    { keys_CustomAttribute, ARRAY_SIZE(keys_CustomAttribute) },
-    { keys_FieldMarshal, ARRAY_SIZE(keys_FieldMarshal) },
-    { keys_DeclSecurity, ARRAY_SIZE(keys_DeclSecurity) },
-    { keys_ClassLayout, ARRAY_SIZE(keys_ClassLayout) },
-    { keys_FieldLayout, ARRAY_SIZE(keys_FieldLayout) },
-    { NULL, 0 },
-    { NULL, 0 },
-    { NULL, 0 },
-    { NULL, 0 },
-    { NULL, 0 },
-    { NULL, 0 },
-    { NULL, 0 },
-    { keys_MethodSemantics, ARRAY_SIZE(keys_MethodSemantics) },
-    { keys_MethodImpl, ARRAY_SIZE(keys_MethodImpl) },
-    { NULL, 0 },
-    { NULL, 0 },
-    { keys_ImplMap, ARRAY_SIZE(keys_ImplMap) },
-    { keys_FieldRva, ARRAY_SIZE(keys_FieldRva) },
-    { NULL, 0 }, // ENCLog
-    { NULL, 0 }, // ENCMap
-    { NULL, 0 },
-    { NULL, 0 }, // AssemblyProcessor
-    { NULL, 0 }, // AssemblyOS
-    { NULL, 0 },
-    { NULL, 0 }, // AssemblyRefProcessor,
-    { NULL, 0 }, // AssemblyRefOS,
-    { NULL, 0 },
-    { NULL, 0 },
-    { NULL, 0 },
-    { keys_NestedClass, ARRAY_SIZE(keys_NestedClass) },
-    { keys_GenericParam, ARRAY_SIZE(keys_GenericParam) },
-    { NULL, 0 },
-    { keys_GenericParamConstraint, ARRAY_SIZE(keys_GenericParamConstraint) },
-#ifdef DNMD_PORTABLE_PDB
-    { NULL, 0 }, // Reserved
-    { NULL, 0 }, // Reserved
-    { NULL, 0 }, // Reserved
-    // https://github.com/dotnet/runtime/blob/main/docs/design/specs/PortablePdb-Metadata.md
-    { NULL, 0 },
-    { NULL, 0 },
-    { keys_LocalScope, ARRAY_SIZE(keys_LocalScope) },
-    { NULL, 0 },
-    { NULL, 0 },
-    { NULL, 0 },
-    { keys_StateMachineMethod, ARRAY_SIZE(keys_StateMachineMethod) },
-    { keys_CustomDebugInformation, ARRAY_SIZE(keys_CustomDebugInformation) },
-#endif // DNMD_PORTABLE_PDB
-};
-
-// II.22 Metadata logical format tables
-// Primary and secondary key info for tables
-uint8_t get_table_keys(mdtable_id_t id, md_key_info_t const** keys)
-{
-    assert(mdtid_First <= id && id < mdtid_End);
-    *keys = table_keys[id].keys;
-    return table_keys[id].key_count;
-}
 
 // Compute the row size and embed the offset for
 // each column in the column details.
@@ -754,43 +609,6 @@ bool initialize_table_details(
     return true;
 }
 
-bool initialize_new_table_details(
-    mdcxt_t* cxt,
-    mdtable_id_t id,
-    mdtable_t* table
-)
-{
-    assert(table->cxt == NULL);
-    // Use the real table row counts to ensure that when saving, we can
-    // directly write out table memory without any required post-processing.
-    uint32_t table_row_counts[MDTABLE_MAX_COUNT];
-    for (size_t i = 0; i < MDTABLE_MAX_COUNT; i++)
-    {
-        table_row_counts[i] = cxt->tables[i].row_count;
-    }
-
-    // Set the new table's row count temporarily to 1 to ensure that we initialize the table.
-    table_row_counts[id] = 1;
-
-    // We'll treat any new table that has keys as sorted.
-    // We only want to do this for tables with keys as tables without keys
-    // never use the is_sorted bit.
-    md_key_info_t const* keys;
-    uint8_t key_count = get_table_keys(id, &keys);
-    bool has_keys = key_count != 0;
-
-    if (!initialize_table_details(
-        table_row_counts,
-        cxt->context_flags,
-        id,
-        has_keys,
-        table))
-        return false;
-
-    table->row_count = 0;
-    return true;
-}
-
 bool consume_table_rows(mdtable_t* table, uint8_t const** data, size_t* data_len)
 {
     assert(table != NULL && data != NULL && data_len != NULL);
@@ -806,38 +624,4 @@ bool consume_table_rows(mdtable_t* table, uint8_t const** data, size_t* data_len
     table->data.ptr = rows;
     table->data.size = rows_len;
     return true;
-}
-
-bool table_is_indirect_table(mdtable_id_t table_id)
-{
-    switch (table_id)
-    {
-        case mdtid_FieldPtr:
-        case mdtid_MethodPtr:
-        case mdtid_ParamPtr:
-        case mdtid_EventPtr:
-        case mdtid_PropertyPtr:
-            return true;
-        default:
-            return false;
-    }
-}
-
-mdtable_id_t get_corresponding_indirection_table(mdtable_id_t table_id)
-{
-    switch (table_id)
-    {
-    case mdtid_Field:
-        return mdtid_FieldPtr;
-    case mdtid_MethodDef:
-        return mdtid_MethodPtr;
-    case mdtid_Param:
-        return mdtid_ParamPtr;
-    case mdtid_Event:
-        return mdtid_EventPtr;
-    case mdtid_Property:
-        return mdtid_PropertyPtr;
-    default:
-        return mdtid_Unused;
-    }
 }

@@ -1,13 +1,10 @@
 set(SOURCES
   access.c
   bytes.c
-  deltas.c
-  editor.c
   entry.c
   query.c
   streams.c
   tables.c
-  write.c
 )
 
 set(HEADERS
@@ -31,5 +28,5 @@ target_include_directories(dnmd_pdb PUBLIC
 )
 
 set_target_properties(dnmd_pdb PROPERTIES
-  PUBLIC_HEADER "../inc/dnmd.h;../inc/dnmd.hpp;../inc/dnmd_pdb.h"
+  PUBLIC_HEADER "../inc/dnmd.h;../inc/dnmd_pdb.h"
   POSITION_INDEPENDENT_CODE ON)

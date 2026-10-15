@@ -31,42 +31,14 @@ typedef struct mdguid__
 
 typedef void* mdhandle_t;
 
-// Create a metadata handle that can be used to parse and modify the supplied metadata.
+// Create a metadata handle that can be used to parse the supplied metadata.
 //
 // The supplied data is expected to be unmoved and available until all
 // handles created with the data have been destroyed.
-// If modifications are made, the data will not be updated in place.
 bool md_create_handle(void const* data, size_t data_len, mdhandle_t* handle);
-
-// Create a new metadata handle for a new image.
-// Returns a handle for the new image, or NULL if the handle could not be created.
-// The image will always be in the v1.1 ECMA-355 metadata format,
-// use the "v4.0.30319" version string,
-// and have an MVID of all zeros.
-mdhandle_t md_create_new_handle();
-
-#ifdef DNMD_PORTABLE_PDB
-// Create a new metadata handle for a new Portable PDB image.
-// Returns a handle for the new image, or NULL if the handle could not be created.
-// The image will always be in the v1.1 metadata format
-// and use the "PDB v1.0" version string.
-mdhandle_t md_create_new_pdb_handle();
-#endif // DNMD_PORTABLE_PDB
-
-// Apply delta data to the current metadata.
-bool md_apply_delta(mdhandle_t handle, mdhandle_t delta_handle);
 
 // Destroy the metadata handle and free all associated memory.
 void md_destroy_handle(mdhandle_t handle);
-
-// Validate the metadata associated with the handle.
-bool md_validate(mdhandle_t handle);
-
-// Write all tables to stdout.
-// Set table_id to '-1' to print out all tables.
-bool md_dump_tables(mdhandle_t handle, int32_t table_id);
-
-char const* md_get_version_string(mdhandle_t handle);
 
 //
 // All tables possible in ECMA-335
@@ -152,25 +124,10 @@ bool md_create_cursor(mdhandle_t handle, mdtable_id_t table_id, mdcursor_t* curs
 // Move the cursor +/- number of rows.
 bool md_cursor_move(mdcursor_t* c, int32_t delta);
 
-// Move to the next row.
-bool md_cursor_next(mdcursor_t* c);
-
 // Convert between a token and location in metadata tables.
 bool md_token_to_cursor(mdhandle_t handle, mdToken tk, mdcursor_t* c);
 bool md_cursor_to_token(mdcursor_t c, mdToken* tk);
 mdhandle_t md_extract_handle_from_cursor(mdcursor_t c);
-
-// Walk the #US heap. The initial value should be set to 0 or
-// a valid offset into the #US heap - see RidFromToken in corhdr.h.
-typedef intptr_t mduserstringcursor_t;
-
-typedef struct mduserstring__
-{
-    char16_t const* str;
-    uint32_t str_bytes;
-    uint8_t final_byte;
-} mduserstring_t;
-bool md_walk_user_string_heap(mdhandle_t handle, mduserstringcursor_t* cursor, mduserstring_t* str, uint32_t* offset);
 
 // Define to help debug table indexing
 //#define DEBUG_TABLE_COLUMN_LOOKUP
@@ -447,108 +404,12 @@ bool md_get_column_value_as_cursor(mdcursor_t c, col_index_t col_idx, mdcursor_t
 // The run continues to the smaller of:
 //   * the last row of the target table
 //   * the next run in the target table, found by inspecting the column value of the next row in the current table.
-// See md_find_token_of_range_element() for mapping elements in the other direction.
 bool md_get_column_value_as_range(mdcursor_t c, col_index_t col_idx, mdcursor_t* cursor, uint32_t* count);
 bool md_get_column_value_as_constant(mdcursor_t c, col_index_t col_idx, uint32_t* constant);
 bool md_get_column_value_as_utf8(mdcursor_t c, col_index_t col_idx, char const** str);
-bool md_get_column_value_as_userstring(mdcursor_t c, col_index_t col_idx, mduserstring_t* strings);
 bool md_get_column_value_as_blob(mdcursor_t c, col_index_t col_idx, uint8_t const** blob, uint32_t* blob_len);
 bool md_get_column_value_as_guid(mdcursor_t c, col_index_t col_idx, mdguid_t* guid);
 
-// Read a table or coded index column from multiple rows and return the values as an array of tokens.
-// The number of rows read is returned by the function. A '-1' return value indicates an error.
-int32_t md_get_many_rows_column_value_as_token(mdcursor_t c, col_index_t col_idx, uint32_t out_length, mdToken* tokens);
-
-// Return the raw column values for the row. Unlike the md_get_column_value_as_* APIs, the returned values
-// are in their raw form.
-// Callers should indicate ('true') using the 'values_to_get' collection which columns are desired.
-// Corresponding entries in 'values_raw' will only be set if a 'true' value is set in 'values_to_get'.
-// Note this API was not designed in a performance critical manner and should only be used if necessary.
-// The APIs that retrieve specific columns in their respective formatted forms have been designed for performance
-// and should be preferred whenever possible.
-bool md_get_column_values_raw(mdcursor_t c, uint32_t values_length, bool* values_to_get, uint32_t* values_raw);
-
-// Find a row or range of rows where the supplied column has the expected value.
-// These APIs assume the value to look for is the value in the table, typically record IDs (RID)
-// for tokens. An exception is made for coded indices, which are cumbersome to compute.
-// If the queried column contains a coded index value, the value will be validated and
-// transformed to its coded form for comparison.
-bool md_find_row_from_cursor(mdcursor_t begin, col_index_t idx, uint32_t value, mdcursor_t* cursor);
-
-typedef enum
-{
-    MD_RANGE_FOUND = 0,
-    MD_RANGE_NOT_FOUND = 1,
-    MD_RANGE_NOT_SUPPORTED = 2,
-} md_range_result_t;
-
-md_range_result_t md_find_range_from_cursor(mdcursor_t begin, col_index_t idx, uint32_t value, mdcursor_t* start, uint32_t* count);
-
-// Given a value into a supported table, find the associated parent token.
-//  - mdtid_Field
-//  - mdtid_MethodDef
-//  - mdtid_Param
-//  - mdtid_Event
-//  - mdtid_Property
-// See md_get_column_value_as_range() for getting the complete range.
-bool md_find_token_of_range_element(mdcursor_t element, mdToken* tk);
-bool md_find_cursor_of_range_element(mdcursor_t element, mdcursor_t* cursor);
-
-// Given a cursor, resolve any indirections to the final cursor or return the original cursor if it does not point to an indirection table.
-// Returns true if the cursor was not an indirect cursor or if the indirection was resolved, or false if the cursor pointed to an invalid indirection table entry.
-bool md_resolve_indirect_cursor(mdcursor_t c, mdcursor_t* target);
-
-// Set row's column values
-// The returned number represents the number of rows updated.
-bool md_set_column_value_as_token(mdcursor_t c, col_index_t col, mdToken tk);
-bool md_set_column_value_as_cursor(mdcursor_t c, col_index_t col, mdcursor_t cursor);
-bool md_set_column_value_as_constant(mdcursor_t c, col_index_t col_idx, uint32_t constant);
-bool md_set_column_value_as_utf8(mdcursor_t c, col_index_t col_idx, char const* str);
-bool md_set_column_value_as_blob(mdcursor_t c, col_index_t col_idx, uint8_t const* blob, uint32_t blob_len);
-bool md_set_column_value_as_guid(mdcursor_t c, col_index_t col_idx, mdguid_t guid);
-bool md_set_column_value_as_userstring(mdcursor_t c, col_index_t col_idx, char16_t const* userstring);
-
-// Create a new row logically before the row specified by the cursor.
-// If the given row is in a table that is a target of a list column, this function will return false.
-// Only md_add_row_to_list can be used to add rows to a table that is a target of a list column.
-// The table is treated as unsorted until md_commit_row_add is called after all columns have been set on the new row.
-bool md_insert_row_before(mdcursor_t row, mdcursor_t* new_row);
-
-// Create a new row after the row specified by the cursor.
-// If the given row is in a table that is a target of a list column, this function will return false.
-// Only md_add_row_to_list can be used to add rows to a table that is a target of a list column.
-// The table is treated as unsorted until md_commit_row_add is called after all columns have been set on the new row.
-bool md_insert_row_after(mdcursor_t row, mdcursor_t* new_row);
-
-// Create a new row at the end of the specified table.
-// If the given row is in a table that is a target of a list column, this function will return false.
-// Only md_add_row_to_list can be used to add rows to a table that is a target of a list column.
-// The table is treated as unsorted until md_commit_row_add is called after all columns have been set on the new row.
-bool md_append_row(mdhandle_t handle, mdtable_id_t table_id, mdcursor_t* new_row);
-
-// Creates a new row in the list for the given cursor specified by the given column.
-// This method accounts for any indirection tables that may need to be created or maintained to ensure that
-// the structure of the list is maintained without moving tokens.
-// The table that new_child_row points to is treated as unsorted until md_commit_row_add is called after all columns have been set on the new row.
-bool md_add_new_row_to_list(mdcursor_t list_owner, col_index_t list_col, mdcursor_t* new_row);
-
-// Creates a new row in the list for the given cursor specified by the given column such that the values of the sort_order_col are maintained in ascending order.
-// This method assumes that the list is currently sorted by the sort_order_col column.
-// This method accounts for any indirection tables that may need to be created or maintained to ensure that
-// the structure of the list is maintained without moving tokens.
-// The table that new_row points to is treated as unsorted until md_commit_row_add is called after all columns have been set on the new row.
-// The new_row row will also have the sort_order_col column initialized to sort_col_value.
-bool md_add_new_row_to_sorted_list(mdcursor_t list_owner, col_index_t list_col, col_index_t sort_order_col, uint32_t sort_col_value, mdcursor_t* new_row);
-
-// Finish the process of adding a row to the cursor's table.
-void md_commit_row_add(mdcursor_t row);
-
-// Add a user string to the #US heap.
-mduserstringcursor_t md_add_userstring_to_heap(mdhandle_t handle, char16_t const* userstring);
-
-// Write the metadata represented by the handle to the supplied buffer.
-// The metadata is always written with the v2.0 table schema.
-bool md_write_to_buffer(mdhandle_t handle, uint8_t* buffer, size_t* len);
 #ifdef __cplusplus
 }
 #endif

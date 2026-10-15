@@ -11,6 +11,7 @@ Upcoming changes compared to the previous version.
 #### Changed
 - Split evalhelpers.h/.cpp into dedicated `evaluation/evalhelpers` modules (`formatspecifier`, `metadata`, `textwitheval` and `value` sources).
 - Split evalstackmachine.h/.cpp into dedicated `evaluation/stackmachine` modules (public `stackmachine`, `run`, `internal_helpers` and per-logic-block `handler_*` sources; value creation helpers moved to `EvalExec`).
+- Stripped the write, editor and delta functionality from the vendored `dnmd` metadata library, leaving it as a read-only parser.
 
 <br>
 <br>

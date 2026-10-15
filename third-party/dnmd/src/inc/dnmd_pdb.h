@@ -69,51 +69,6 @@ typedef struct md_sequence_points__
 } md_sequence_points_t;
 md_blob_parse_result_t md_parse_sequence_points(mdcursor_t method_debug_information, uint8_t const* blob, size_t blob_len, md_sequence_points_t* sequence_points, size_t* buffer_len);
 
-// Parse a LocalConstantSig blob.
-typedef struct md_local_constant_sig__
-{
-    enum
-    {
-        mdck_PrimitiveConstant,
-        mdck_EnumConstant,
-        mdck_GeneralConstant
-    } constant_kind;
-
-    union
-    {
-        struct
-        {
-            uint8_t type_code; // ELEMENT_TYPE_* - ECMA-335 II.23.1.16
-        } primitive;
-        struct
-        {
-            uint8_t type_code; // ELEMENT_TYPE_* - ECMA-335 II.23.1.16
-            mdToken enum_type; // See ECMA-335 II.14.3 for Enum restrictions.
-        } enum_constant;
-        struct
-        {
-            enum
-            {
-                mdgc_ValueType,
-                mdgc_Class,
-                mdgc_Object
-            } kind;
-            mdToken type; // TypeDefOrRefOrSpecEncoded - ECMA-335 II.23.2.8
-        } general;
-    };
-
-    uint8_t const* value_blob;
-    size_t value_len;
-
-    uint32_t custom_modifier_count;
-    struct
-    {
-        bool required; // Differentiate modreq vs modopt.
-        mdToken type; // Custom modifier - ECMA-335 II.23.2.7
-    } custom_modifiers[];
-} md_local_constant_sig_t;
-md_blob_parse_result_t md_parse_local_constant_sig(mdhandle_t handle, uint8_t const* blob, size_t blob_len, md_local_constant_sig_t* local_constant_sig, size_t* buffer_len);
-
 // Parse an Imports blob.
 typedef struct md_imports__
 {

@@ -78,53 +78,7 @@ static bool read_le(uint8_t const** data, size_t* data_len, void* o, size_t o_si
     return true;
 }
 
-// This is a little-endian format in the physical form.
-static bool write_le(uint8_t** data, size_t* data_len, uint64_t o, size_t o_size_to_write)
-{
-    assert(data != NULL && data_len != NULL);
-    if (*data_len < o_size_to_write)
-        return false;
-
-    uint8_t* d = *data;
-    switch(o_size_to_write)
-    {
-    case 8:
-        *d++ = (uint8_t)o;
-        *d++ = (uint8_t)(o >> 8);
-        *d++ = (uint8_t)(o >> 16);
-        *d++ = (uint8_t)(o >> 24);
-        *d++ = (uint8_t)(o >> 32);
-        *d++ = (uint8_t)(o >> 40);
-        *d++ = (uint8_t)(o >> 48);
-        *d++ = (uint8_t)(o >> 56);
-        break;
-    case 4:
-        *d++ = (uint8_t)o;
-        *d++ = (uint8_t)(o >> 8);
-        *d++ = (uint8_t)(o >> 16);
-        *d++ = (uint8_t)(o >> 24);
-        break;
-    case 2:
-        *d++ = (uint8_t)o;
-        *d++ = (uint8_t)(o >> 8);
-        break;
-    case 1:
-        *d++ = (uint8_t)o;
-        break;
-    default:
-        return false;
-    }
-    *data = d;
-    *data_len -= o_size_to_write;
-    return true;
-}
-
 bool read_u8(uint8_t const** data, size_t* data_len, uint8_t* o)
-{
-    return read_le(data, data_len, o, sizeof(*o));
-}
-
-bool read_i8(uint8_t const** data, size_t* data_len, int8_t* o)
 {
     return read_le(data, data_len, o, sizeof(*o));
 }
@@ -137,27 +91,12 @@ bool read_u16(uint8_t const** data, size_t* data_len, uint16_t* o)
     return read_le(data, data_len, o, sizeof(*o));
 }
 
-bool read_i16(uint8_t const** data, size_t* data_len, int16_t* o)
-{
-    return read_le(data, data_len, o, sizeof(*o));
-}
-
 bool read_u32(uint8_t const** data, size_t* data_len, uint32_t* o)
 {
     return read_le(data, data_len, o, sizeof(*o));
 }
 
-bool read_i32(uint8_t const** data, size_t* data_len, int32_t* o)
-{
-    return read_le(data, data_len, o, sizeof(*o));
-}
-
 bool read_u64(uint8_t const** data, size_t* data_len, uint64_t* o)
-{
-    return read_le(data, data_len, o, sizeof(*o));
-}
-
-bool read_i64(uint8_t const** data, size_t* data_len, int64_t* o)
 {
     return read_le(data, data_len, o, sizeof(*o));
 }
@@ -174,29 +113,7 @@ bool read_u16(uint8_t const** data, size_t* data_len, uint16_t* o)
     return true;
 }
 
-bool read_i16(uint8_t const** data, size_t* data_len, int16_t* o)
-{
-    if (*data_len < sizeof(*o))
-        return false;
-
-    memcpy(o, *data, sizeof(*o));
-    *data += sizeof(*o);
-    *data_len -= sizeof(*o);
-    return true;
-}
-
 bool read_u32(uint8_t const** data, size_t* data_len, uint32_t* o)
-{
-    if (*data_len < sizeof(*o))
-        return false;
-
-    memcpy(o, *data, sizeof(*o));
-    *data += sizeof(*o);
-    *data_len -= sizeof(*o);
-    return true;
-}
-
-bool read_i32(uint8_t const** data, size_t* data_len, int32_t* o)
 {
     if (*data_len < sizeof(*o))
         return false;
@@ -218,57 +135,18 @@ bool read_u64(uint8_t const** data, size_t* data_len, uint64_t* o)
     return true;
 }
 
-bool read_i64(uint8_t const** data, size_t* data_len, int64_t* o)
-{
-    if (*data_len < sizeof(*o))
-        return false;
-
-    memcpy(o, *data, sizeof(*o));
-    *data += sizeof(*o);
-    *data_len -= sizeof(*o);
-    return true;
-}
-
 #endif
 
 bool write_u8(uint8_t** data, size_t* data_len, uint8_t o)
 {
-    return write_le(data, data_len, o, sizeof(o));
-}
+    assert(data != NULL && data_len != NULL);
+    if (*data_len < 1)
+        return false;
 
-bool write_i8(uint8_t** data, size_t* data_len, int8_t o)
-{
-    return write_le(data, data_len, o, sizeof(o));
-}
-
-bool write_u16(uint8_t** data, size_t* data_len, uint16_t o)
-{
-    return write_le(data, data_len, o, sizeof(o));
-}
-
-bool write_i16(uint8_t** data, size_t* data_len, int16_t o)
-{
-    return write_le(data, data_len, o, sizeof(o));
-}
-
-bool write_u32(uint8_t** data, size_t* data_len, uint32_t o)
-{
-    return write_le(data, data_len, o, sizeof(o));
-}
-
-bool write_i32(uint8_t** data, size_t* data_len, int32_t o)
-{
-    return write_le(data, data_len, o, sizeof(o));
-}
-
-bool write_u64(uint8_t** data, size_t* data_len, uint64_t o)
-{
-    return write_le(data, data_len, o, sizeof(o));
-}
-
-bool write_i64(uint8_t** data, size_t* data_len, int64_t o)
-{
-    return write_le(data, data_len, o, sizeof(o));
+    **data = o;
+    ++(*data);
+    --(*data_len);
+    return true;
 }
 
 // II.23.2
@@ -360,42 +238,5 @@ bool decompress_i32(uint8_t const** data, size_t* data_len, int32_t* o)
         }
     }
     *o = (int32_t)unsigned_value;
-    return true;
-}
-
-// II.23.2
-// This is a big-endian format in the physical form.
-bool compress_u32(uint32_t data, uint8_t* compressed, size_t* compressed_len)
-{
-    assert(compressed != NULL && compressed_len != NULL);
-    if (data <= 0x7f)
-    {
-        if (*compressed_len < 1)
-            return false;
-        compressed[0] = (uint8_t)data;
-        *compressed_len = 1;
-    }
-    else if (data <= 0x3fff)
-    {
-        if (*compressed_len < 2)
-            return false;
-        compressed[0] = (uint8_t)((data >> 8) | 0x80);
-        compressed[1] = (uint8_t)data;
-        *compressed_len = 2;
-    }
-    else if (data <= 0x1fffffff)
-    {
-        if (*compressed_len < 4)
-            return false;
-        compressed[0] = (uint8_t)((data >> 24) | 0xc0);
-        compressed[1] = (uint8_t)(data >> 16);
-        compressed[2] = (uint8_t)(data >> 8);
-        compressed[3] = (uint8_t)data;
-        *compressed_len = 4;
-    }
-    else
-    {
-        return false;
-    }
     return true;
 }

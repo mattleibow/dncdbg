@@ -7,7 +7,7 @@ bool try_get_string(mdcxt_t* cxt, size_t offset, char const** str)
     mdstream_t* h = &cxt->strings_heap;
 
     // II.24.2.3 - When the #String heap is present, the first entry is always the empty string (i.e., \0).
-    // II.24.2.2 -  Streams need not be there if they are empty.
+    // II.24.2.2 - Streams need not be present if they are empty.
     // If the offset into the heap is 0, we can treat that as a "null" index into the heap and return
     // the empty string.
     if (h->size == 0 && offset == 0)
@@ -23,74 +23,6 @@ bool try_get_string(mdcxt_t* cxt, size_t offset, char const** str)
     return true;
 }
 
-bool validate_strings_heap(mdcxt_t* cxt)
-{
-    assert(cxt != NULL);
-
-    mdstream_t* h = &cxt->strings_heap;
-    if (h->size == 0)
-        return true;
-
-    // The first character must be the '\0' - II.24.2.3
-    if (*(char const*)h->ptr != '\0')
-        return false;
-
-    return true;
-}
-
-bool try_get_user_string(mdcxt_t* cxt, size_t offset, mduserstring_t* str, size_t* next_offset)
-{
-    assert(cxt != NULL && str != NULL && next_offset != NULL);
-    mdstream_t* h = &cxt->user_string_heap;
-    if (h->size <= offset)
-        return false;
-
-    uint8_t const* begin = (uint8_t const*)(h->ptr + offset);
-
-    size_t data_len = h->size - offset;
-    uint32_t byte_count;
-    if (!decompress_u32(&begin, &data_len, &byte_count))
-        return false;
-
-    // A user string cannot extend beyond the end of the user string heap.
-    if (begin + byte_count > h->ptr + h->size)
-        return false;
-
-    if (byte_count == 0)
-    {
-        memset(str, 0, sizeof(*str));
-    }
-    else
-    {
-        // II.24.2.4
-        // The count on each string is the number of bytes in the string.
-        // There is an additional terminal byte which holds a 1 or 0.
-        // The 1 signifies Unicode characters that require handling beyond
-        // that normally provided for 8-bit encoding sets.
-        str->str = (char16_t const*)begin;
-        str->str_bytes = byte_count;
-        str->final_byte = begin[byte_count - 1];
-    }
-
-    *next_offset = &begin[byte_count] - h->ptr;
-    return true;
-}
-
-bool validate_user_string_heap(mdcxt_t* cxt)
-{
-    assert(cxt != NULL);
-
-    mdstream_t* h = &cxt->user_string_heap;
-    if (h->size == 0)
-        return true;
-
-    // The first element must be the 0 - II.24.2.4
-    if (*h->ptr != 0)
-        return false;
-
-    return true;
-}
-
 bool try_get_blob(mdcxt_t* cxt, size_t offset, uint8_t const** blob, uint32_t* blob_len)
 {
     assert(cxt != NULL && blob != NULL && blob_len != NULL);
@@ -99,7 +31,7 @@ bool try_get_blob(mdcxt_t* cxt, size_t offset, uint8_t const** blob, uint32_t* b
 
     if (h->size == 0 && offset == 0)
     {
-        // The first element must be the 0 - II.24.2.4
+        // The first element must be 0 - II.24.2.4
         *blob = h->ptr;
         *blob_len = 0;
         return true;
@@ -117,21 +49,6 @@ bool try_get_blob(mdcxt_t* cxt, size_t offset, uint8_t const** blob, uint32_t* b
 
     *blob = ptr;
     *blob_len = byte_count;
-    return true;
-}
-
-bool validate_blob_heap(mdcxt_t* cxt)
-{
-    assert(cxt != NULL);
-
-    mdstream_t* h = &cxt->blob_heap;
-    if (h->size == 0)
-        return true;
-
-    // The first element must be the 0 - II.24.2.4
-    if (*h->ptr != 0)
-        return false;
-
     return true;
 }
 
@@ -158,18 +75,6 @@ bool try_get_guid(mdcxt_t* cxt, size_t idx, mdguid_t* guid)
     *guid = guids[idx - 1];
     return true;
 }
-
-bool validate_guid_heap(mdcxt_t* cxt)
-{
-    assert(cxt != NULL);
-
-    mdstream_t* h = &cxt->guid_heap;
-    if (h->size % sizeof(mdguid_t) != 0)
-        return false;
-
-    return true;
-}
-
 bool initialize_tables(mdcxt_t* cxt)
 {
     assert(cxt != NULL);
@@ -234,7 +139,7 @@ bool initialize_tables(mdcxt_t* cxt)
 
     // There is an extra flag that is respected by metadata readers but is not defined in the ECMA spec.
     // If the 0x40 bit is set, then there is an extra 4-byte integer after the row counts before the table data.
-    // This is refered to as the ExtraData heap size flag in the System.Reflection.Metadata reader.
+    // This is referred to as the ExtraData heap size flag in the System.Reflection.Metadata reader.
     if (cxt->context_flags & mdc_extra_data)
     {
         if (!advance_stream(&curr, &curr_len, sizeof(uint32_t)))
@@ -286,82 +191,6 @@ bool initialize_tables(mdcxt_t* cxt)
     return true;
 }
 
-bool validate_tables(mdcxt_t* cxt)
-{
-    assert(cxt != NULL);
-
-    // [TODO] Reference ECMA-335 and encode table verification.
-
-    // Do not allow the *Ptr indirection tables
-    // to be present in a compressed table heap (#~).
-    if (!(cxt->context_flags & mdc_uncompressed_table_heap))
-    {
-        for (size_t i = 0; i < MDTABLE_MAX_COUNT; ++i)
-        {
-            if (table_is_indirect_table((mdtable_id_t)i) && cxt->tables[i].row_count != 0)
-                return false;
-        }
-    }
-
-    // II.22 - Validate that tables marked as sorted are actually sorted.
-    for (size_t i = 0; i < MDTABLE_MAX_COUNT; ++i)
-    {
-        mdtable_t* table = &cxt->tables[i];
-        if (!table->is_sorted || table->row_count <= 1)
-            continue;
-
-        md_key_info_t const* keys;
-        uint8_t key_count = get_table_keys((mdtable_id_t)i, &keys);
-        if (key_count == 0)
-            continue;
-
-        for (uint32_t r = 1; r < table->row_count; ++r)
-        {
-            mdcursor_t row = create_cursor(table, r);
-            mdcursor_t next_row = create_cursor(table, r + 1);
-
-            for (uint8_t k = 0; k < key_count; ++k)
-            {
-                col_index_t key_col = index_to_col(keys[k].index, (mdtable_id_t)i);
-
-                access_cxt_t row_acxt;
-                if (!create_access_context(&row, key_col, false, &row_acxt))
-                    return false;
-
-                access_cxt_t next_acxt;
-                if (!create_access_context(&next_row, key_col, false, &next_acxt))
-                    return false;
-
-                uint32_t row_value;
-                if (!read_column_data(&row_acxt, &row_value))
-                    return false;
-
-                uint32_t next_value;
-                if (!read_column_data(&next_acxt, &next_value))
-                    return false;
-
-                // Compare by sort direction - ascending or descending.
-                if (keys[k].descending)
-                {
-                    if (row_value < next_value)
-                        return false;
-                    if (row_value > next_value)
-                        break;
-                }
-                else
-                {
-                    if (row_value > next_value)
-                        return false;
-                    if (row_value < next_value)
-                        break;
-                }
-            }
-        }
-    }
-
-    return true;
-}
-
 bool has_pdb(mdcxt_t* cxt)
 {
 #ifdef DNMD_PORTABLE_PDB
@@ -370,7 +199,7 @@ bool has_pdb(mdcxt_t* cxt)
 #else
     (void)cxt;
     return false;
-#endif // !DNMD_PORTABLE_PDB
+#endif // DNMD_PORTABLE_PDB
 }
 
 bool try_get_pdb(mdcxt_t* cxt, md_pdb_t* pdb)
@@ -402,7 +231,7 @@ bool try_get_pdb(mdcxt_t* cxt, md_pdb_t* pdb)
     size_t n = count_set_bits(tables);
     uint8_t const* pdb_end = curr + (n * sizeof(uint32_t));
 
-    // Read in all row data defined by the references bits.
+    // Read in all row data defined by the reference bits.
     for (size_t i = 0; i < MDTABLE_MAX_COUNT; ++i)
     {
         if (tables & 1)
@@ -427,38 +256,5 @@ bool try_get_pdb(mdcxt_t* cxt, md_pdb_t* pdb)
     (void)cxt;
     (void)pdb;
     return false;
-#endif // !DNMD_PORTABLE_PDB
-}
-
-mdstream_t* get_heap_by_id(mdcxt_t* cxt, mdtcol_t heap_id)
-{
-    assert(cxt != NULL);
-    switch (heap_id)
-    {
-        case mdtc_hblob:
-            return &cxt->blob_heap;
-        case mdtc_hguid:
-            return &cxt->guid_heap;
-        case mdtc_hstring:
-            return &cxt->strings_heap;
-        case mdtc_hus:
-            return &cxt->user_string_heap;
-        default:
-            return NULL;
-    }
-}
-
-mdcxt_flag_t get_large_heap_flag(mdtcol_t heap_id)
-{
-    switch (heap_id)
-    {
-    case mdtc_hblob:
-        return mdc_large_blob_heap;
-    case mdtc_hguid:
-        return mdc_large_guid_heap;
-    case mdtc_hstring:
-        return mdc_large_string_heap;
-    default:
-        return 0;
-    }
+#endif // DNMD_PORTABLE_PDB
 }

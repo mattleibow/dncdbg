@@ -495,6 +495,26 @@ HRESULT CreateLiteralValueImpl(ICorDebugThread *pThread, PCCOR_SIGNATURE pSig, P
     return S_OK;
 }
 
+// Reads the underlying type from the signature, skipping the custom modifiers
+// ("CustomMod*" in the signature grammar) that may precede it. On return, pSig
+// points just past the type byte.
+HRESULT ReadUnderlyingType(PCCOR_SIGNATURE &pSig, PCCOR_SIGNATURE pSigEnd,
+                           CorElementType &underlyingType)
+{
+    HRESULT Status = S_OK;
+    IfFailRet(CorSigUncompressElementType_EndPtr(pSig, pSigEnd, underlyingType));
+    while (underlyingType == ELEMENT_TYPE_CMOD_OPT ||
+           underlyingType == ELEMENT_TYPE_CMOD_REQD)
+    {
+        // Skip the modifier type token; it is not needed for literal constants.
+        mdToken token = mdTokenNil;
+        IfFailRet(CorSigUncompressToken_EndPtr(pSig, pSigEnd, token));
+        IfFailRet(CorSigUncompressElementType_EndPtr(pSig, pSigEnd, underlyingType));
+    }
+
+    return S_OK;
+}
+
 // Returns CORDBG_E_DEBUGGING_DISABLED if function evaluation is disabled by the eval flags
 // and the specifier does not force evaluation.
 HRESULT CheckFuncEvalAllowed(FormatSpecifier specifier)
@@ -753,10 +773,8 @@ HRESULT CreateLiteralFieldValue(ICorDebugThread *pThread, PCCOR_SIGNATURE pSig, 
     // Skip the calling convention byte (IMAGE_CEE_CS_CALLCONV_FIELD), since we are sure this is a field.
     IfFailRet(CorSigUncompressSkipOneByte_EndPtr(pSig, pSigEnd));
 
-    // TODO care about "CustomMod*"
-
     CorElementType underlyingType = ELEMENT_TYPE_MAX;
-    IfFailRet(CorSigUncompressElementType_EndPtr(pSig, pSigEnd, underlyingType));
+    IfFailRet(ReadUnderlyingType(pSig, pSigEnd, underlyingType));
 
     if (underlyingType == ELEMENT_TYPE_STRING)
     {
@@ -788,11 +806,9 @@ HRESULT CreateLiteralLocalValue(ICorDebugThread *pThread, PCCOR_SIGNATURE pSig, 
         return E_INVALIDARG;
     }
 
-    // TODO care about "CustomMod*"
-
     HRESULT Status = S_OK;
     CorElementType underlyingType = ELEMENT_TYPE_MAX;
-    IfFailRet(CorSigUncompressElementType_EndPtr(pSig, pSigEnd, underlyingType));
+    IfFailRet(ReadUnderlyingType(pSig, pSigEnd, underlyingType));
 
     const UVCP_CONSTANT pRawValue = pSig;
     auto rawValueLength = static_cast<ULONG>(pSigEnd - pSig);

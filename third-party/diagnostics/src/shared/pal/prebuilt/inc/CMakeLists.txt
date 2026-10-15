@@ -1,4 +1,4 @@
 project(COREPAL)
 
-install (FILES corerror.h corprof.h DESTINATION inc)
+install (FILES corerror.h DESTINATION inc)
 

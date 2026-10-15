@@ -29,7 +29,4 @@ endif (CLR_CMAKE_HOST_UNIX)
 
 include_directories(${CLR_SHARED_DIR}/minipal)
 include_directories(${CLR_SHARED_DIR}/debug/inc)
-include_directories(${CLR_SHARED_DIR}/debug/inc/dump)
-include_directories(${CLR_SHARED_DIR}/hosts/inc)
 include_directories(${CLR_SHARED_DIR}/inc)
-include_directories(${CLR_SHARED_DIR}/gc)

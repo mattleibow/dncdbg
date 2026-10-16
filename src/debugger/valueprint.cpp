@@ -8,8 +8,8 @@
 #include "debugger/evaluation/evalhelpers/textwitheval.h"
 #include "debugger/evaluation/evalhelpers/value.h"
 #include "metadata/attributes.h"
-#include "metadata/corhelpers.h"
 #include "metadata/helpers.h"
+#include "metadata/sigparse.h"
 #include "utils/hresult.h"
 #include "utils/print.h"
 #include "utils/torelease.h"
@@ -119,9 +119,9 @@ HRESULT PrintEnumValue(ICorDebugValue *pInputValue, const void *enumValue, std::
         {
             if ((fieldAttr & fdStatic) == 0)
             {
-                // Skip calling convention with IMAGE_CEE_CS_CALLCONV_FIELD, since we're sure this is a field.
-                IfFailRet(CorSigUncompressSkipOneByte_EndPtr(pSig, pSig + cbSig));
-                IfFailRet(CorSigUncompressElementType_EndPtr(pSig, pSig + cbSig, enumUnderlyingType));
+                SigElementType sigElementType;
+                IfFailRet(ParseFieldSig(trMDImport, pSig, pSig + cbSig, sigElementType));
+                enumUnderlyingType = sigElementType.elemType;
                 break;
             }
         }

@@ -12,7 +12,6 @@
 #include "debugger/evaluation/primitivetypes/types.h"
 #include "debugger/evaluation/walkers/walkers.h"
 #include "debugger/valueprint.h"
-#include "metadata/corhelpers.h"
 #include "metadata/helpers.h"
 #include "metadata/modules.h"
 #include "metadata/sigparse.h"
@@ -62,12 +61,12 @@ void EnumerateTypeParameters(ICorDebugType *pType, std::vector<ToRelease<ICorDeb
     }
 }
 
-HRESULT CreateLiteralValueImpl(ICorDebugThread *pThread, PCCOR_SIGNATURE pSig, PCCOR_SIGNATURE pSigEnd,
-                               CorElementType underlyingType, UVCP_CONSTANT pRawValue, ULONG rawValueLength,
+HRESULT CreateLiteralValueImpl(ICorDebugThread *pThread, const SigConstant &sigConstant,
+                               UVCP_CONSTANT pRawValue, ULONG rawValueLength,
                                ICorDebugValue **ppLiteralValue, std::string &realDisplayTypeName,
                                bool valueInlineInSig = false)
 {
-    if (pThread == nullptr || pSig == nullptr || pSigEnd == nullptr || ppLiteralValue == nullptr)
+    if (pThread == nullptr || ppLiteralValue == nullptr)
     {
         return E_POINTER;
     }
@@ -75,6 +74,9 @@ HRESULT CreateLiteralValueImpl(ICorDebugThread *pThread, PCCOR_SIGNATURE pSig, P
     *ppLiteralValue = nullptr;
     realDisplayTypeName.clear();
     HRESULT Status = S_OK;
+
+    const SigElementType &sigElementType = sigConstant.elementType;
+    const mdToken typeToken = sigElementType.typeToken;
 
     auto createByTypeDef = [&](ICorDebugModule *pModule, mdTypeDef typeDef) -> HRESULT
     {
@@ -131,7 +133,9 @@ HRESULT CreateLiteralValueImpl(ICorDebugThread *pThread, PCCOR_SIGNATURE pSig, P
         return S_OK;
     };
 
-    switch (underlyingType)
+    CorElementType elemType = sigElementType.elemType;
+
+    switch (elemType)
     {
         case ELEMENT_TYPE_OBJECT:
         {
@@ -141,38 +145,21 @@ HRESULT CreateLiteralValueImpl(ICorDebugThread *pThread, PCCOR_SIGNATURE pSig, P
         case ELEMENT_TYPE_ARRAY:
         case ELEMENT_TYPE_SZARRAY:
         {
-            ToRelease<ICorDebugFrame> trFrame;
-            IfFailRet(pThread->GetActiveFrame(&trFrame));
-            ToRelease<ICorDebugFunction> trFunction;
-            IfFailRet(trFrame->GetFunction(&trFunction));
-            ToRelease<ICorDebugModule> trModule;
-            IfFailRet(trFunction->GetModule(&trModule));
-            ToRelease<IUnknown> trUnknown;
-            IfFailRet(trModule->GetMetaDataInterface(IID_IMetaDataImport, &trUnknown));
-            ToRelease<IMetaDataImport> trMDImport;
-            IfFailRet(trUnknown->QueryInterface(IID_IMetaDataImport, reinterpret_cast<void **>(&trMDImport)));
-
-            std::list<std::string> args;
-            SigElementType sigType;
-            pSig--; // step back to the element type byte so ParseElementType() can re-read it
-            if (SUCCEEDED(ParseElementType(trMDImport, pSig, pSigEnd, 0, sigType, &args, true)))
-            {
-                realDisplayTypeName = MetadataHelpers::ConvertMetadataToDisplayName(sigType.metadataTypeName, &args);
-            }
+            std::list<std::string> args = sigConstant.args;
+            realDisplayTypeName = MetadataHelpers::ConvertMetadataToDisplayName(sigElementType.metadataTypeName, &args);
 
             IfFailRet(createNullObjectValue());
             break;
         }
         case ELEMENT_TYPE_VALUETYPE:
         {
-            mdToken typeToken = mdTokenNil;
-            IfFailRet(CorSigUncompressToken_EndPtr(pSig, pSigEnd, typeToken));
-
-            if (valueInlineInSig)
+            // TODO add support for generic types
+            if (MetadataHelpers::ParseTotalGenericArity(sigElementType.metadataTypeName) != 0)
             {
-                pRawValue = pSig;
-                // Note, rawValueLength is not updated here, since it is never read for local constants.
+                return E_NOTIMPL;
             }
+
+            const bool decimalConstant = (sigElementType.metadataTypeName == "System.Decimal");
 
             ToRelease<ICorDebugFrame> trFrame;
             IfFailRet(pThread->GetActiveFrame(&trFrame));
@@ -184,10 +171,6 @@ HRESULT CreateLiteralValueImpl(ICorDebugThread *pThread, PCCOR_SIGNATURE pSig, P
             IfFailRet(trModule->GetMetaDataInterface(IID_IMetaDataImport, &trUnknown));
             ToRelease<IMetaDataImport> trMDImport;
             IfFailRet(trUnknown->QueryInterface(IID_IMetaDataImport, reinterpret_cast<void **>(&trMDImport)));
-
-            std::string metadataName;
-            MetadataHelpers::GetFQMDTypeNameByToken(typeToken, trMDImport, metadataName);
-            const bool decimalConstant = (metadataName == "System.Decimal");
 
             ToRelease<ICorDebugClass> trClass;
             if (TypeFromToken(typeToken) == mdtTypeDef)
@@ -322,8 +305,11 @@ HRESULT CreateLiteralValueImpl(ICorDebugThread *pThread, PCCOR_SIGNATURE pSig, P
         }
         case ELEMENT_TYPE_CLASS:
         {
-            mdToken typeToken = mdTokenNil;
-            IfFailRet(CorSigUncompressToken_EndPtr(pSig, pSigEnd, typeToken));
+            // TODO add support for generic types
+            if (MetadataHelpers::ParseTotalGenericArity(sigElementType.metadataTypeName) != 0)
+            {
+                return E_NOTIMPL;
+            }
 
             ToRelease<ICorDebugFrame> trFrame;
             IfFailRet(pThread->GetActiveFrame(&trFrame));
@@ -351,15 +337,8 @@ HRESULT CreateLiteralValueImpl(ICorDebugThread *pThread, PCCOR_SIGNATURE pSig, P
             }
             else if (TypeFromToken(typeToken) == mdtTypeSpec)
             {
-                PCCOR_SIGNATURE pTypeSig = nullptr;
-                ULONG cbSig = 0;
-                IfFailRet(trMDImport->GetTypeSpecFromToken(typeToken, &pTypeSig, &cbSig));
-                SigElementType sigType;
-                std::list<std::string> args;
-                if (SUCCEEDED(ParseElementType(trMDImport, pTypeSig, pTypeSig + cbSig, 0, sigType, &args, true)))
-                {
-                    realDisplayTypeName = MetadataHelpers::ConvertMetadataToDisplayName(sigType.metadataTypeName, &args);
-                }
+                std::list<std::string> args = sigConstant.args;
+                realDisplayTypeName = MetadataHelpers::ConvertMetadataToDisplayName(sigElementType.metadataTypeName, &args);
 
                 IfFailRet(createNullObjectValue());
             }
@@ -422,7 +401,7 @@ HRESULT CreateLiteralValueImpl(ICorDebugThread *pThread, PCCOR_SIGNATURE pSig, P
             // the memory past the blob would be read.
             const void *pSetValueData = pRawValue;
             uintptr_t rawValue = 0;
-            if (underlyingType == ELEMENT_TYPE_I || underlyingType == ELEMENT_TYPE_U)
+            if (elemType == ELEMENT_TYPE_I || elemType == ELEMENT_TYPE_U)
             {
                 size_t copySize = 0;
                 if (pRawValue != nullptr && rawValueLength > 0)
@@ -454,7 +433,7 @@ HRESULT CreateLiteralValueImpl(ICorDebugThread *pThread, PCCOR_SIGNATURE pSig, P
                 if (copySize > 0)
                 {
                     std::memcpy(&rawValue, pRawValue, copySize);
-                    if (underlyingType == ELEMENT_TYPE_I && copySize < sizeof(uintptr_t))
+                    if (elemType == ELEMENT_TYPE_I && copySize < sizeof(uintptr_t))
                     {
                         // Sign-extend the truncated value (e.g., a negative nint constant).
                         const size_t signBitOffset = (copySize * std::numeric_limits<uint8_t>::digits) - 1;
@@ -467,22 +446,22 @@ HRESULT CreateLiteralValueImpl(ICorDebugThread *pThread, PCCOR_SIGNATURE pSig, P
                 }
                 pSetValueData = &rawValue;
 
-                if (underlyingType == ELEMENT_TYPE_I)
+                if (elemType == ELEMENT_TYPE_I)
                 {
                     realDisplayTypeName = "nint";
-                    underlyingType = sizeof(intptr_t) == 4 ? ELEMENT_TYPE_I4 : ELEMENT_TYPE_I8;
+                    elemType = sizeof(intptr_t) == 4 ? ELEMENT_TYPE_I4 : ELEMENT_TYPE_I8;
                 }
                 else
                 {
                     realDisplayTypeName = "nuint";
-                    underlyingType = sizeof(uintptr_t) == 4 ? ELEMENT_TYPE_U4 : ELEMENT_TYPE_U8;
+                    elemType = sizeof(uintptr_t) == 4 ? ELEMENT_TYPE_U4 : ELEMENT_TYPE_U8;
                 }
             }
 
             ToRelease<ICorDebugEval> trEval;
             IfFailRet(pThread->CreateEval(&trEval));
             ToRelease<ICorDebugValue> trValue;
-            IfFailRet(trEval->CreateValue(underlyingType, nullptr, &trValue));
+            IfFailRet(trEval->CreateValue(elemType, nullptr, &trValue));
             ToRelease<ICorDebugGenericValue> trGenericValue;
             IfFailRet(trValue->QueryInterface(IID_ICorDebugGenericValue, reinterpret_cast<void **>(&trGenericValue)));
             IfFailRet(trGenericValue->SetValue(const_cast<void *>(pSetValueData))); // NOLINT(cppcoreguidelines-pro-type-const-cast)
@@ -492,26 +471,6 @@ HRESULT CreateLiteralValueImpl(ICorDebugThread *pThread, PCCOR_SIGNATURE pSig, P
         default:
             return E_INVALIDARG;
     }
-    return S_OK;
-}
-
-// Reads the underlying type from the signature, skipping the custom modifiers
-// ("CustomMod*" in the signature grammar) that may precede it. On return, pSig
-// points just past the type byte.
-HRESULT ReadUnderlyingType(PCCOR_SIGNATURE &pSig, PCCOR_SIGNATURE pSigEnd,
-                           CorElementType &underlyingType)
-{
-    HRESULT Status = S_OK;
-    IfFailRet(CorSigUncompressElementType_EndPtr(pSig, pSigEnd, underlyingType));
-    while (underlyingType == ELEMENT_TYPE_CMOD_OPT ||
-           underlyingType == ELEMENT_TYPE_CMOD_REQD)
-    {
-        // Skip the modifier type token; it is not needed for literal constants.
-        mdToken token = mdTokenNil;
-        IfFailRet(CorSigUncompressToken_EndPtr(pSig, pSigEnd, token));
-        IfFailRet(CorSigUncompressElementType_EndPtr(pSig, pSigEnd, underlyingType));
-    }
-
     return S_OK;
 }
 
@@ -753,14 +712,12 @@ HRESULT CreateBooleanValue(ICorDebugThread *pThread, ICorDebugValue **ppValue, b
     return trGenValue->SetValue(static_cast<void *>(&boolValue));
 }
 
-HRESULT CreateLiteralFieldValue(ICorDebugThread *pThread, PCCOR_SIGNATURE pSig, PCCOR_SIGNATURE pSigEnd, UVCP_CONSTANT pRawValue,
+HRESULT CreateLiteralFieldValue(ICorDebugThread *pThread, const SigConstant &sigConstant, UVCP_CONSTANT pRawValue,
                                 ULONG rawValueLength, ICorDebugValue **ppLiteralValue, std::string &realDisplayTypeName)
 {
     // https://learn.microsoft.com/en-us/dotnet/csharp/programming-guide/classes-and-structs/constants
     // Only the C# built-in types may be declared as const. Reference type constants other than String can only be initialized
     // with a null value. User-defined types, including classes, structs, and arrays, cannot be const.
-
-    // The signature format is: FIELD CustomMod* Type
 
     if (pRawValue == nullptr ||
         pThread == nullptr ||
@@ -769,14 +726,7 @@ HRESULT CreateLiteralFieldValue(ICorDebugThread *pThread, PCCOR_SIGNATURE pSig, 
         return E_INVALIDARG;
     }
 
-    HRESULT Status = S_OK;
-    // Skip the calling convention byte (IMAGE_CEE_CS_CALLCONV_FIELD), since we are sure this is a field.
-    IfFailRet(CorSigUncompressSkipOneByte_EndPtr(pSig, pSigEnd));
-
-    CorElementType underlyingType = ELEMENT_TYPE_MAX;
-    IfFailRet(ReadUnderlyingType(pSig, pSigEnd, underlyingType));
-
-    if (underlyingType == ELEMENT_TYPE_STRING)
+    if (sigConstant.elementType.elemType == ELEMENT_TYPE_STRING)
     {
         // https://learn.microsoft.com/en-us/dotnet/core/unmanaged-api/metadata/interfaces/imetadataimport-getfieldprops-method
         // pcchValue [out] The size in chars of ppValue, or zero if no string exists.
@@ -785,43 +735,25 @@ HRESULT CreateLiteralFieldValue(ICorDebugThread *pThread, PCCOR_SIGNATURE pSig, 
         rawValueLength = rawValueLength * sizeof(WCHAR);
     }
 
-    return CreateLiteralValueImpl(pThread, pSig, pSigEnd, underlyingType, pRawValue, rawValueLength, ppLiteralValue, realDisplayTypeName);
+    return CreateLiteralValueImpl(pThread, sigConstant, pRawValue, rawValueLength, ppLiteralValue, realDisplayTypeName);
 }
 
-HRESULT CreateLiteralLocalValue(ICorDebugThread *pThread, PCCOR_SIGNATURE pSig, PCCOR_SIGNATURE pSigEnd,
+HRESULT CreateLiteralLocalValue(ICorDebugThread *pThread, const SigConstant &sigConstant,
                                 ICorDebugValue **ppLiteralValue, std::string &realDisplayTypeName)
 {
     // https://learn.microsoft.com/en-us/dotnet/csharp/programming-guide/classes-and-structs/constants
     // Only the C# built-in types may be declared as const. Reference type constants other than String can only be initialized
     // with a null value. User-defined types, including classes, structs, and arrays, cannot be const.
 
-    // For local constants, the value is encoded in the signature.
-    // The signature format is: CustomMod* Type Value
-
     if (pThread == nullptr ||
-        pSig == nullptr ||
-        pSigEnd == nullptr ||
+        sigConstant.pRawValue == nullptr ||
         ppLiteralValue == nullptr)
     {
         return E_INVALIDARG;
     }
 
-    HRESULT Status = S_OK;
-    CorElementType underlyingType = ELEMENT_TYPE_MAX;
-    IfFailRet(ReadUnderlyingType(pSig, pSigEnd, underlyingType));
-
-    const UVCP_CONSTANT pRawValue = pSig;
-    auto rawValueLength = static_cast<ULONG>(pSigEnd - pSig);
-
-    static constexpr uint8_t nullStringMarker = 0xFF;
-    if (underlyingType == ELEMENT_TYPE_STRING &&
-        rawValueLength > 0 &&
-        *reinterpret_cast<const uint8_t *>(pRawValue) == nullStringMarker)
-    {
-        rawValueLength = 0;
-    }
-
-    return CreateLiteralValueImpl(pThread, pSig, pSigEnd, underlyingType, pRawValue, rawValueLength,
+    // For local constants, the value is encoded in the signature (see ParseLiteralLocalSig()).
+    return CreateLiteralValueImpl(pThread, sigConstant, sigConstant.pRawValue, sigConstant.rawValueLength,
                                   ppLiteralValue, realDisplayTypeName, true);
 }
 

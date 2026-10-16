@@ -24,6 +24,9 @@ struct SigElementType
 {
     CorElementType elemType{ELEMENT_TYPE_MAX};
     std::string metadataTypeName;
+    // The TypeDef/TypeRef/TypeSpec token the element type was resolved from,
+    // or mdTokenNil for element types that have no token.
+    mdToken typeToken{mdTokenNil};
     std::string parameterModifier; // for example, `in`, `out` or `ref`
     CorElementType genericElemType{ELEMENT_TYPE_END};
     ULONG varNum{0};
@@ -38,6 +41,7 @@ struct SigElementType
     void Clear()
     {
         elemType = ELEMENT_TYPE_MAX;
+        typeToken = mdTokenNil;
         metadataTypeName.clear();
         parameterModifier.clear();
         genericElemType = ELEMENT_TYPE_END;
@@ -56,6 +60,26 @@ struct SigElementType
     }
 };
 
+// A parsed constant ("literal") field or local variable signature.
+// Note, the constant value itself is not part of the FieldSig grammar: for fields it is stored
+// in the metadata Constant table, while for local constants it is encoded in the signature blob
+// right after the type.
+struct SigConstant
+{
+    SigElementType elementType;          // the constant value type
+    std::list<std::string> args;         // "display" names of the parsed generic arguments
+    PCCOR_SIGNATURE pRawValue{nullptr};  // the constant value encoded in the signature (local constants only), nullptr otherwise
+    ULONG rawValueLength{0};             // the size of the constant value encoded in the signature, in bytes
+
+    void Clear()
+    {
+        elementType.Clear();
+        args.clear();
+        pRawValue = nullptr;
+        rawValueLength = 0;
+    }
+};
+
 HRESULT ParseElementType(IMetaDataImport *pMDImport, PCCOR_SIGNATURE &pSig, PCCOR_SIGNATURE pSigEnd,
                          DWORD flags, SigElementType &sigElementType, std::list<std::string> *args = nullptr,
                          bool addElementTypeName = false);
@@ -65,7 +89,14 @@ HRESULT ParseMethodSig(IMetaDataImport *pMDImport, mdMethodDef methodDef, PCCOR_
                        bool addElementTypeName = false, uint32_t *pMethodGenParamCount = nullptr);
 
 HRESULT ParseFieldSig(IMetaDataImport *pMDImport, PCCOR_SIGNATURE pSig, PCCOR_SIGNATURE pSigEnd,
-                      SigElementType &sigElementType, bool addElementTypeName = false);
+                      SigElementType &sigElementType, bool addElementTypeName = false,
+                      std::list<std::string> *args = nullptr);
+
+HRESULT ParseLiteralFieldSig(IMetaDataImport *pMDImport, PCCOR_SIGNATURE pSig, PCCOR_SIGNATURE pSigEnd,
+                             SigConstant &sigConstant);
+
+HRESULT ParseLiteralLocalSig(IMetaDataImport *pMDImport, PCCOR_SIGNATURE pSig, PCCOR_SIGNATURE pSigEnd,
+                             SigConstant &sigConstant);
 
 HRESULT ApplyGenericTypeParameters(const std::vector<SigElementType> &genericTypeParameters, SigElementType &methodArg);
 HRESULT ApplyGenericMethodParameters(const std::vector<SigElementType> &genericMethodParameters, SigElementType &methodArg);

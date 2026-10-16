@@ -557,8 +557,11 @@ HRESULT WalkMembers(ICorDebugValue *pInputValue, ICorDebugThread *pThread, Frame
                     {
                         if (fieldAttr & fdLiteral)
                         {
+                            SigConstant sigConstant;
+                            IfFailRet(ParseLiteralFieldSig(trMDImport, pSig, pSig + cbSig, sigConstant));
+
                             std::string realDisplayTypeName;
-                            IfFailRet(EvalExec::CreateLiteralFieldValue(pThread, pSig, pSig + cbSig, pRawValue,
+                            IfFailRet(EvalExec::CreateLiteralFieldValue(pThread, sigConstant, pRawValue,
                                                                         rawValueLength, ppResultValue, realDisplayTypeName));
 
                             if (pFallbackTypeName != nullptr)
@@ -962,8 +965,11 @@ HRESULT WalkStaticMembers(ICorDebugType *pInputType, ICorDebugThread *pThread, F
                     {
                         if (fieldAttr & fdLiteral)
                         {
+                            SigConstant sigConstant;
+                            IfFailRet(ParseLiteralFieldSig(trMDImport, pSig, pSig + cbSig, sigConstant));
+
                             std::string realDisplayTypeName;
-                            IfFailRet(EvalExec::CreateLiteralFieldValue(pThread, pSig, pSig + cbSig, pRawValue,
+                            IfFailRet(EvalExec::CreateLiteralFieldValue(pThread, sigConstant, pRawValue,
                                                                         rawValueLength, ppResultValue, realDisplayTypeName));
 
                             if (pFallbackTypeName != nullptr)

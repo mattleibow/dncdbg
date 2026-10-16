@@ -8,6 +8,7 @@
 #include "metadata/helpers.h"
 #include "utils/hresult.h"
 #include <cassert>
+#include <cstdint>
 #include <unordered_map>
 
 namespace dncdbg
@@ -578,6 +579,7 @@ HRESULT ParseElementType(IMetaDataImport *pMDImport, PCCOR_SIGNATURE &pSig, PCCO
         {
             mdToken token = mdTokenNil;
             IfFailRet(CorSigUncompressToken_EndPtr(pSig, pSigEnd, token));
+            sigElementType.typeToken = token;
             IfFailRet(MetadataHelpers::GetFQMDTypeNameByToken(token, pMDImport, sigElementType.metadataTypeName));
             break;
         }
@@ -611,6 +613,7 @@ HRESULT ParseElementType(IMetaDataImport *pMDImport, PCCOR_SIGNATURE &pSig, PCCO
             }
             mdToken token = mdTokenNil;
             IfFailRet(CorSigUncompressToken_EndPtr(pSig, pSigEnd, token));
+            sigElementType.typeToken = token;
             sigElementType.elemType = innerElemType;
             IfFailRet(MetadataHelpers::GetFQMDTypeNameByToken(token, pMDImport, sigElementType.metadataTypeName));
             ULONG number = 0;
@@ -728,7 +731,7 @@ HRESULT ParseMethodSig(IMetaDataImport *pMDImport, mdMethodDef methodDef, PCCOR_
 }
 
 HRESULT ParseFieldSig(IMetaDataImport *pMDImport, PCCOR_SIGNATURE pSig, PCCOR_SIGNATURE pSigEnd,
-                      SigElementType &sigElementType, bool addElementTypeName)
+                      SigElementType &sigElementType, bool addElementTypeName, std::list<std::string> *args)
 {
     HRESULT Status = S_OK;
 
@@ -741,7 +744,53 @@ HRESULT ParseFieldSig(IMetaDataImport *pMDImport, PCCOR_SIGNATURE pSig, PCCOR_SI
     }
 
     // 2. CustomMod* Type
-    return ParseElementType(pMDImport, pSig, pSigEnd, 0, sigElementType, nullptr, addElementTypeName);
+    return ParseElementType(pMDImport, pSig, pSigEnd, 0, sigElementType, args, addElementTypeName);
+}
+
+HRESULT ParseLiteralFieldSig(IMetaDataImport *pMDImport, PCCOR_SIGNATURE pSig, PCCOR_SIGNATURE pSigEnd,
+                             SigConstant &sigConstant)
+{
+    if (pMDImport == nullptr || pSig == nullptr || pSigEnd == nullptr)
+    {
+        return E_POINTER;
+    }
+
+    sigConstant.Clear();
+
+    // FieldSig ::= FIELD CustomMod* Type
+    // Note, the constant value itself is not part of the signature: for fields it is stored in
+    // the metadata Constant table (see IMetaDataImport::GetFieldProps()).
+    return ParseFieldSig(pMDImport, pSig, pSigEnd, sigConstant.elementType, true, &sigConstant.args);
+}
+
+HRESULT ParseLiteralLocalSig(IMetaDataImport *pMDImport, PCCOR_SIGNATURE pSig, PCCOR_SIGNATURE pSigEnd,
+                             SigConstant &sigConstant)
+{
+    if (pMDImport == nullptr || pSig == nullptr || pSigEnd == nullptr)
+    {
+        return E_POINTER;
+    }
+
+    sigConstant.Clear();
+
+    // The local constant signature format is: CustomMod* Type Value
+    HRESULT Status = S_OK;
+    IfFailRet(ParseElementType(pMDImport, pSig, pSigEnd, 0, sigConstant.elementType, &sigConstant.args, true));
+
+    // For local constants, the value is encoded in the signature right after the type.
+    sigConstant.pRawValue = pSig;
+    sigConstant.rawValueLength = static_cast<ULONG>(pSigEnd - pSig);
+
+    // A null string constant is encoded as a single 0xFF byte.
+    static constexpr uint8_t nullStringMarker = 0xFF;
+    if (sigConstant.elementType.elemType == ELEMENT_TYPE_STRING &&
+        sigConstant.rawValueLength == 1 &&
+        *reinterpret_cast<const uint8_t *>(sigConstant.pRawValue) == nullStringMarker)
+    {
+        sigConstant.rawValueLength = 0;
+    }
+
+    return S_OK;
 }
 
 HRESULT ApplyGenericTypeParameters(const std::vector<SigElementType> &genericTypeParameters, SigElementType &methodArg)

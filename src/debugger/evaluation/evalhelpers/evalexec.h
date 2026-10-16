@@ -39,10 +39,10 @@ HRESULT CreateArray(ICorDebugThread *pThread, ICorDebugType *pElementType,
 
 HRESULT CreateBooleanValue(ICorDebugThread *pThread, ICorDebugValue **ppValue, bool setToTrue);
 
-HRESULT CreateLiteralFieldValue(ICorDebugThread *pThread, PCCOR_SIGNATURE pSig, PCCOR_SIGNATURE pSigEnd, UVCP_CONSTANT pRawValue,
+HRESULT CreateLiteralFieldValue(ICorDebugThread *pThread, const SigConstant &sigConstant, UVCP_CONSTANT pRawValue,
                                 ULONG rawValueLength, ICorDebugValue **ppLiteralValue, std::string &realDisplayTypeName);
 
-HRESULT CreateLiteralLocalValue(ICorDebugThread *pThread, PCCOR_SIGNATURE pSig, PCCOR_SIGNATURE pSigEnd,
+HRESULT CreateLiteralLocalValue(ICorDebugThread *pThread, const SigConstant &sigConstant,
                                 ICorDebugValue **ppLiteralValue, std::string &realDisplayTypeName);
 
 HRESULT CreateNullValue(ICorDebugThread *pThread, ICorDebugValue **ppValue);

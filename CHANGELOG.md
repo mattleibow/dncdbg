@@ -14,6 +14,7 @@ Upcoming changes compared to the previous version.
 - Split evalstackmachine.h/.cpp into dedicated `evaluation/stackmachine` modules (public `stackmachine`, `run`, `internal_helpers` and per-logic-block `handler_*` sources; value creation helpers moved to `EvalExec`).
 - Stripped the write, editor and delta functionality from the vendored `dnmd` metadata library, leaving it as a read-only parser.
 - Stripped unused sources and build files from the vendored `diagnostics` tree (`src/shared`, `src/dbgshim` and `eng/native`), keeping only what the DNCDbg build requires; also dropped dead `include_directories` from `shared.cmake`.
+- Moved literal field and local constant signature parsing into dedicated `metadata/sigparse` routines (`ParseLiteralFieldSig` and `ParseLiteralLocalSig`).
 
 <br>
 <br>

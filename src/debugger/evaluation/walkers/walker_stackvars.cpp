@@ -380,8 +380,12 @@ HRESULT WalkStackVars(ICorDebugThread *pThread, FrameLevel frameLevel, const Wal
                 {
                     PCCOR_SIGNATURE pSig = constant.signature.data();
                     PCCOR_SIGNATURE pSigEnd = pSig + constant.signature.size();
+
+                    SigConstant sigConstant;
+                    IfFailRet(ParseLiteralLocalSig(trMDImport, pSig, pSigEnd, sigConstant));
+
                     std::string realDisplayTypeName;
-                    IfFailRet(EvalExec::CreateLiteralLocalValue(pThread, pSig, pSigEnd, ppResultValue, realDisplayTypeName));
+                    IfFailRet(EvalExec::CreateLiteralLocalValue(pThread, sigConstant, ppResultValue, realDisplayTypeName));
 
                     if (pFallbackTypeName != nullptr)
                     {

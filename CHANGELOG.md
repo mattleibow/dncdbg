@@ -17,6 +17,9 @@ Upcoming changes compared to the previous version.
 - Moved literal field and local constant signature parsing into dedicated `metadata/sigparse` routines (`ParseLiteralFieldSig` and `ParseLiteralLocalSig`).
 - Reused `ParseFieldSig` to detect the enum's underlying type when printing enum values instead of parsing the field signature manually.
 
+#### Fixed
+- Fixed startup failure on systems with no locales generated at all (e.g. a minimal Ubuntu chroot): fall back to the "C.UTF-8" or "C" locale when the environment locale is unavailable instead of exiting.
+
 <br>
 <br>
 

@@ -89,13 +89,36 @@ int
     main(int argc, char *argv[])
 {
 #if defined(FEATURE_PAL) && !defined(__APPLE__)
+    // std::mbstowcs(), std::towupper() and std::wcstombs() (see to_uppercase()
+    // in utils/utftoupper_unix.cpp) interpret the data according to the current
+    // LC_CTYPE locale, so a UTF-8 capable locale is required to process UTF-8
+    // strings correctly. Try the locale from the environment first. On systems
+    // with no locales generated at all (e.g. a minimal Ubuntu chroot) this call
+    // can fail; therefore, fall back to the "C.UTF-8" locale (built into glibc
+    // and musl, so it works without the `locales` package) and, as a last
+    // resort, to the plain "C" locale, which is guaranteed to succeed by the
+    // ISO C standard. Only a failure to select the latter (not expected in
+    // practice) is treated as fatal. Note: with the plain "C" locale,
+    // to_uppercase() handles ASCII input only and returns its input unchanged
+    // otherwise, so the program keeps working in either case.
     if (std::setlocale(LC_ALL, "") == nullptr)
     {
-        std::cerr << "Failed to set default locale.\n";
-        return EXIT_FAILURE;
+        if (std::setlocale(LC_ALL, "C.UTF-8") == nullptr)
+        {
+            if (std::setlocale(LC_ALL, "C") == nullptr)
+            {
+                std::cerr << "Failed to set locale.\n";
+                return EXIT_FAILURE;
+            }
+        }
     }
 #endif // defined(FEATURE_PAL) && !defined(__APPLE__)
 
+    // Force the "C" numeric locale regardless of the locale selected above, so
+    // std::stof()/std::stod() (real literals) and std::stoll()/std::stoull()
+    // (integer literals, see expressionparser/helpers.cpp), as well as other
+    // numeric conversions, always recognize '.' as the decimal separator,
+    // independent of the environment locale.
     if (std::setlocale(LC_NUMERIC, "C") == nullptr)
     {
         std::cerr << "Failed to set numeric locale to C.\n";

@@ -6,8 +6,10 @@
 
 #include "debuginfo/sourcefilemap.h"
 #include "utils/utftoupper.h"
+#include <base64/base64.hpp>
 #include <json/json.hpp>
 #include <cassert>
+#include <cstring>
 #include <map>
 #include <string>
 
@@ -50,6 +52,31 @@ void RunInternalTests() // NOLINT(misc-use-internal-linkage)
         assert(testString == std::string("ПРИВЕТ, HELLO, AUF WIEDERSEHEN, GRÜSSE, ΚΑΛΗΜΈΡΑ") ||
                testString == std::string("ПРИВЕТ, HELLO, AUF WIEDERSEHEN, GRÜßE, ΚΑΛΗΜΈΡΑ") ||
                testString == std::string("ПРИВЕТ, HELLO, AUF WIEDERSEHEN, GRÜẞE, ΚΑΛΗΜΈΡΑ"));
+    }
+
+    // Test base64 encoding and decoding
+    {
+        auto encoded = base64::to_base64("Hello, World!");
+        assert(encoded == "SGVsbG8sIFdvcmxkIQ==");
+
+        auto decoded = base64::from_base64("SGVsbG8sIFdvcmxkIQ==");
+        assert(decoded == "Hello, World!");
+
+        constexpr int32_t value = -34532535;
+        int32_t i1 = value;
+
+        encoded = base64::to_base64({reinterpret_cast<char *>(&i1), sizeof(i1)});
+#if BIGENDIAN
+        // TODO
+#else
+        assert(encoded == "SRPx/Q==");
+#endif
+
+        auto decVector = base64::decode_into<std::vector<uint8_t>>(encoded);
+        int32_t i2 = 0;
+        assert(decVector.size() == sizeof(int32_t));
+        std::memcpy(&i2, decVector.data(), sizeof(int32_t));
+        assert(i2 == value);
     }
 }
 

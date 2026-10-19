@@ -13,6 +13,15 @@ The licenses below apply only to the corresponding third-party components. The p
 - **Copyright:** .NET Foundation and Contributors
 - **License text:** [`third-party/diagnostics/LICENSE.TXT`](third-party/diagnostics/LICENSE.TXT)
 
+## base64
+
+- **Project:** [base64](https://github.com/tobiaslocker/base64)
+- **Included version:** `8d96a2a`
+- **Included in:** [`third-party/base64`](third-party/base64/)
+- **License:** MIT License
+- **Copyright:** © 2019 Tobias Locker
+- **License text:** [`third-party/base64/LICENSE`](third-party/base64/LICENSE)
+
 ## DNMD
 
 - **Project:** [DNMD](https://github.com/AaronRobinsonMSFT/DNMD)

@@ -90,6 +90,9 @@ HRESULT GetNativeAddress(ICorDebugFunction *pFunction, uint32_t ilOffset, CORDB_
 // Fast conversion of a CORDB_ADDRESS to a std::string for DAP memory address related fields.
 // The result includes the "0x" prefix followed by 16 hexadecimal digits.
 std::string AddrToString(CORDB_ADDRESS corAddr);
+// Parse a DAP "memoryReference" string (hexadecimal with the "0x" prefix, as produced by
+// AddrToString(), or plain decimal) into a CORDB_ADDRESS.
+HRESULT StringToAddr(const std::string &memoryReference, CORDB_ADDRESS &corAddr);
 
 // Find the kickoff method for an async state machine `MoveNext` method.
 // If possible, call the faster `DebugInfo::GetStateMachineKickoffMethod()` first.

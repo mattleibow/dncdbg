@@ -1504,6 +1504,30 @@ std::string AddrToString(CORDB_ADDRESS corAddr)
     return strAddr;
 }
 
+// Returns E_INVALIDARG when the string is empty, malformed, or does not fit into CORDB_ADDRESS.
+HRESULT StringToAddr(const std::string &memoryReference, CORDB_ADDRESS &corAddr)
+{
+    const std::string_view memoryReferenceView(memoryReference);
+
+    // Hexadecimal values start with the "0x" (or "0X") prefix; everything else is parsed as decimal.
+    const bool isHex = memoryReferenceView.size() >= 2 && memoryReferenceView.at(0) == '0' &&
+                       (memoryReferenceView.at(1) == 'x' || memoryReferenceView.at(1) == 'X');
+
+    // Note, std::from_chars does not recognize the "0x" base prefix, so it must be skipped manually.
+    const std::string_view numberView = isHex ? memoryReferenceView.substr(2) : memoryReferenceView;
+
+    CORDB_ADDRESS addr = 0;
+    const auto result = std::from_chars(numberView.data(), numberView.data() + numberView.size(), addr,
+                                        isHex ? 16 : 10);
+    if (result.ec != std::errc{} || result.ptr != numberView.data() + numberView.size())
+    {
+        return E_INVALIDARG; // Empty, malformed (e.g. with trailing characters), or out-of-range input.
+    }
+
+    corAddr = addr;
+    return S_OK;
+}
+
 // Find the kickoff method for an async state machine `MoveNext` method.
 // If possible, call the faster `DebugInfo::GetStateMachineKickoffMethod()` first.
 HRESULT GetStateMachineKickoffMethod(ICorDebugModule *pModule, mdMethodDef moveNextMethodToken, mdMethodDef &kickoffMethodToken)

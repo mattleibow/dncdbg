@@ -21,6 +21,7 @@
 #include "debugger/variables.h"
 #include "debuginfo/debuginfo.h"
 #include "debuginfo/sourcefilemap.h"
+#include "metadata/helpers.h"
 #include "metadata/modules.h"
 #include "protocol/dap_events.h"
 #include "utils/dbgshim.h"
@@ -1441,6 +1442,47 @@ HRESULT GetBreakpointLocations(const Source &source, const BreakpointLocation &r
 void SetSourceFileMap(std::map<std::string, std::string> &&map)
 {
     SourceFileMap::SetSourceFileMap(std::move(map));
+}
+
+HRESULT ReadMemory(const std::string &memoryReference, int32_t offset, uint32_t count,
+                   std::string &address, std::vector<uint8_t> &data)
+{
+    HRESULT Status = S_OK;
+
+    data.clear();
+
+    CORDB_ADDRESS addr = 0;
+    IfFailRet(MetadataHelpers::StringToAddr(memoryReference, addr));
+    addr += offset;
+
+    const ReadLock r_lock(GetDebugProcessRWLock());
+    IfFailRet(CheckDebugProcess());
+
+    if (count == 0)
+    {
+        address = MetadataHelpers::AddrToString(addr);
+        return S_OK;
+    }
+
+    // The buffer size is controlled by the DAP client, so the allocation may fail.
+    try
+    {
+        data.resize(count);
+    }
+    catch (const std::bad_alloc &)
+    {
+        return E_OUTOFMEMORY;
+    }
+
+    SIZE_T bytesRead = 0;
+    IfFailRet(GetTrProcess()->ReadMemory(addr, count, data.data(), &bytesRead));
+    if (bytesRead != count)
+    {
+        return E_FAIL;
+    }
+
+    address = MetadataHelpers::AddrToString(addr);
+    return S_OK;
 }
 
 } // namespace dncdbg::ManagedDebugger

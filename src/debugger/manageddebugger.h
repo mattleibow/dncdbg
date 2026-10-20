@@ -82,6 +82,8 @@ void GetLoadedSources(std::vector<Source> &sources);
 HRESULT GetBreakpointLocations(const Source &source, const BreakpointLocation &rangeToSearch,
                                std::vector<BreakpointLocation> &locations);
 void SetSourceFileMap(std::map<std::string, std::string> &&map);
+HRESULT ReadMemory(const std::string &memoryReference, int32_t offset, uint32_t count,
+                   std::string &address, std::vector<uint8_t> &data);
 
 void WriteStdin(gsl::span<const char> text);
 bool InitializeRemoteConsoleServer(int port);

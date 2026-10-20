@@ -13,11 +13,13 @@
 #include "types/types.h"
 #include "utils/hresult.h"
 #include "utils/logger.h"
+#include <base64/base64.hpp>
 #include <json/json.hpp>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <exception>
 #include <functional>
 #include <future>
@@ -1152,6 +1154,32 @@ HRESULT HandleCommand(const std::string &command, const nlohmann::json &argument
                 }
 
                 return ManagedDebugger::StartDebugSession();
+            }},
+        {"readMemory", [](const json &arguments, json &responseBody)
+            {
+                std::string memoryReference = arguments.at("memoryReference");
+                int32_t offset = arguments.value("offset", 0);
+                uint32_t count = arguments.at("count");
+
+                HRESULT Status = S_OK;
+                std::string address;
+                std::vector<uint8_t> data;
+                IfFailRet(ManagedDebugger::ReadMemory(memoryReference, offset, count, address, data));
+
+                try
+                {
+                    auto base64Data = base64::encode_into<std::string>(data.cbegin(), data.cend());
+                    responseBody.emplace("data", base64Data);
+                }
+                catch (const std::exception &ex)
+                {
+                    responseBody.emplace("message", ex.what());
+                    return E_FAIL;
+                }
+
+                responseBody.emplace("address", address);
+                responseBody.emplace("unreadableBytes", 0);
+                return S_OK;
             }}};
 
     const auto command_it = commands.find(command);

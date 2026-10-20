@@ -3,6 +3,7 @@ Upcoming changes compared to the previous version.
 
 #### DAP
 - Added `linesStartAt1`, `columnsStartAt1` and `supportsMemoryReferences` support in Initialize Request.
+- Added ReadMemory Request and Response.
 
 #### Added
 - Added TestStartAt0 and TestMemoryReferences.

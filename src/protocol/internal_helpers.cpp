@@ -105,6 +105,7 @@ void AddCapabilitiesTo(json &capabilities)
         capabilities.emplace("supportsRestartRequest", true);
     }
     capabilities.emplace("supportsReadMemoryRequest", true);
+    capabilities.emplace("supportsWriteMemoryRequest", true);
 }
 
 void SetupProtocolLoggingInternal(const std::string &path)

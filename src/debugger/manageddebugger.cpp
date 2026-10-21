@@ -41,6 +41,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <functional>
+#include <limits>
 #include <iomanip>
 #include <map>
 #include <memory>
@@ -1482,6 +1483,39 @@ HRESULT ReadMemory(const std::string &memoryReference, int32_t offset, uint32_t 
     }
 
     address = MetadataHelpers::AddrToString(addr);
+    return S_OK;
+}
+
+HRESULT WriteMemory(const std::string &memoryReference, int32_t offset, const std::vector<uint8_t> &data)
+{
+    HRESULT Status = S_OK;
+
+    CORDB_ADDRESS addr = 0;
+    IfFailRet(MetadataHelpers::StringToAddr(memoryReference, addr));
+    addr += offset;
+
+    const ReadLock r_lock(GetDebugProcessRWLock());
+    IfFailRet(CheckDebugProcess());
+
+    if (data.empty())
+    {
+        return S_OK;
+    }
+
+    if (data.size() > static_cast<size_t>(std::numeric_limits<DWORD>::max()))
+    {
+        return E_INVALIDARG;
+    }
+
+    SIZE_T written = 0;
+    // ICorDebugProcess::WriteMemory() takes a non-const buffer pointer, but does not modify the buffer.
+    IfFailRet(GetTrProcess()->WriteMemory(addr, static_cast<DWORD>(data.size()),
+                                          const_cast<BYTE *>(data.data()), &written)); // NOLINT(cppcoreguidelines-pro-type-const-cast)
+    if (written != data.size())
+    {
+        return E_FAIL;
+    }
+
     return S_OK;
 }
 

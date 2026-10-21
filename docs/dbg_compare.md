@@ -256,7 +256,7 @@
       <td align="center">❌</td>
     </tr>
     <tr>
-      <td align="left"><b>Read debugee process memory</b></td>
+      <td align="left"><b>Read and write debugee process memory</b></td>
       <td align="center">✅</td>
       <td align="center">❌</td>
       <td align="center">❓</td>

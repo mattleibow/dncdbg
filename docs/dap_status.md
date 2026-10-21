@@ -35,7 +35,7 @@ How to read the blocks below:
 
 #### Requests
 
-[Initialize Request](#initializerequest-initialize), [Launch Request](#launchrequest-launch), [Attach Request](#attachrequest-attach), [Restart Request](#restartrequest-restart), [Disconnect Request](#disconnectrequest-disconnect), [Terminate Request](#terminaterequest-terminate), [BreakpointLocations Request](#breakpointlocationsrequest-breakpointlocations), [SetBreakpoints Request](#setbreakpointsrequest-setbreakpoints), [SetFunctionBreakpoints Request](#setfunctionbreakpointsrequest-setfunctionbreakpoints), [SetExceptionBreakpoints Request](#setexceptionbreakpointsrequest-setexceptionbreakpoints), [ConfigurationDone Request](#configurationdonerequest-configurationdone), [Continue Request](#continuerequest-continue), [Next Request](#nextrequest-next), [StepIn Request](#stepinrequest-stepin), [StepOut Request](#stepoutrequest-stepout), [Pause Request](#pauserequest-pause), [Goto Request](#gotorequest-goto), [StackTrace Request](#stacktracerequest-stacktrace), [Scopes Request](#scopesrequest-scopes), [Variables Request](#variablesrequest-variables), [SetVariable Request](#setvariablerequest-setvariable), [Source Request](#sourcerequest-source), [Threads Request](#threadsrequest-threads), [Modules Request](#modulesrequest-modules), [LoadedSources Request](#loadedsourcesrequest-loadedsources), [Evaluate Request](#evaluaterequest-evaluate), [SetExpression Request](#setexpressionrequest-setexpression), [GotoTargets Request](#gototargetsrequest-gototargets), [ExceptionInfo Request](#exceptioninforequest-exceptioninfo), [ReadMemory Request](#readmemoryrequest-readmemory)
+[Initialize Request](#initializerequest-initialize), [Launch Request](#launchrequest-launch), [Attach Request](#attachrequest-attach), [Restart Request](#restartrequest-restart), [Disconnect Request](#disconnectrequest-disconnect), [Terminate Request](#terminaterequest-terminate), [BreakpointLocations Request](#breakpointlocationsrequest-breakpointlocations), [SetBreakpoints Request](#setbreakpointsrequest-setbreakpoints), [SetFunctionBreakpoints Request](#setfunctionbreakpointsrequest-setfunctionbreakpoints), [SetExceptionBreakpoints Request](#setexceptionbreakpointsrequest-setexceptionbreakpoints), [ConfigurationDone Request](#configurationdonerequest-configurationdone), [Continue Request](#continuerequest-continue), [Next Request](#nextrequest-next), [StepIn Request](#stepinrequest-stepin), [StepOut Request](#stepoutrequest-stepout), [Pause Request](#pauserequest-pause), [Goto Request](#gotorequest-goto), [StackTrace Request](#stacktracerequest-stacktrace), [Scopes Request](#scopesrequest-scopes), [Variables Request](#variablesrequest-variables), [SetVariable Request](#setvariablerequest-setvariable), [Source Request](#sourcerequest-source), [Threads Request](#threadsrequest-threads), [Modules Request](#modulesrequest-modules), [LoadedSources Request](#loadedsourcesrequest-loadedsources), [Evaluate Request](#evaluaterequest-evaluate), [SetExpression Request](#setexpressionrequest-setexpression), [GotoTargets Request](#gototargetsrequest-gototargets), [ExceptionInfo Request](#exceptioninforequest-exceptioninfo), [ReadMemory Request](#readmemoryrequest-readmemory), [WriteMemory Request](#writememoryrequest-writememory)
 
 #### Requests, not part of the DAP specification
 
@@ -512,6 +512,18 @@ How to read the blocks below:
 ✅  unreadableBytes?: number;
 ✅  data?: string;
 ```
+#### WriteMemoryRequest `writeMemory`
+```text
+✅  memoryReference: string;
+✅  offset?: number;
+❌  allowPartial?: boolean;
+✅  data: string;
+```
+#### WriteMemoryResponse
+```text
+❌  offset?: number;
+❌  bytesWritten?: number;
+```
 
 ### Requests, not part of the DAP specification
 
@@ -562,7 +574,7 @@ How to read the blocks below:
 ✅  supportsTerminateRequest?: boolean;
 ❌  supportsDataBreakpoints?: boolean;
 ✅  supportsReadMemoryRequest?: boolean;
-❌  supportsWriteMemoryRequest?: boolean;
+✅  supportsWriteMemoryRequest?: boolean;
 ❌  supportsDisassembleRequest?: boolean;
 ✅  supportsCancelRequest?: boolean;
 ✅  supportsBreakpointLocationsRequest?: boolean;

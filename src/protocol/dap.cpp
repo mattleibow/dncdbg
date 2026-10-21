@@ -1180,6 +1180,27 @@ HRESULT HandleCommand(const std::string &command, const nlohmann::json &argument
                 responseBody.emplace("address", address);
                 responseBody.emplace("unreadableBytes", 0);
                 return S_OK;
+            }},
+        {"writeMemory", [](const json &arguments, json &responseBody)
+            {
+                std::string memoryReference = arguments.at("memoryReference");
+                int32_t offset = arguments.value("offset", 0);
+                std::string dataBase64 = arguments.at("data");
+
+                std::vector<uint8_t> data;
+                try
+                {
+                    data = base64::decode_into<std::vector<uint8_t>>(dataBase64);
+                }
+                catch (const std::exception &ex)
+                {
+                    responseBody.emplace("message", ex.what());
+                    return E_FAIL;
+                }
+
+                HRESULT Status = S_OK;
+                IfFailRet(ManagedDebugger::WriteMemory(memoryReference, offset, data));
+                return S_OK;
             }}};
 
     const auto command_it = commands.find(command);

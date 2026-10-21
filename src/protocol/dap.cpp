@@ -1157,9 +1157,9 @@ HRESULT HandleCommand(const std::string &command, const nlohmann::json &argument
             }},
         {"readMemory", [](const json &arguments, json &responseBody)
             {
-                std::string memoryReference = arguments.at("memoryReference");
-                int32_t offset = arguments.value("offset", 0);
-                uint32_t count = arguments.at("count");
+                const std::string memoryReference = arguments.at("memoryReference");
+                const int32_t offset = arguments.value("offset", 0);
+                const uint32_t count = arguments.at("count");
 
                 HRESULT Status = S_OK;
                 std::string address;
@@ -1183,9 +1183,9 @@ HRESULT HandleCommand(const std::string &command, const nlohmann::json &argument
             }},
         {"writeMemory", [](const json &arguments, json &responseBody)
             {
-                std::string memoryReference = arguments.at("memoryReference");
-                int32_t offset = arguments.value("offset", 0);
-                std::string dataBase64 = arguments.at("data");
+                const std::string memoryReference = arguments.at("memoryReference");
+                const int32_t offset = arguments.value("offset", 0);
+                const std::string dataBase64 = arguments.at("data");
 
                 std::vector<uint8_t> data;
                 try

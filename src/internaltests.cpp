@@ -59,7 +59,7 @@ void RunInternalTests() // NOLINT(misc-use-internal-linkage)
         auto encoded = base64::to_base64("Hello, World!");
         assert(encoded == "SGVsbG8sIFdvcmxkIQ==");
 
-        auto decoded = base64::from_base64("SGVsbG8sIFdvcmxkIQ==");
+        const auto decoded = base64::from_base64("SGVsbG8sIFdvcmxkIQ==");
         assert(decoded == "Hello, World!");
 
         constexpr int32_t value = -34532535;

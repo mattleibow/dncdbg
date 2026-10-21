@@ -1621,7 +1621,7 @@ class Context
 
         Assert.Equal(MemoryReference, readMemoryResponse.body.address, @"__FILE__:__LINE__" + "\n" + caller_trace);
 
-        return readMemoryResponse.body.data;
+        return readMemoryResponse.body.data!;
     }
 
     public void WriteMemory(string caller_trace, string MemoryReference, string DataBase64)

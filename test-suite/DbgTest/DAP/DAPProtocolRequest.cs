@@ -607,7 +607,7 @@ public class ReadMemoryRequest : Request
 
 public class ReadMemoryArguments
 {
-  public string memoryReference;
+  public string memoryReference = string.Empty;
   public int? offset;
   public int count;
 }
@@ -623,10 +623,10 @@ public class WriteMemoryRequest : Request
 
 public class WriteMemoryArguments
 {
-  public string memoryReference;
+  public string memoryReference = string.Empty;
   public int? offset;
   public bool? allowPartial;
-  public string data;
+  public string data = string.Empty;
 }
 
 }

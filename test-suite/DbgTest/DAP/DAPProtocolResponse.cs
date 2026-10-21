@@ -305,7 +305,7 @@ public class ReadMemoryResponse : Response
 
 public class ReadMemoryResponseBody
 {
-    public string address;
+    public string address = string.Empty;
     public int? unreadableBytes;
     public string? data;
 }

@@ -143,7 +143,7 @@ HRESULT InitializeStaticFields(ICorDebugThread *pThread, ICorDebugType *pType, F
         // - m_pAuxiliaryData (pointer) at offset 16 + 2 * sizeof(pointer)
         static constexpr size_t auxDataOffset = (sizeof(DWORD) * 3) + (sizeof(WORD) * 2) + (sizeof(void *) * 2);
         static constexpr size_t readSize = auxDataOffset + sizeof(void *);
-        std::array<BYTE, readSize> buffer{0};
+        std::array<uint8_t, readSize> buffer{0};
         SIZE_T bytesRead = 0;
 
         if (SUCCEEDED(trProcess->ReadMemory(methodTableAddr, readSize, buffer.data(), &bytesRead)) && bytesRead >= readSize)
@@ -156,7 +156,7 @@ HRESULT InitializeStaticFields(ICorDebugThread *pThread, ICorDebugType *pType, F
                 // Read m_dwFlags from MethodTableAuxiliaryData (at offset 0).
                 DWORD auxFlags = 0;
                 if (SUCCEEDED(trProcess->ReadMemory(static_cast<CORDB_ADDRESS>(auxDataAddr), sizeof(DWORD),
-                                                    reinterpret_cast<BYTE *>(&auxFlags), &bytesRead)))
+                                                    reinterpret_cast<uint8_t *>(&auxFlags), &bytesRead)))
                 {
                     isClassInitialized = (auxFlags & enum_flag_Initialized) != 0;
                     isInitializationStateKnown = true;

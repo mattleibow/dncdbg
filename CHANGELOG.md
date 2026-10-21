@@ -5,6 +5,7 @@ Upcoming changes compared to the previous version.
 - Added `linesStartAt1`, `columnsStartAt1` and `supportsMemoryReferences` support in Initialize Request.
 - Added ReadMemory Request and Response.
 - Added WriteMemory Request and Response.
+- Added `supportsReadMemoryRequest` and `supportsWriteMemoryRequest` support in Capabilities.
 
 #### Added
 - Added debugger configuration environment variable `DNCDBG_PDB_MMAP_POLICY`.

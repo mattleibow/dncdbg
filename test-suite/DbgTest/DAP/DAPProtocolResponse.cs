@@ -297,4 +297,27 @@ public class BreakpointLocationsResponseBody
 {
     public List<BreakpointLocation> breakpoints = new();
 }
+
+public class ReadMemoryResponse : Response
+{
+    public ReadMemoryResponseBody body = new();
+}
+
+public class ReadMemoryResponseBody
+{
+    public string address;
+    public int? unreadableBytes;
+    public string? data;
+}
+
+public class WriteMemoryResponse : Response
+{
+    public WriteMemoryResponseBody body = new();
+}
+
+public class WriteMemoryResponseBody
+{
+    public int? offset;
+    public int? bytesWritten;
+}
 }

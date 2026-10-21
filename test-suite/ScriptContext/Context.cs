@@ -1044,7 +1044,7 @@ class Context
         return evaluateResponse.body.variablesReference;
     }
 
-    public void CheckMemoryReference(string caller_trace, Int64 frameId, string Expression, bool NullReference)
+    public string? GetMemoryReference(string caller_trace, Int64 frameId, string Expression)
     {
         EvaluateRequest evaluateRequest = new EvaluateRequest();
         evaluateRequest.arguments.expression = Expression;
@@ -1056,10 +1056,17 @@ class Context
 
         Assert.True(evaluateResponse.body.memoryReference != null, @"__FILE__:__LINE__" + "\n" + caller_trace);
 
+        return evaluateResponse.body.memoryReference;
+    }
+
+    public void CheckMemoryReference(string caller_trace, Int64 frameId, string Expression, bool NullReference)
+    {
+        string memoryReference = GetMemoryReference(@"__FILE__:__LINE__" + "\n" + caller_trace, frameId, Expression)!;
+
         if (NullReference)
-            Assert.Equal("0x0000000000000000", evaluateResponse.body.memoryReference!, @"__FILE__:__LINE__" + "\n" + caller_trace);
+            Assert.Equal("0x0000000000000000", memoryReference!, @"__FILE__:__LINE__" + "\n" + caller_trace);
         else
-            Assert.NotEqual("0x0000000000000000", evaluateResponse.body.memoryReference!, @"__FILE__:__LINE__" + "\n" + caller_trace);
+            Assert.NotEqual("0x0000000000000000", memoryReference!, @"__FILE__:__LINE__" + "\n" + caller_trace);
     }
 
     public void CheckNoMemoryReference(string caller_trace, Int64 frameId, string Expression)
@@ -1436,7 +1443,7 @@ class Context
         VariablesRequest variablesRequest = new VariablesRequest();
         variablesRequest.arguments.variablesReference = variablesReference;
         var ret = DAPDebugger.Request(variablesRequest);
-        Assert.True(ret.Success, @"__FILE__:__LINE__" + "\n"+caller_trace);
+        Assert.True(ret.Success, @"__FILE__:__LINE__" + "\n" + caller_trace);
 
         VariablesResponse variablesResponse =
             JsonConvert.DeserializeObject<VariablesResponse>(ret.ResponseStr)!;
@@ -1448,7 +1455,7 @@ class Context
                 count++;
         }
 
-        Assert.Equal(expectedCount, count, @"__FILE__:__LINE__" + "\n"+caller_trace);
+        Assert.Equal(expectedCount, count, @"__FILE__:__LINE__" + "\n" + caller_trace);
     }
 
     public void GetGotoTargets(string caller_trace, string FileName, int Line, int Column, int ExpectedCount)
@@ -1600,6 +1607,30 @@ class Context
             Assert.Equal(ExpectedLocations[i].endLine, breakpointLocationsResponse.body.breakpoints[i].endLine, @"__FILE__:__LINE__" + "\n" + caller_trace);
             Assert.Equal(ExpectedLocations[i].endColumn, breakpointLocationsResponse.body.breakpoints[i].endColumn, @"__FILE__:__LINE__" + "\n" + caller_trace);
         }
+    }
+
+    public string ReadMemory(string caller_trace, string MemoryReference, int Count)
+    {
+        ReadMemoryRequest readMemoryRequest = new ReadMemoryRequest();
+        readMemoryRequest.arguments.memoryReference = MemoryReference;
+        readMemoryRequest.arguments.count = Count;
+        var ret = DAPDebugger.Request(readMemoryRequest);
+        Assert.True(ret.Success, @"__FILE__:__LINE__" + "\n" + caller_trace);
+
+        ReadMemoryResponse readMemoryResponse = JsonConvert.DeserializeObject<ReadMemoryResponse>(ret.ResponseStr)!;
+
+        Assert.Equal(MemoryReference, readMemoryResponse.body.address, @"__FILE__:__LINE__" + "\n" + caller_trace);
+
+        return readMemoryResponse.body.data;
+    }
+
+    public void WriteMemory(string caller_trace, string MemoryReference, string DataBase64)
+    {
+        WriteMemoryRequest writeMemoryRequest = new WriteMemoryRequest();
+        writeMemoryRequest.arguments.memoryReference = MemoryReference;
+        writeMemoryRequest.arguments.data = DataBase64;
+        var ret = DAPDebugger.Request(writeMemoryRequest);
+        Assert.True(ret.Success, @"__FILE__:__LINE__" + "\n" + caller_trace);
     }
 
     public string? GetSourceFilesPath()

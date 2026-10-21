@@ -78,6 +78,7 @@ $ALL_TEST_NAMES = @(
     "TestThreadStatic"
     "TestStartAt0"
     "TestMemoryReferences"
+    "TestReadWriteMemory"
 )
 
 $TEST_NAMES = $tests

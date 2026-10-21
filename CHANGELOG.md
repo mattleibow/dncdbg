@@ -7,10 +7,10 @@ Upcoming changes compared to the previous version.
 - Added WriteMemory Request and Response.
 
 #### Added
-- Added TestStartAt0 and TestMemoryReferences.
 - Added debugger configuration environment variable `DNCDBG_PDB_MMAP_POLICY`.
 - Added support for custom modifiers (`CustomMod*`) in literal field and local constant signatures.
 - Added stripped-down [base64](https://github.com/tobiaslocker/base64) sources (commit 8d96a2a).
+- Added TestStartAt0, TestMemoryReferences and TestReadWriteMemory.
 
 #### Changed
 - Split evalhelpers.h/.cpp into dedicated `evaluation/evalhelpers` modules (`formatspecifier`, `metadata`, `textwitheval` and `value` sources).

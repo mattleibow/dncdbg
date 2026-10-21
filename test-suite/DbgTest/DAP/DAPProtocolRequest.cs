@@ -595,4 +595,38 @@ public class DetachRequest : Request
 public class DetachArguments
 {
 }
+
+public class ReadMemoryRequest : Request
+{
+    public ReadMemoryRequest()
+    {
+        command = "readMemory";
+    }
+    public ReadMemoryArguments arguments = new();
+}
+
+public class ReadMemoryArguments
+{
+  public string memoryReference;
+  public int? offset;
+  public int count;
+}
+
+public class WriteMemoryRequest : Request
+{
+    public WriteMemoryRequest()
+    {
+        command = "writeMemory";
+    }
+    public WriteMemoryArguments arguments = new();
+}
+
+public class WriteMemoryArguments
+{
+  public string memoryReference;
+  public int? offset;
+  public bool? allowPartial;
+  public string data;
+}
+
 }

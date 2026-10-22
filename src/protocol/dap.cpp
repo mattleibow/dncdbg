@@ -979,7 +979,7 @@ HRESULT HandleCommand(const std::string &command, const nlohmann::json &argument
                 size_t totalModules = 0;
                 std::vector<Module> modules;
                 ManagedDebugger::GetModules(arguments.value("startModule", 0), arguments.value("moduleCount", 0),
-                                             modules, totalModules);
+                                            modules, totalModules);
 
                 responseBody.emplace("modules", modules);
                 responseBody.emplace("totalModules", totalModules);

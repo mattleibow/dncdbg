@@ -20,6 +20,9 @@ Upcoming changes compared to the previous version.
 - Stripped unused sources and build files from the vendored `diagnostics` tree (`src/shared`, `src/dbgshim` and `eng/native`), keeping only what the DNCDbg build requires; also dropped dead `include_directories` from `shared.cmake`.
 - Moved literal field and local constant signature parsing into dedicated `metadata/sigparse` routines (`ParseLiteralFieldSig` and `ParseLiteralLocalSig`).
 - Reused `ParseFieldSig` to detect the enum's underlying type when printing enum values instead of parsing the field signature manually.
+- Replaced the mutex-guarded fake COM reference counting in `ManagedCallback` with `std::atomic`, matching the `InterlockedIncrement()`/`InterlockedDecrement()` semantics of real COM implementations.
+- Switched the callbacks queue lambdas in `ManagedCallback` to by-value captures.
+- Added an `E_POINTER` check to `QueryInterface()` and reused `Threads::GetId()` in `LogMessage()` instead of a direct `ICorDebugThread::GetID()` call.
 
 #### Fixed
 - Fixed startup failure on systems with no locales generated at all (e.g. a minimal Ubuntu chroot): fall back to the "C.UTF-8" or "C" locale when the environment locale is unavailable instead of exiting.

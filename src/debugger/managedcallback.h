@@ -12,8 +12,8 @@
 #include <specstrings_undef.h>
 #endif
 
+#include <atomic>
 #include <functional>
-#include <mutex>
 
 namespace dncdbg
 {
@@ -33,7 +33,7 @@ class ManagedCallback final : public ICorDebugManagedCallback, public ICorDebugM
     ManagedCallback &operator=(const ManagedCallback &) = delete;
     virtual ~ManagedCallback() = default;
 
-    ULONG GetRefCount();
+    [[nodiscard]] ULONG GetRefCount() const noexcept;
 
     // IUnknown
 
@@ -105,8 +105,10 @@ class ManagedCallback final : public ICorDebugManagedCallback, public ICorDebugM
 
   private:
 
-    std::mutex m_refCountMutex;
-    ULONG m_refCount{0};
+    // Note, std::atomic is enough for the fake "COM" reference counting; the default sequential
+    // consistency matches the InterlockedIncrement()/InterlockedDecrement() semantics used by
+    // real COM implementations.
+    std::atomic<ULONG> m_refCount{0};
     std::function<void()> m_notifyProcessExitedCallback;
 };
 

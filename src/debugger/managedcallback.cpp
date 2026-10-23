@@ -25,6 +25,7 @@
 #include "utils/torelease.h"
 #include "utils/utf.h"
 #include <algorithm>
+#include <cassert>
 #include <vector>
 
 #if (defined(__APPLE__) && defined(__MACH__))
@@ -41,36 +42,92 @@ namespace
 
 ExceptionCallbackType CorrectedByJMCCatchHandlerEventType(ICorDebugFrame *pFrame)
 {
-    if (!Config::GetJustMyCode())
+    if (Config::GetJustMyCode())
     {
-        return ExceptionCallbackType::CATCH_HANDLER_FOUND;
-    }
-
-    BOOL JMCStatus = FALSE;
-    ToRelease<ICorDebugFunction> trFunction;
-    ToRelease<ICorDebugFunction2> trFunction2;
-    if (pFrame != nullptr && SUCCEEDED(pFrame->GetFunction(&trFunction)) &&
-        SUCCEEDED(trFunction->QueryInterface(IID_ICorDebugFunction2, reinterpret_cast<void **>(&trFunction2))) &&
-        SUCCEEDED(trFunction2->GetJMCStatus(&JMCStatus)) && JMCStatus == TRUE)
-    {
-        return ExceptionCallbackType::USER_CATCH_HANDLER_FOUND;
+        BOOL jmcStatus = FALSE;
+        ToRelease<ICorDebugFunction> trFunction;
+        ToRelease<ICorDebugFunction2> trFunction2;
+        if (pFrame != nullptr && SUCCEEDED(pFrame->GetFunction(&trFunction)) &&
+            SUCCEEDED(trFunction->QueryInterface(IID_ICorDebugFunction2, reinterpret_cast<void **>(&trFunction2))) &&
+            SUCCEEDED(trFunction2->GetJMCStatus(&jmcStatus)) && jmcStatus == TRUE)
+        {
+            return ExceptionCallbackType::USER_CATCH_HANDLER_FOUND;
+        }
     }
 
     return ExceptionCallbackType::CATCH_HANDLER_FOUND;
 }
 
+// Maps the ICorDebugManagedCallback2::Exception() event type to the corresponding ExceptionCallbackType value.
+// See https://learn.microsoft.com/en-us/dotnet/framework/unmanaged-api/debugging/icordebugmanagedcallback2-exception-method
+ExceptionCallbackType CorrectedExceptionCallbackType(CorDebugExceptionCallbackType dwEventType, ICorDebugFrame *pFrame)
+{
+    switch (dwEventType)
+    {
+    case DEBUG_EXCEPTION_FIRST_CHANCE:
+        return ExceptionCallbackType::FIRST_CHANCE;
+    case DEBUG_EXCEPTION_USER_FIRST_CHANCE:
+        return ExceptionCallbackType::USER_FIRST_CHANCE;
+    case DEBUG_EXCEPTION_CATCH_HANDLER_FOUND:
+        return CorrectedByJMCCatchHandlerEventType(pFrame);
+    case DEBUG_EXCEPTION_UNHANDLED:
+        return ExceptionCallbackType::UNHANDLED;
+    default:
+        assert(false);
+        return ExceptionCallbackType::UNKNOWN;
+    }
+}
+
+// Get the debuggee process exit code.
+//
+// macOS: the wait status exit code is int (signed int)
+// Linux: the exit() and _exit() arguments are int (signed int)
+// Windows: the ExitProcess() and TerminateProcess() arguments are UINT (unsigned int)
+// Windows: the GetExitCodeProcess() output is DWORD (unsigned long)
+// The internal CoreCLR variable LatchedExitCode is INT32 (signed int)
+// A C# Main() return value is int (signed int), or void (treated as 0)
+int GetProcessExitCode([[maybe_unused]] ICorDebugProcess *pProcess)
+{
+#if (defined(__APPLE__) && defined(__MACH__))
+    return MacKqueue::GetExitCode();
+#elif defined(__linux__)
+    return WaitpidHook::GetExitCode();
+#elif defined(_WIN32)
+    HPROCESS hProcess = nullptr;
+    if (FAILED(pProcess->GetHandle(&hProcess)))
+    {
+        return 0;
+    }
+
+    DWORD dwExitCode = 0;
+    if (GetExitCodeProcess(hProcess, &dwExitCode) == FALSE)
+    {
+        return 0;
+    }
+
+    assert(dwExitCode <= static_cast<DWORD>(std::numeric_limits<int>::max()));
+    return static_cast<int>(dwExitCode);
+#else
+    static_assert(false, "Unsupported platform");
+#endif
+}
+
 } // unnamed namespace
 
-ULONG ManagedCallback::GetRefCount()
+ULONG ManagedCallback::GetRefCount() const noexcept
 {
-    const std::scoped_lock<std::mutex> lock(m_refCountMutex);
-    return m_refCount;
+    return m_refCount.load();
 }
 
 // IUnknown
 
 HRESULT STDMETHODCALLTYPE ManagedCallback::QueryInterface(REFIID riid, void **ppInterface)
 {
+    if (ppInterface == nullptr)
+    {
+        return E_POINTER;
+    }
+
     if (riid == IID_ICorDebugManagedCallback) // NOLINT(readability-implicit-bool-conversion)
     {
         *ppInterface = static_cast<ICorDebugManagedCallback *>(this);
@@ -99,20 +156,18 @@ HRESULT STDMETHODCALLTYPE ManagedCallback::QueryInterface(REFIID riid, void **pp
 
 ULONG STDMETHODCALLTYPE ManagedCallback::AddRef()
 {
-    const std::scoped_lock<std::mutex> lock(m_refCountMutex);
     return ++m_refCount;
 }
 
 ULONG STDMETHODCALLTYPE ManagedCallback::Release()
 {
-    const std::scoped_lock<std::mutex> lock(m_refCountMutex);
-
-    assert(m_refCount > 0);
+    const ULONG refCount = m_refCount.fetch_sub(1);
+    assert(refCount > 0);
 
     // Note, we don't provide "delete" call for object itself for our fake "COM".
     // External holder will care about this object during debugger lifetime.
 
-    return --m_refCount;
+    return refCount - 1;
 }
 
 // ICorDebugManagedCallback
@@ -120,7 +175,7 @@ ULONG STDMETHODCALLTYPE ManagedCallback::Release()
 HRESULT STDMETHODCALLTYPE ManagedCallback::Breakpoint(ICorDebugAppDomain *pAppDomain, ICorDebugThread *pThread,
                                                       ICorDebugBreakpoint *pBreakpoint)
 {
-    return CallbacksQueue::AddCallbackToQueue(pAppDomain, [&]
+    return CallbacksQueue::AddCallbackToQueue(pAppDomain, [pAppDomain, pThread, pBreakpoint]
     {
         pAppDomain->AddRef();
         pThread->AddRef();
@@ -133,7 +188,7 @@ HRESULT STDMETHODCALLTYPE ManagedCallback::Breakpoint(ICorDebugAppDomain *pAppDo
 HRESULT STDMETHODCALLTYPE ManagedCallback::StepComplete(ICorDebugAppDomain *pAppDomain, ICorDebugThread *pThread,
                                                         ICorDebugStepper */*pStepper*/, CorDebugStepReason reason)
 {
-    return CallbacksQueue::AddCallbackToQueue(pAppDomain, [&]
+    return CallbacksQueue::AddCallbackToQueue(pAppDomain, [pAppDomain, pThread, reason]
     {
         pAppDomain->AddRef();
         pThread->AddRef();
@@ -144,7 +199,7 @@ HRESULT STDMETHODCALLTYPE ManagedCallback::StepComplete(ICorDebugAppDomain *pApp
 
 HRESULT STDMETHODCALLTYPE ManagedCallback::Break(ICorDebugAppDomain *pAppDomain, ICorDebugThread *pThread)
 {
-    return CallbacksQueue::AddCallbackToQueue(pAppDomain, [&]
+    return CallbacksQueue::AddCallbackToQueue(pAppDomain, [pAppDomain, pThread]
     {
         pAppDomain->AddRef();
         pThread->AddRef();
@@ -182,16 +237,17 @@ HRESULT STDMETHODCALLTYPE ManagedCallback::CreateProcess(ICorDebugProcess *pProc
     // should stop debuggee process by direct `Pause()` call. From another side, callback queue has a bunch of asynchronous
     // added entries and, for example, `CreateThread()` could be called after this callback and break our debugger logic.
     ToRelease<ICorDebugAppDomainEnum> trAppDomainEnum;
-    ToRelease<ICorDebugAppDomain> trAppDomain;
-    ULONG domainsFetched = 0;
     if (SUCCEEDED(pProcess->EnumerateAppDomains(&trAppDomainEnum)))
     {
+        ToRelease<ICorDebugAppDomain> trAppDomain;
+        ULONG domainsFetched = 0;
         // At this point we have only one domain for sure.
         if (SUCCEEDED(trAppDomainEnum->Next(1, &trAppDomain, &domainsFetched)) && domainsFetched == 1)
         {
-            return CallbacksQueue::AddCallbackToQueue(trAppDomain, [&]
+            return CallbacksQueue::AddCallbackToQueue(trAppDomain, [&trAppDomain]
             {
-                CallbacksQueue::EmplaceBack(CallbacksQueue::CallbackQueueCall::CreateProcess, trAppDomain.Detach(), nullptr, nullptr, STEP_NORMAL, ExceptionCallbackType::FIRST_CHANCE);
+                CallbacksQueue::EmplaceBack(CallbacksQueue::CallbackQueueCall::CreateProcess, trAppDomain.Detach(),
+                                            nullptr, nullptr, STEP_NORMAL, ExceptionCallbackType::FIRST_CHANCE);
             });
         }
     }
@@ -199,7 +255,7 @@ HRESULT STDMETHODCALLTYPE ManagedCallback::CreateProcess(ICorDebugProcess *pProc
     return CallbacksQueue::ContinueProcess(pProcess);
 }
 
-HRESULT STDMETHODCALLTYPE ManagedCallback::ExitProcess([[maybe_unused]] ICorDebugProcess *pProcess)
+HRESULT STDMETHODCALLTYPE ManagedCallback::ExitProcess(ICorDebugProcess *pProcess)
 {
     if (EvalWaiter::IsEvalRunning())
     {
@@ -208,31 +264,7 @@ HRESULT STDMETHODCALLTYPE ManagedCallback::ExitProcess([[maybe_unused]] ICorDebu
 
     EvalWaiter::NotifyEvalComplete(nullptr, nullptr);
 
-    // macOS: the wait status exit code is int (signed int)
-    // Linux: the exit() and _exit() arguments are int (signed int)
-    // Windows: the ExitProcess() and TerminateProcess() arguments are UINT (unsigned int)
-    // Windows: the GetExitCodeProcess() output is DWORD (unsigned long)
-    // The internal CoreCLR variable LatchedExitCode is INT32 (signed int)
-    // A C# Main() return value is int (signed int), or void (treated as 0)
-    int exitCode = 0;
-#if (defined(__APPLE__) && defined(__MACH__))
-    exitCode = MacKqueue::GetExitCode();
-#elif defined(__linux__)
-    exitCode = WaitpidHook::GetExitCode();
-#elif defined(_WIN32)
-    HPROCESS hProcess;
-    DWORD dwExitCode = 0;
-    if (SUCCEEDED(pProcess->GetHandle(&hProcess)))
-    {
-        GetExitCodeProcess(hProcess, &dwExitCode);
-        assert(dwExitCode <= static_cast<DWORD>(std::numeric_limits<int>::max()));
-        exitCode = static_cast<int>(dwExitCode);
-    }
-#else
-    static_assert(false, "Unsupported platform");
-#endif
-
-    DAP::EmitExitedEvent(ExitedEvent(exitCode));
+    DAP::EmitExitedEvent(ExitedEvent(GetProcessExitCode(pProcess)));
     if (m_notifyProcessExitedCallback)
     {
         m_notifyProcessExitedCallback();
@@ -353,11 +385,10 @@ HRESULT STDMETHODCALLTYPE ManagedCallback::LogMessage(ICorDebugAppDomain *pAppDo
 
     OutputEvent event(OutputCategory::StdOut, to_utf8(pMessage) + '\n');
 
-    DWORD threadId = 0;
-    pThread->GetID(&threadId);
+    const ThreadId threadId(Threads::GetId(pThread));
     std::vector<StackFrame> stackFrames;
-    if (threadId != 0U &&
-        SUCCEEDED(GetStackFrames(pThread, ThreadId(threadId), FrameLevel(0), 0, stackFrames)))
+    if (threadId &&
+        SUCCEEDED(GetStackFrames(pThread, threadId, FrameLevel(0), 0, stackFrames)))
     {
         // Find first frame with source file data (code with PDB/user code).
         const auto it = std::find_if(stackFrames.cbegin(), stackFrames.cend(),
@@ -461,32 +492,13 @@ HRESULT STDMETHODCALLTYPE ManagedCallback::Exception(ICorDebugAppDomain *pAppDom
                                                      ICorDebugFrame *pFrame, uint32_t /*nOffset*/,
                                                      CorDebugExceptionCallbackType dwEventType, DWORD /*dwFlags*/)
 {
-    return CallbacksQueue::AddCallbackToQueue(pAppDomain, [&]
+    return CallbacksQueue::AddCallbackToQueue(pAppDomain, [pAppDomain, pThread, pFrame, dwEventType]
     {
         // pFrame could be neutered in case of evaluation during break, so all work with pFrame must be done in the callback itself.
-        ExceptionCallbackType eventType = ExceptionCallbackType::UNKNOWN;
-        switch (dwEventType)
-        {
-        case DEBUG_EXCEPTION_FIRST_CHANCE:
-            eventType = ExceptionCallbackType::FIRST_CHANCE;
-            break;
-        case DEBUG_EXCEPTION_USER_FIRST_CHANCE:
-            eventType = ExceptionCallbackType::USER_FIRST_CHANCE;
-            break;
-        case DEBUG_EXCEPTION_CATCH_HANDLER_FOUND:
-            eventType = CorrectedByJMCCatchHandlerEventType(pFrame);
-            break;
-        case DEBUG_EXCEPTION_UNHANDLED:
-            eventType = ExceptionCallbackType::UNHANDLED;
-            break;
-        default:
-            assert(false);
-            break;
-        }
-
         pAppDomain->AddRef();
         pThread->AddRef();
-        CallbacksQueue::EmplaceBack(CallbacksQueue::CallbackQueueCall::Exception, pAppDomain, pThread, nullptr, STEP_NORMAL, eventType);
+        CallbacksQueue::EmplaceBack(CallbacksQueue::CallbackQueueCall::Exception, pAppDomain, pThread, nullptr,
+                                    STEP_NORMAL, CorrectedExceptionCallbackType(dwEventType, pFrame));
     });
 }
 

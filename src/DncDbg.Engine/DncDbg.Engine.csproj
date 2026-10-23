@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>$(DebuggerTargetFramework)</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ClrDebug" Version="0.4.2" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.9.0" />
+    <PackageReference Include="Microsoft.Diagnostics.DbgShim" Version="10.0.745401" />
+  </ItemGroup>
+
+  <!--
+    Windows ("full"/"pdbonly") PDBs are converted to portable ones in memory (Symbols/WindowsPdb.cs). The converter reads
+    them through the native Microsoft.DiaSymReader.Native.<arch>.dll, which exists for Windows only and is loaded lazily,
+    there only. Microsoft.DiaSymReader 2.x knows the arm64 flavor of the native reader; the native reader's stable
+    releases (1.x) predate arm64, hence its prerelease.
+  -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.DiaSymReader" Version="2.0.0" />
+    <PackageReference Include="Microsoft.DiaSymReader.Native" Version="17.0.0-beta1.21524.1" />
+  </ItemGroup>
+
+</Project>

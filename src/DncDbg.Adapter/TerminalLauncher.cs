@@ -1,0 +1,116 @@
+using System.Net;
+using System.Net.Sockets;
+using System.Reflection;
+using DncDbg.Engine;
+using DncDbg.Protocol;
+
+namespace DncDbg.Adapter;
+
+/// <summary>
+/// Starts the debuggee in the client's terminal: the client is asked (runInTerminal) to run this very executable in
+/// helper mode, and the helper reports back over a loopback connection. See <see cref="Engine.Launch.TerminalHelper"/>.
+/// </summary>
+internal static class TerminalLauncher
+{
+    public const string HelperOption = "--run-in-terminal";
+
+    private static readonly TimeSpan ClientTimeout = TimeSpan.FromSeconds(60);
+
+    public static ExternalLaunch Launch(DapConnection connection, ResolvedLaunch launch, string kind)
+    {
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        try
+        {
+            int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            string token = Guid.NewGuid().ToString("N");
+
+            var command = new List<string>(SelfCommand()) { HelperOption, port.ToString(), token, "--", launch.Program };
+            command.AddRange(launch.Args);
+
+            Task<DapMessage> response = connection.SendRequestAsync("runInTerminal", new RunInTerminalArguments
+            {
+                Kind = kind,
+                Title = Path.GetFileNameWithoutExtension(launch.Program),
+                Cwd = launch.WorkingDirectory,
+                Args = command.ToArray(),
+                Env = launch.Environment.Count == 0 ? null : launch.Environment,
+            });
+
+            Task<TcpClient> accept = listener.AcceptTcpClientAsync();
+            DateTime deadline = DateTime.UtcNow + ClientTimeout;
+            while (!accept.IsCompleted)
+            {
+                if (response.IsCompleted && response.Result.Success != true)
+                    throw new DebuggerException("The client could not start a terminal: " + response.Result.Message);
+                if (DateTime.UtcNow > deadline)
+                    throw new DebuggerException("The debuggee did not start in the terminal in time.");
+                Task.WaitAny([accept, response], TimeSpan.FromMilliseconds(200));
+            }
+
+            TcpClient helper = accept.Result;
+            var reader = new StreamReader(helper.GetStream());
+            var writer = new StreamWriter(helper.GetStream()) { AutoFlush = true, NewLine = "\n" };
+
+            string[] hello = (reader.ReadLine() ?? "").Split(' ');
+            TerminalHost? host = hello.Length == 7 && hello[2] == Engine.Launch.TerminalHelper.HostKeyword ? ParseHost(hello, writer) : null;
+            if ((hello.Length != 2 && host == null) || hello[0] != token || !int.TryParse(hello[1], out int processId))
+            {
+                helper.Dispose();
+                throw new DebuggerException("Unexpected connection while waiting for the debuggee to start.");
+            }
+
+            Task<int?> exitCode = Task.Run(() =>
+            {
+                try
+                {
+                    string? line = reader.ReadLine();
+                    return line != null && line.StartsWith("exit ", StringComparison.Ordinal) && int.TryParse(line.AsSpan(5), out int code)
+                        ? code
+                        : (int?)null;
+                }
+                catch (IOException)
+                {
+                    return null;
+                }
+                finally
+                {
+                    helper.Dispose();
+                }
+            });
+            return new ExternalLaunch(processId, () => writer.WriteLine("resume"), exitCode) { Host = host };
+        }
+        finally
+        {
+            listener.Stop();
+        }
+    }
+
+    // .NET Framework: the helper started nothing and offers its terminal; the engine creates the debuggee.
+    private static TerminalHost? ParseHost(string[] hello, StreamWriter writer)
+    {
+        if (!long.TryParse(hello[4], out long stdIn) || !long.TryParse(hello[5], out long stdOut) || !long.TryParse(hello[6], out long stdErr))
+            return null;
+        return new TerminalHost(hello[3] == "1", new IntPtr(stdIn), new IntPtr(stdOut), new IntPtr(stdErr), processId =>
+        {
+            try
+            {
+                writer.WriteLine($"started {processId}");
+            }
+            catch (Exception e) when (e is IOException or ObjectDisposedException)
+            {
+                // the terminal is gone: the debuggee runs on without it
+            }
+        });
+    }
+
+    // How to start this program again: "dncdbg" as an executable, or "dotnet dncdbg.dll".
+    private static string[] SelfCommand()
+    {
+        string processPath = Environment.ProcessPath ?? throw new DebuggerException("Cannot determine the path of the debugger.");
+        string host = Path.GetFileNameWithoutExtension(processPath);
+        return host.Equals("dotnet", StringComparison.OrdinalIgnoreCase)
+            ? [processPath, Path.Combine(AppContext.BaseDirectory, Assembly.GetEntryAssembly()!.GetName().Name + ".dll")]
+            : [processPath];
+    }
+}

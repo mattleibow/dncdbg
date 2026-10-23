@@ -1,0 +1,13 @@
+<Project>
+  <PropertyGroup>
+    <DebuggerTargetFramework>net10.0</DebuggerTargetFramework>
+    <LangVersion>14.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <Version>4.0.0</Version>
+    <Authors>DncDbg contributors</Authors>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+</Project>

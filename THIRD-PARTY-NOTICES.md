@@ -1,8 +1,22 @@
 # Third-Party Notices
 
-This project includes source code from the third-party projects listed below. The versions and revisions correspond to the copies included in [`third-party`](third-party/).
+This project includes source code from the third-party projects listed below. The versions and revisions correspond to the copies included in [`third-party`](third-party/) or the managed source directories identified below.
 
 The licenses below apply only to the corresponding third-party components. The project itself is licensed under [`LICENSE`](LICENSE).
+
+## dotnet-debugger
+
+- **Project:** [dotnet-debugger](https://github.com/dvislobokov/dotnet-debugger)
+- **Included version:** `0.3.0`
+- **Included in:** `src/DncDbg.Adapter`, `src/DncDbg.Engine`, and `src/DncDbg.Protocol` (adapted for DncDbg)
+- **License:** MIT License
+- **Copyright:** Copyright (c) 2026 dvislobokov and dotnet-debugger contributors
+- **License text:** [`src/DncDbg.LICENSE`](src/DncDbg.LICENSE)
+
+The managed projects also consume ClrDebug (0.4.2), Microsoft.CodeAnalysis.CSharp
+(5.9.0), Microsoft.Diagnostics.DbgShim (10.0.745401), Microsoft.DiaSymReader
+(2.0.0), and Microsoft.DiaSymReader.Native (17.0.0-beta1.21524.1) through NuGet.
+Their package licenses and native runtime assets remain applicable.
 
 ## .NET Diagnostics
 

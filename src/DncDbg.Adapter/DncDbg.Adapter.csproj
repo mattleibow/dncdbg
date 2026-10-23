@@ -1,0 +1,73 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\DncDbg.Protocol\DncDbg.Protocol.csproj" />
+    <ProjectReference Include="..\DncDbg.Engine\DncDbg.Engine.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>dncdbg</AssemblyName>
+    <RootNamespace>DncDbg.Adapter</RootNamespace>
+    <TargetFramework>$(DebuggerTargetFramework)</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <!--
+    .NET tool:  dotnet tool install -g dncdbg-dap   ->   dncdbg
+    ("dncdbg" itself is taken on nuget.org.) The package is RID-agnostic: dbgshim for every platform comes
+    along under runtimes/<rid>/native and the engine picks the one for the machine it runs on.
+  -->
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <PackAsTool>false</PackAsTool>
+    <PackageId>dncdbg-dap</PackageId>
+    <ToolCommandName>dncdbg</ToolCommandName>
+    <Title>dncdbg</Title>
+    <Description>A .NET debugger speaking the Debug Adapter Protocol (DAP): use it from VS Code, Neovim (nvim-dap), Emacs, Helix and any other DAP client. Breakpoints, stepping (async aware), expression evaluation, symbol servers, single-file and ReadyToRun applications.</Description>
+    <PackageTags>debugger;dap;debug-adapter-protocol;dotnet;coreclr;icordebug;vscode;neovim</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageReleaseNotes>0.2.0
+- .NET Framework 4.x on Windows: launch and attach, legacy (non-SDK) projects built with MSBuild.exe, integratedTerminal/externalTerminal, several AppDomains, Windows (full/pdbonly) PDBs, NGen disabled with justMyCode=false.
+- 32-bit processes are refused with a plain message (64-bit only).
+- Linux/macOS, .NET 8: the adapter no longer hangs after "The debuggee cannot be stopped" while expanding an object.
+- Fixes from a black-box DAP probe of 0.1.0: unhandled exceptions always stop, non-ASCII output on Windows, async stepping, long strings, attach errors, paged and capped variables, implicit evaluation timeouts (option allowImplicitFuncEval), robust DAP parsing, expression evaluator additions.
+- JetBrains DAP client compatibility: variables filter "named", namedVariables, sorted threads, single terminate, exited -1 for a terminated debuggee.
+Full list: https://github.com/dvislobokov/dncdbg/blob/master/CHANGELOG.md</PackageReleaseNotes>
+    <PackageOutputPath>$(MSBuildThisFileDirectory)..\..\artifacts\packages</PackageOutputPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\DncDbg.LICENSE" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!--
+    The Windows PDB reader (Microsoft.DiaSymReader.Native, ~1.8 MB per architecture) is needed under
+    runtimes/win-x64|win-arm64/native only: the adapter does not run as a 32-bit process. Its package also has
+    runtimes/win/native with all four architectures again (meant for packages.config projects), win-x86 and 32-bit ARM:
+    dropped from RID-agnostic builds, the .NET tool among them. RID-specific publishing only ever takes the one for its RID.
+  -->
+  <Target Name="TrimDiaSymReaderNative" AfterTargets="ResolvePackageAssets">
+    <ItemGroup>
+      <RuntimeTargetsCopyLocalItems Remove="@(RuntimeTargetsCopyLocalItems)"
+        Condition="'%(RuntimeTargetsCopyLocalItems.NuGetPackageId)' == 'Microsoft.DiaSymReader.Native' and ('%(RuntimeTargetsCopyLocalItems.RuntimeIdentifier)' == 'win' or '%(RuntimeTargetsCopyLocalItems.RuntimeIdentifier)' == 'win-x86' or '%(RuntimeTargetsCopyLocalItems.RuntimeIdentifier)' == 'win-arm')" />
+    </ItemGroup>
+  </Target>
+
+  <!--
+    A self-contained Windows runtime brings the same native reader itself, but marks it "drop from single file" (the
+    runtime only wants it for line numbers in stack traces): the single-file adapter would end up without it. Kept next
+    to the executable instead, like dbgshim.
+  -->
+  <Target Name="KeepDiaSymReaderNativeNextToSingleFile" AfterTargets="ComputeResolvedFilesToPublishList" Condition="'$(PublishSingleFile)' == 'true'">
+    <ItemGroup>
+      <!-- _FilesToDrop: what ComputeResolvedFilesToPublishList has just removed for being DropFromSingleFile -->
+      <ResolvedFileToPublish Include="@(_FilesToDrop)"
+        Condition="$([System.String]::Copy('%(_FilesToDrop.Filename)').StartsWith('Microsoft.DiaSymReader.Native.'))"
+        DropFromSingleFile="false" ExcludeFromSingleFile="true" />
+    </ItemGroup>
+  </Target>
+
+</Project>

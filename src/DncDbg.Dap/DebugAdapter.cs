@@ -584,8 +584,12 @@ internal sealed class DebugAdapter : IDisposable
             case "loadedSources":
                 return new LoadedSourcesResponseBody
                 {
-                    Sources = _engine.GetLoadedSources().Select(f => new Source { Name = Path.GetFileName(f.Path.Replace('\\', '/')), Path = f.Path,
-                        SourceReference = f.SourceReference > 0 ? f.SourceReference : null }).ToArray(),
+                    Sources = _engine.GetLoadedSources().Select(f => new Source
+                    {
+                        Name = Path.GetFileName(f.Path.Replace('\\', '/')),
+                        Path = f.SourceReference > 0 ? null : f.Path,
+                        SourceReference = f.SourceReference > 0 ? f.SourceReference : null,
+                    }).ToArray(),
                 };
 
             case "continue":
@@ -828,7 +832,7 @@ internal sealed class DebugAdapter : IDisposable
             Source = new Source
             {
                 Name = Path.GetFileName(frame.SourcePath),
-                Path = frame.SourcePath,
+                Path = frame.SourceReference > 0 ? null : frame.SourcePath,
                 SourceReference = frame.SourceReference > 0 ? frame.SourceReference : null,
             },
             Line = LineToClient(frame.Line),

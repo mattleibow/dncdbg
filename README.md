@@ -60,6 +60,17 @@ Linux, or every DAP field. Tests default to `net10.0`; the existing
 `DNCDBG_TARGET_FRAMEWORK` override is preserved.
 See [local testing](test-suite/README.md) for focused cases and lifecycle regressions.
 
+The VS Code integration test launches an isolated Extension Development Host,
+registers `dncdbg-dap` as a debugger, stops in a real workspace source file, and
+verifies that VS Code reuses the file editor instead of opening a virtual copy:
+
+```sh
+npm ci --prefix tests/DncDbg.VsCodeTests
+npm test --prefix tests/DncDbg.VsCodeTests
+```
+
+See [VS Code integration testing](tests/DncDbg.VsCodeTests/README.md).
+
 ## Usage
 
 With no arguments, `dncdbg-dap` serves DAP on stdin/stdout. Options:

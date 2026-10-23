@@ -1,0 +1,75 @@
+{
+  "name": "dncdbg-vscode-tests",
+  "displayName": "DNCDbg VS Code Integration Tests",
+  "version": "0.1.0",
+  "publisher": "dncdbg",
+  "private": true,
+  "description": "VS Code UI integration tests for dncdbg-dap.",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.100.0",
+    "node": ">=20"
+  },
+  "extensionKind": [
+    "workspace"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onDebug:dncdbg"
+  ],
+  "contributes": {
+    "breakpoints": [
+      {
+        "language": "csharp"
+      }
+    ],
+    "debuggers": [
+      {
+        "type": "dncdbg",
+        "label": "DNCDbg",
+        "languages": [
+          "csharp"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "required": [
+              "program"
+            ],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "Path to the managed assembly to debug."
+              },
+              "cwd": {
+                "type": "string",
+                "description": "Working directory of the target process."
+              },
+              "stopAtEntry": {
+                "type": "boolean",
+                "default": false
+              },
+              "justMyCode": {
+                "type": "boolean",
+                "default": true
+              }
+            }
+          }
+        }
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "build:fixture": "dotnet build fixture/ConsoleApp.csproj --nologo --verbosity quiet",
+    "pretest": "npm run compile && npm run build:fixture",
+    "test": "vscode-test"
+  },
+  "devDependencies": {
+    "@types/mocha": "10.0.10",
+    "@types/node": "26.6.5",
+    "@types/vscode": "1.140.0",
+    "@vscode/test-cli": "0.0.15",
+    "@vscode/test-electron": "3.1.0",
+    "typescript": "7.0.2"
+  }
+}

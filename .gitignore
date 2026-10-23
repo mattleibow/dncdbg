@@ -15,6 +15,9 @@
 *.pdb
 bin/
 obj/
+/tests/DncDbg.VsCodeTests/node_modules/
+/tests/DncDbg.VsCodeTests/out/
+/tests/DncDbg.VsCodeTests/.vscode-test/
 
 # Vim swap files
 .*.sw?

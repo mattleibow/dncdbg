@@ -272,7 +272,14 @@ public sealed partial class DebugEngine
     private (string Path, int SourceReference) DescribeSource(LoadedModule? module, string pdbPath)
     {
         string local = ToLocalPath(pdbPath);
+        if (File.Exists(local))
+            return (Path.GetFullPath(local), 0);
         if (module?.Metadata == null)
+            return (local, 0);
+
+        bool canFetch = module.Metadata.GetEmbeddedSource(pdbPath) != null
+            || module.Metadata.GetSourceLinkUrl(pdbPath) != null;
+        if (!canFetch)
             return (local, 0);
 
         string key = module.Id + "|" + pdbPath;

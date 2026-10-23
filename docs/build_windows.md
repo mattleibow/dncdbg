@@ -11,9 +11,7 @@ dotnet build
 dotnet publish src/DncDbg.Adapter -c Release -o bin
 .\bin\dncdbg.exe --buildinfo
 dotnet run --project tests/DncDbg.SmokeTests -- bin/dncdbg.exe
-$env:DNCDBG = (Resolve-Path .\bin\dncdbg.exe).Path
-cd test-suite
-.\run_tests.ps1
+pwsh .\test-suite\run_tests.ps1
 ```
 
 The framework-dependent apphost requires .NET 10. For a self-contained x64

@@ -9,8 +9,7 @@ dotnet build
 dotnet publish src/DncDbg.Adapter -c Release -o bin
 ./bin/dncdbg --buildinfo
 dotnet run --project tests/DncDbg.SmokeTests -- bin/dncdbg
-cd test-suite
-DNCDBG=../bin/dncdbg bash run_tests.sh
+pwsh ./test-suite/run_tests.ps1
 ```
 
 The apphost requires .NET 10 unless published self-contained. Keep all published

@@ -47,14 +47,14 @@ the compatibility contract. From the repository root after publishing:
 
 ```sh
 dotnet run --project tests/DncDbg.SmokeTests -- bin/dncdbg
-cd test-suite
-DNCDBG=../bin/dncdbg bash run_tests.sh
+pwsh ./test-suite/run_tests.ps1
 ```
 
-The macOS arm64 acceptance matrix contains 71 tests. Validation on one platform
-is not proof of parity on Windows, Linux, or every DAP field. Windows has its own
-PowerShell runner and additional platform-specific tests. Tests default to
-`net10.0`; the existing `DNCDBG_TARGET_FRAMEWORK` override is preserved.
+The runner discovers `Test*/Test*.csproj` projects automatically and includes
+Windows-only projects when running on Windows. The macOS arm64 acceptance matrix
+contains 71 tests. Validation on one platform is not proof of parity on Windows,
+Linux, or every DAP field. Tests default to `net10.0`; the existing
+`DNCDBG_TARGET_FRAMEWORK` override is preserved.
 See [local testing](test-suite/README.md) for focused cases and lifecycle regressions.
 
 ## Usage

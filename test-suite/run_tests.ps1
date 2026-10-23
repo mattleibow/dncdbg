@@ -1,156 +1,154 @@
-﻿param(
-    [String]$x,
-    [Parameter(Mandatory = $false, Position = 0, ValueFromRemainingArguments = $true)]
-    [String[]] $tests
-)
-# Making Windows PowerShell console window Unicode (UTF-8) aware.
-$OutputEncoding = [console]::InputEncoding = [console]::OutputEncoding = New-Object System.Text.UTF8Encoding
-
-$ALL_TEST_NAMES = @(
-    "TestBreakpoint"
-    "TestBreakpoint_Release"
-    "TestBreakpoint_NoJMC"
-    "TestBreakpoint_NoJMC_Release"
-    "TestFuncBreak"
-    "TestAttach"
-    "TestPause"
-    "TestDisconnect"
-    "TestThreads"
-    "TestVariables"
-    "TestEvaluate"
-    "TestStepping"
-    "TestStepping_NoJMCNoFilter"
-    "TestEnv"
-    "TestExitCode"
-    "TestEvalNotEnglish"
-    "Test中文目录"
-    "TestSrcBreakpointResolve"
-    "TestEnum"
-    "TestAsyncStepping"
-    "TestAsyncStepping_NoJMC"
-    "TestBreak"
-    "TestExceptionBreakpoint"
-    "TestExceptionBreakpoint_NoJMC"
-    "TestSizeof"
-    "TestAsyncLambdaEvaluate"
-    "TestGeneric"
-    "TestEvalArraysIndexers"
-    "TestExtensionMethods"
-    "TestBreakpointWithoutStop"
-    "TestUnhandledExceptionStatic"
-    "TestUnhandledExceptionInstance"
-    "TestStdIO"
-    "TestModules"
-    "TestLogpoints"
-    "TestRemoteConsole"
-    "TestSourceFileMap"
-    "TestEvaluatePrimitiveUnary"
-    "TestEvaluatePrimitiveBinary"
-    "TestArgs"
-    "TestEmbeddedPDB"
-    "TestMethodParameters"
-    "TestMethodParameters_NoJMC"
-    "TestStackTraceWinForm"
-    "TestDebuggerBrowsable"
-    "TestDebuggerTypeProxy"
-    "TestDebuggerRawValues"
-    "TestFormatSpecifiers"
-    "TestFormatSpecifiersAc"
-    "TestDebuggerDisplay"
-    "TestObjectCreation"
-    "TestImports"
-    "TestBreakpointColumn"
-    "TestGoto"
-    "TestSingleThreadExec"
-    "TestEmbeddedSources"
-    "TestStackTrace"
-    "TestBreakpointLocations"
-    "TestAttachToSuspend"
-    "TestSourceLink"
-    "TestRestartLaunch"
-    "TestRestartAttach"
-    "TestLaunchSequence"
-    "TestAttachSequence"
-    "TestMultipleLaunch"
-    "TestMultipleAttach"
-    "TestNoDebugRestart"
-    "TestNoDebugStdIO"
-    "TestThreadStatic"
-    "TestStartAt0"
-    "TestMemoryReferences"
-    "TestReadWriteMemory"
+﻿[CmdletBinding()]
+param(
+    [Parameter(Position = 0, ValueFromRemainingArguments = $true)]
+    [string[]] $Tests
 )
 
-$TEST_NAMES = $tests
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
 
-if ($DNCDBG.count -eq 0) {
-    $DNCDBG = "../bin/dncdbg.exe"
+$utf8 = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = $utf8
+[Console]::InputEncoding = $utf8
+[Console]::OutputEncoding = $utf8
+
+$isWindowsHost = [OperatingSystem]::IsWindows()
+$suiteRoot = $PSScriptRoot
+$repoRoot = Split-Path -Parent $suiteRoot
+
+function Test-IsWindowsOnly([string] $ProjectPath) {
+    return (Get-Content -Raw $ProjectPath) -match "<TargetFramework[^>]*>[^<]*-windows</TargetFramework>"
 }
 
-if ($TEST_NAMES.count -eq 0) {
-    $TEST_NAMES = $ALL_TEST_NAMES
+function Invoke-DotNet([string[]] $Arguments) {
+    & dotnet @Arguments | Out-Host
+    return $LASTEXITCODE
 }
 
-# Prepare
-dotnet build Runner
-if ($lastexitcode -ne 0) {
-    throw ("Exec build test: " + $errorMessage)
-}
+Push-Location $suiteRoot
+try {
+    $projects = @(
+        Get-ChildItem -Path $suiteRoot -Directory -Filter "Test*" |
+            ForEach-Object {
+                $projectPath = Join-Path $_.FullName "$($_.Name).csproj"
+                if (Test-Path -Path $projectPath -PathType Leaf) {
+                    [pscustomobject]@{
+                        Name = $_.Name
+                        Directory = $_.FullName
+                        Project = $projectPath
+                        WindowsOnly = Test-IsWindowsOnly $projectPath
+                    }
+                }
+            } |
+            Sort-Object Name
+    )
 
-$test_pass = 0
-$test_fail = 0
-$test_list = ""
-
-# Build, push and run tests
-foreach ($TEST_NAME in $TEST_NAMES) {
-
-    $BUILD_TYPE = "Debug"
-    if ($TEST_NAME.EndsWith("_Release")) {
-        $BUILD_TYPE = "Release"
+    $projectsByName = [System.Collections.Generic.Dictionary[string, object]]::new(
+        [StringComparer]::OrdinalIgnoreCase)
+    foreach ($project in $projects) {
+        $projectsByName.Add($project.Name, $project)
     }
 
-    dotnet build -c $BUILD_TYPE $TEST_NAME
-    if ($lastexitcode -ne 0) {
-        $test_fail++
-        $test_list = "$test_list$TEST_NAME ... failed: build error`n"
-        continue
-    }
-
-    $SOURCE_FILE_LIST = (Get-ChildItem -Path "$TEST_NAME" -Recurse -Filter *.cs | Where {$_.FullName -notlike "*\obj\*"} | Resolve-path -relative).Substring(2)
-
-    $SOURCE_FILES = ""
-    foreach ($SOURCE_FILE in $SOURCE_FILE_LIST) {
-        $SOURCE_FILES += $SOURCE_FILE + ";"
-    }
-
-    $FRAMEWORK = "net10.0"
-    if (-not [String]::IsNullOrEmpty($DNCDBG_TARGET_FRAMEWORK)) {
-        $FRAMEWORK = $DNCDBG_TARGET_FRAMEWORK
-    }
-    if ($TEST_NAME -eq "TestStackTraceWinForm") {
-        $FRAMEWORK += "-windows"
-    }
-
-    dotnet run --project Runner -- `
-        --local $DNCDBG `
-        --test $TEST_NAME `
-        --sources $SOURCE_FILES `
-        --assembly $TEST_NAME/bin/$BUILD_TYPE/$FRAMEWORK/$TEST_NAME.dll
-
-    if ($?) {
-        $test_pass++
-        $test_list = "$test_list$TEST_NAME ... passed`n"
+    if ($Tests -and $Tests.Count -gt 0) {
+        $selectedProjects = foreach ($name in $Tests) {
+            $project = $null
+            if (-not $projectsByName.TryGetValue($name, [ref] $project)) {
+                throw "Unknown test '$name'. Test projects must be named Test*/Test*.csproj."
+            }
+            if ($project.WindowsOnly -and -not $isWindowsHost) {
+                throw "Test '$name' targets Windows and cannot run on this operating system."
+            }
+            $project
+        }
     }
     else {
-        $test_fail++
-        $test_list = "$test_list$TEST_NAME ... failed`n"
+        $selectedProjects = @($projects | Where-Object { $isWindowsHost -or -not $_.WindowsOnly })
+        $skipped = @($projects | Where-Object { -not $isWindowsHost -and $_.WindowsOnly })
+        if ($skipped.Count -gt 0) {
+            Write-Host "Skipping Windows-only tests: $($skipped.Name -join ', ')"
+        }
+    }
+
+    $debuggerName = if ($isWindowsHost) { "dncdbg.exe" } else { "dncdbg" }
+    $debugger = if ([string]::IsNullOrWhiteSpace($env:DNCDBG)) {
+        Join-Path $repoRoot "bin/$debuggerName"
+    }
+    else {
+        $env:DNCDBG
+    }
+    $debugger = [IO.Path]::GetFullPath($debugger)
+    if (-not (Test-Path -Path $debugger -PathType Leaf)) {
+        throw "Debugger apphost not found at '$debugger'. Publish it first or set DNCDBG."
+    }
+
+    if ((Invoke-DotNet @("build", "Runner/Runner.csproj", "--nologo")) -ne 0) {
+        throw "Failed to build the test Runner."
+    }
+
+    $passed = 0
+    $failed = 0
+    $results = [System.Collections.Generic.List[string]]::new()
+    $targetFramework = if ([string]::IsNullOrWhiteSpace($env:DNCDBG_TARGET_FRAMEWORK)) {
+        "net10.0"
+    }
+    else {
+        $env:DNCDBG_TARGET_FRAMEWORK
+    }
+
+    foreach ($project in $selectedProjects) {
+        $configuration = if ($project.Name.EndsWith("_Release", [StringComparison]::Ordinal)) {
+            "Release"
+        }
+        else {
+            "Debug"
+        }
+
+        if ((Invoke-DotNet @("build", $project.Project, "-c", $configuration, "--nologo")) -ne 0) {
+            $failed++
+            $results.Add("$($project.Name) ... failed: build error")
+            continue
+        }
+
+        $sources = @(
+            Get-ChildItem -Path $project.Directory -Recurse -File -Filter "*.cs" |
+                Where-Object { $_.FullName -notmatch "[\\/]obj[\\/]" } |
+                ForEach-Object { [IO.Path]::GetRelativePath($suiteRoot, $_.FullName) }
+        )
+        $sourceArgument = $sources -join ";"
+        $framework = if ($project.WindowsOnly -and -not $targetFramework.EndsWith("-windows", [StringComparison]::OrdinalIgnoreCase)) {
+            "$targetFramework-windows"
+        }
+        else {
+            $targetFramework
+        }
+        $assembly = Join-Path $project.Directory "bin/$configuration/$framework/$($project.Name).dll"
+
+        $exitCode = Invoke-DotNet @(
+            "run", "--project", "Runner/Runner.csproj", "--no-build", "--",
+            "--local", $debugger,
+            "--test", $project.Name,
+            "--sources", $sourceArgument,
+            "--assembly", $assembly
+        )
+
+        if ($exitCode -eq 0) {
+            $passed++
+            $results.Add("$($project.Name) ... passed")
+        }
+        else {
+            $failed++
+            $results.Add("$($project.Name) ... failed ($exitCode)")
+        }
+    }
+
+    Write-Output ""
+    $results | Write-Output
+    Write-Output "Total tests: $($passed + $failed). Passed: $passed. Failed: $failed."
+
+    if ($failed -ne 0) {
+        exit 1
     }
 }
-
-Write-Output ""
-Write-Output $test_list
-Write-Output "Total tests: $($test_pass + $test_fail). Passed: $test_pass. Failed: $test_fail."
-
-if ($test_fail -ne 0) {
-    exit 1
+finally {
+    Pop-Location
 }

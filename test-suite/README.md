@@ -1,22 +1,22 @@
 # How to launch tests locally
 
-- On Linux and macOS:
-```
-    launch all tests:
-    $ ./run_tests.sh
-    or
-    $ ./run_tests.sh <test-name> [<test-name>]
-    or
-    $ DNCDBG=<path-to-dncdbg> ./run_tests.sh <test-name> [<test-name>]
+Use PowerShell 7 (`pwsh`) on Windows, Linux, and macOS. From the repository root:
+
+```powershell
+# Run every test supported by the current operating system.
+pwsh ./test-suite/run_tests.ps1
+
+# Run selected tests.
+pwsh ./test-suite/run_tests.ps1 TestBreakpoint TestEvaluate
+
+# Use a debugger apphost from another location.
+$env:DNCDBG = "/path/to/dncdbg"
+pwsh ./test-suite/run_tests.ps1 TestBreakpoint
 ```
 
-- On Windows:
-```
-    launch all tests:
-    $ powershell.exe -executionpolicy bypass -File run_tests.ps1
-    or
-    $ powershell.exe -executionpolicy bypass -File run_tests.ps1 <test-name> [<test-name>]
-```
+The runner discovers directories named `Test*` that contain a matching
+`Test*.csproj`. Windows-only projects are included automatically on Windows and
+skipped on other operating systems.
 
 The target framework can be overridden with the `DNCDBG_TARGET_FRAMEWORK` environment variable (for example, `net8.0`); by default, the tests target `net10.0`.
 
@@ -24,14 +24,13 @@ For the managed debugger, build or publish from the repository root first:
 
 ```sh
 dotnet publish src/DncDbg.Adapter -c Release -o bin
-cd test-suite
-DNCDBG=../bin/dncdbg bash run_tests.sh TestBreakpoint TestEvaluate TestStackTrace TestMemoryReferences TestReadWriteMemory
+pwsh ./test-suite/run_tests.ps1 TestBreakpoint TestEvaluate TestStackTrace TestMemoryReferences TestReadWriteMemory
 ```
 
 For the focused stepping parity set against the published Release host:
 
 ```sh
-DNCDBG=../bin/dncdbg bash run_tests.sh TestStepping TestStepping_NoJMCNoFilter TestAsyncStepping TestAsyncStepping_NoJMC
+pwsh ./test-suite/run_tests.ps1 TestStepping TestStepping_NoJMCNoFilter TestAsyncStepping TestAsyncStepping_NoJMC
 ```
 
 The debugger's build configuration is independent of each test fixture's
@@ -66,12 +65,13 @@ suite. A surviving detached fixture is explicitly cleaned up by the smoke runner
 
 - move to the test-suite directory;
 
-- create a new project in the test-suite folder:
+- create a project whose directory and project file names both start with
+  `Test`, for example:
 ```
-    $ dotnet new console -o NewTest
+    $ dotnet new console -o TestNewFeature
 ```
 
-- add a reference to the DbgTest library and `Context.cs` file to the `ItemGroup` section by editing the `NewTest.csproj` file, for example:
+- add a reference to the DbgTest library and `Context.cs` file to the `ItemGroup` section by editing `TestNewFeature.csproj`, for example:
 ```
 <Project Sdk="Microsoft.NET.Sdk">
 
@@ -90,4 +90,5 @@ suite. A surviving detached fixture is explicitly cleaned up by the smoke runner
 </Project>
 ```
 
-- add the test name to the ALL_TEST_NAMES list in the `run_tests.sh` and `run_tests.ps1` scripts.
+The runner discovers the new project automatically; no test manifest needs to
+be updated.

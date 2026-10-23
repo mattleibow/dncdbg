@@ -44,12 +44,13 @@ public sealed record VariableInfo
 /// <summary>How values are rendered; set through format specifiers ("x,h") or the client's value format.</summary>
 /// <param name="FullStrings">Do not shorten long strings (the client wants the value for the clipboard).</param>
 /// <param name="ElementLimit">Show only the first elements of an array or collection ("numbers,5").</param>
-internal sealed record DisplayOptions(bool Hex = false, bool NoQuotes = false, bool Raw = false, bool FullStrings = false, int? ElementLimit = null)
+internal sealed record DisplayOptions(bool Hex = false, bool NoQuotes = false, bool Raw = false, bool FullStrings = false, int? ElementLimit = null,
+    bool Hidden = false, bool AllowCalls = false)
 {
     public static readonly DisplayOptions Default = new();
 
     /// <summary>Number formatting carries over to members and elements, the rest is about the value itself.</summary>
-    public DisplayOptions ForChildren() => Hex ? new DisplayOptions(Hex: true) : Default;
+    public DisplayOptions ForChildren() => Hex || Hidden ? new DisplayOptions(Hex: Hex, Hidden: Hidden) : Default;
 }
 
 internal sealed class EvalFailedException(string message) : Exception(message);
@@ -68,6 +69,8 @@ internal interface IEvalHost
 
     /// <summary>True once the current request has used up its time for running code in the debuggee.</summary>
     bool BudgetExceeded { get; }
+    bool FuncEvalAllowed { get; }
+    bool ShowRawValues { get; }
 
     /// <summary>Expands a [DebuggerDisplay] format string against the object returned by <paramref name="self"/>.</summary>
     string FormatDebuggerDisplay(string template, Func<CorDebugValue?> self, InspectionContext context);
@@ -125,6 +128,8 @@ internal sealed partial class ValueInspector
         _host.ThrowIfCancelled();
         try
         {
+            if (_host.ShowRawValues)
+                options = (options ?? DisplayOptions.Default) with { Raw = true };
             VariableInfo info = DescribeCore(name, getter, evaluateName, context, options ?? DisplayOptions.Default);
             try
             {
@@ -279,7 +284,8 @@ internal sealed partial class ValueInspector
         if (IsEnum(type))
         {
             CorDebugValue raw = GetField(obj, type, "value__")!;
-            return Leaf(options.Hex ? FormatHost(ReadPrimitive(raw), options).Text : FormatEnum(type.Class, ReadIntegerBits(raw)));
+            string? enumDisplay = options.Raw ? null : TryGet(() => FormatWithDebuggerDisplay(getter, context));
+            return Leaf(enumDisplay ?? (options.Hex ? FormatHost(ReadPrimitive(raw), options).Text : FormatEnum(type.Class, ReadIntegerBits(raw))));
         }
 
         // A boxed primitive unboxes to a System.Int32-style struct wrapping the raw value in m_value.
@@ -659,7 +665,25 @@ internal sealed partial class ValueInspector
                 else if (end > first)
                 {
                     foreach (CollectionItem item in collection.Items().Skip(first).Take(end - first))
-                        result.Add(Describe(item.Name, item.Getter, evaluateName == null || !item.Addressable ? null : evaluateName + item.Name, context, options));
+                    {
+                        if (item.KeyGetter is not { } keyGetter)
+                            result.Add(Describe(item.Name, item.Getter, evaluateName == null || !item.Addressable ? null : evaluateName + item.Name, context, options));
+                        else
+                        {
+                            List<VariableInfo> Members() =>
+                            [
+                                Describe("Key", keyGetter, null, context, options) with { Location = null },
+                                Describe("Value", item.Getter, null, context, options) with { Location = null },
+                            ];
+                            List<VariableInfo> pair = Members();
+                            result.Add(new VariableInfo
+                            {
+                                Name = item.Name, Value = "[" + pair[0].Value + ", " + pair[1].Value + "]",
+                                Type = $"System.Collections.Generic.KeyValuePair<{pair[0].Type}, {pair[1].Type}>", Context = context,
+                                ChildrenProvider = (_, _) => Members(),
+                            });
+                        }
+                    }
                 }
                 AddNoteAboutTheRest(result, count, end, collection.Count);
                 result.Add(new VariableInfo
@@ -684,7 +708,7 @@ internal sealed partial class ValueInspector
             Func<CorDebugValue?>? proxy = proxyType == null ? null : TryGet(() => _host.CreateTypeProxy(proxyType, getter, context));
             if (proxy != null)
             {
-                result.AddRange(GetObjectChildren(proxy, evaluateName: null, context, start, count, rawView: false, options, publicOnly: true));
+                result.AddRange(GetObjectChildren(proxy, evaluateName: null, context, start, count, rawView: false, options, publicOnly: !options.Hidden));
                 result.Add(new VariableInfo
                 {
                     Name = "Raw View",
@@ -718,9 +742,16 @@ internal sealed partial class ValueInspector
         // sequences that are not one of the known collections: their elements only exist once enumerated
         bool isSequence = !rawView && !publicOnly && context?.Frame != null
             && levels.Any(l => l.Metadata.GetInterfaceNames(l.Token).Contains("System.Collections.IEnumerable"));
+        var displays = new Dictionary<string, string>();
+        if (!rawView)
+            foreach (TypeLevel level in levels)
+                foreach (var (member, template) in level.Metadata.GetMemberDebuggerDisplays(level.Token))
+                    displays.TryAdd(member, template);
 
         void Add(VariableInfo member, string memberName)
         {
+            if (displays.TryGetValue(memberName, out string? template))
+                member = ApplyMemberDisplay(member, template, getter, context);
             if (browsable.GetValueOrDefault(memberName) == BrowsableState.RootHidden && member.ChildrenProvider != null)
                 result.AddRange(member.ChildrenProvider(0, 0).Where(c => c.Name is not ("Raw View" or "Static members")));
             else
@@ -777,6 +808,11 @@ internal sealed partial class ValueInspector
                 }
                 else if (_host.BudgetExceeded)
                 {
+                    if (!_host.FuncEvalAllowed)
+                    {
+                        result.Add(new VariableInfo { Name = propertyName, Value = "<error>", Type = "" });
+                        continue;
+                    }
                     // Out of time for this request: the client asks for these one by one, when the user wants them.
                     result.Add(new VariableInfo
                     {
@@ -903,6 +939,7 @@ internal sealed partial class ValueInspector
         foreach (TypeLevel level in GetTypeLevels(target))
         {
             string typeName = TypeName(level.Type);
+            Dictionary<string, string> displays = options.Raw ? [] : level.Metadata.GetMemberDebuggerDisplays(level.Token);
             foreach (FieldDescription field in level.Metadata.GetFields(level.Token))
             {
                 if (!field.IsStatic && !field.IsLiteral)
@@ -917,16 +954,36 @@ internal sealed partial class ValueInspector
                 }
                 CorDebugType type = level.Type;
                 int token = field.Token;
-                result.Add(context?.Frame != null
-                    ? _host.EvaluateStatic(evaluateName, context, options) with { Name = CleanFieldName(field.Name) }
-                    : Describe(CleanFieldName(field.Name), () => StaticField(type, token, context?.Frame), evaluateName, context, options));
+                VariableInfo member = context?.Frame != null
+                    ? EvaluateStaticMember(evaluateName, CleanFieldName(field.Name), context, options)
+                    : Describe(CleanFieldName(field.Name), () => StaticField(type, token, context?.Frame), evaluateName, context, options);
+                result.Add(ApplyMemberDisplay(member, displays.GetValueOrDefault(field.Name), getter, context));
             }
             if (context?.Frame != null)
                 foreach (PropertyDescription property in level.Metadata.GetProperties(level.Token).Where(p => p.IsStatic && !p.IsIndexer))
-                    result.Add(_host.EvaluateStatic(typeName + "." + property.Name, context, options) with { Name = property.Name });
+                    result.Add(ApplyMemberDisplay(EvaluateStaticMember(typeName + "." + property.Name, property.Name, context, options),
+                        displays.GetValueOrDefault(property.Name), getter, context));
         }
         return result;
     }
+
+    private VariableInfo EvaluateStaticMember(string expression, string name, InspectionContext context, DisplayOptions options)
+    {
+        try
+        {
+            VariableInfo value = _host.EvaluateStatic(expression, context, options) with { Name = name };
+            return value.Value.StartsWith("<error", StringComparison.Ordinal)
+                ? value with { Value = "<error>", Type = "" } : value;
+        }
+        catch (Exception e) when (e is DebuggerException or EvalFailedException)
+        {
+            return new VariableInfo { Name = name, Value = "<error>", Type = "" };
+        }
+    }
+
+    private VariableInfo ApplyMemberDisplay(VariableInfo value, string? template, Func<CorDebugValue?> owner, InspectionContext? context) =>
+        template == null || context?.Frame == null ? value
+            : value with { Value = _host.FormatDebuggerDisplay(template, owner, context) };
 
     public CorDebugValue? StaticField(CorDebugType type, int fieldToken, FrameRef? frame)
     {
@@ -945,7 +1002,7 @@ internal sealed partial class ValueInspector
     // ---------------------------------------------------------------- collections
 
     /// <param name="Addressable">Whether "collection" + Name is a valid expression for the item (true for indexers).</param>
-    private sealed record CollectionItem(string Name, Func<CorDebugValue?> Getter, bool Addressable = true);
+    private sealed record CollectionItem(string Name, Func<CorDebugValue?> Getter, bool Addressable = true, Func<CorDebugValue?>? KeyGetter = null);
 
     /// <param name="Items">All items, in order. Skipping must be cheap: requests page deep into large collections.</param>
     /// <param name="Backing">The array the items "[i]" live in (item i at Offset + i), where it is that simple.</param>
@@ -963,7 +1020,6 @@ internal sealed partial class ValueInspector
         int Int(string field) => Convert.ToInt32(ReadPrimitive(Field(field) ?? throw new InvalidOperationException(field)), CultureInfo.InvariantCulture);
         int Length(string arrayField) => Field(arrayField) is { } a && Unwrap(a, out _) is { } array ? array.As<CorDebugArrayValue>().Count : 0;
         CollectionItem Indexed(int index, Func<CorDebugValue?> element, bool addressable = true) => new("[" + index + "]", element, addressable);
-        string Key(Func<CorDebugValue?> key) => DescribeCore("key", key, null, context, options).Value;
 
         if (typeName.StartsWith(Generic + "List<", StringComparison.Ordinal))
         {
@@ -1038,14 +1094,14 @@ internal sealed partial class ValueInspector
                 }
             }
             int count = Nodes().Count();
-            return new CollectionView(count, () => Nodes().Select(n =>
-                new CollectionItem("[" + Key(() => GetFieldByName(n()!, Name("_key"))) + "]", () => GetFieldByName(n()!, Name("_value")))));
+            return new CollectionView(count, () => Nodes().Select((n, i) =>
+                new CollectionItem("[" + i + "]", () => GetFieldByName(n()!, Name("_value")), false, () => GetFieldByName(n()!, Name("_key")))));
         }
         if (typeName.StartsWith(Generic + "SortedList<", StringComparison.Ordinal))
         {
             int size = Int("_size");
             return new CollectionView(size, () => Enumerable.Range(0, size).Select(i =>
-                new CollectionItem("[" + Key(() => ElementAt(() => Field("keys"), i)) + "]", () => ElementAt(() => Field("values"), i))));
+                new CollectionItem("[" + i + "]", () => ElementAt(() => Field("values"), i), false, () => ElementAt(() => Field("keys"), i))));
         }
 
         bool dictionary = typeName.StartsWith(Generic + "Dictionary<", StringComparison.Ordinal);
@@ -1065,7 +1121,7 @@ internal sealed partial class ValueInspector
             {
                 Func<CorDebugValue?> entry = () => ElementAt(() => Field(entries), position);
                 return dictionary
-                    ? new CollectionItem("[" + Key(() => GetFieldByName(entry()!, "key")) + "]", () => GetFieldByName(entry()!, value))
+                    ? new CollectionItem("[" + index + "]", () => GetFieldByName(entry()!, value), false, () => GetFieldByName(entry()!, "key"))
                     : Indexed(index, () => GetFieldByName(entry()!, value), false);
             }
             IEnumerable<CollectionItem> Items()
@@ -1439,15 +1495,15 @@ internal sealed partial class ValueInspector
         {
             string? hex = value switch
             {
-                sbyte v => "0x" + v.ToString("X2", inv),
-                byte v => "0x" + v.ToString("X2", inv),
-                short v => "0x" + v.ToString("X4", inv),
-                ushort v => "0x" + v.ToString("X4", inv),
-                int v => "0x" + v.ToString("X8", inv),
-                uint v => "0x" + v.ToString("X8", inv),
-                long v => "0x" + v.ToString("X16", inv),
-                ulong v => "0x" + v.ToString("X16", inv),
-                char v => "0x" + ((int)v).ToString("X4", inv) + " " + FormatChar(v),
+                sbyte v => "0x" + v.ToString("x2", inv),
+                byte v => "0x" + v.ToString("x2", inv),
+                short v => "0x" + v.ToString("x4", inv),
+                ushort v => "0x" + v.ToString("x4", inv),
+                int v => "0x" + v.ToString("x8", inv),
+                uint v => "0x" + v.ToString("x8", inv),
+                long v => "0x" + v.ToString("x16", inv),
+                ulong v => "0x" + v.ToString("x16", inv),
+                char v => "0x" + ((int)v).ToString("x4", inv) + " " + FormatChar(v),
                 _ => null,
             };
             if (hex != null)

@@ -85,7 +85,59 @@ internal sealed partial class ModuleMetadata
                 if (reader.Length > 2 && reader.ReadUInt16() == 1)
                     result = reader.ReadSerializedString();
             }
+            if (result == null && _md.IsAssembly)
+            {
+                string typeName = GetTypeName(typeDefToken);
+                foreach (CustomAttributeHandle handle in _md.GetAssemblyDefinition().GetCustomAttributes())
+                {
+                    CustomAttribute assemblyAttribute = _md.GetCustomAttribute(handle);
+                    if (GetAttributeTypeName(assemblyAttribute) != DebuggerDisplayAttribute)
+                        continue;
+                    BlobReader reader = _md.GetBlobReader(assemblyAttribute.Value);
+                    if (reader.ReadUInt16() != 1)
+                        continue;
+                    string? template = reader.ReadSerializedString();
+                    int namedCount = reader.ReadUInt16();
+                    for (int i = 0; i < namedCount; i++)
+                    {
+                        reader.ReadByte();
+                        byte kind = reader.ReadByte();
+                        if (kind is not (0x0e or 0x50))
+                            break;
+                        string? name = reader.ReadSerializedString();
+                        string? value = reader.ReadSerializedString();
+                        if (name is "Target" or "TargetTypeName" && value?.Split(',')[0].Replace('+', '.') == typeName)
+                            result = template;
+                    }
+                }
+            }
             return _debuggerDisplayCache[typeDefToken] = result;
+        }
+    }
+
+    public Dictionary<string, string> GetMemberDebuggerDisplays(int typeToken)
+    {
+        var result = new Dictionary<string, string>();
+        TypeDefinition type = _md.GetTypeDefinition((TypeDefinitionHandle)MetadataTokens.Handle(typeToken));
+        foreach (FieldDefinitionHandle handle in type.GetFields())
+        {
+            FieldDefinition field = _md.GetFieldDefinition(handle);
+            Add(_md.GetString(field.Name), field.GetCustomAttributes());
+        }
+        foreach (PropertyDefinitionHandle handle in type.GetProperties())
+        {
+            PropertyDefinition property = _md.GetPropertyDefinition(handle);
+            Add(_md.GetString(property.Name), property.GetCustomAttributes());
+        }
+        return result;
+
+        void Add(string name, CustomAttributeHandleCollection attributes)
+        {
+            if (FindAttribute(attributes, DebuggerDisplayAttribute) is not { } attribute)
+                return;
+            BlobReader reader = _md.GetBlobReader(attribute.Value);
+            if (reader.ReadUInt16() == 1 && reader.ReadSerializedString() is { } template)
+                result[name] = template;
         }
     }
 

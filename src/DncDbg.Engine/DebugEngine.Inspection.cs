@@ -226,7 +226,7 @@ public sealed partial class DebugEngine
         }
 
         string name = metadata?.GetMethodName(token, GetTypeArgumentNames(frame)) ?? $"<method 0x{token:X8}>";
-        name += metadata?.GetParameterDisplay(token) ?? "()";
+        name += metadata?.GetParameterDisplay(token, GetTypeArgumentNames(frame)) ?? "()";
         int id = ++_nextHandle;
         _frames[id] = frameRef;
         if (location is { } l)

@@ -15,6 +15,10 @@ internal sealed class DebugAdapter : IDisposable
 
     // what a restart has to bring back
     private LaunchArguments? _launchArguments;
+    private AttachArguments? _attachArguments;
+    private bool _initialized;
+    private bool _configurationDone;
+    private (DapMessage Request, object? Body, Action? AfterResponse)? _pendingStartResponse;
     private readonly Dictionary<string, BreakpointRequest[]> _breakpointRequests = new(StringComparer.OrdinalIgnoreCase);
     private FunctionBreakpointRequest[] _functionBreakpointRequests = [];
     private ExceptionFilterRequest[]? _exceptionFilterRequests;
@@ -24,7 +28,8 @@ internal sealed class DebugAdapter : IDisposable
     private bool _clientSupportsRunInTerminal;
     private bool _clientSupportsMemoryReferences;
     private int _terminatedSent;
-    private Action? _afterResponse;
+    private readonly ThreadLocal<Action?> _afterResponses = new();
+    private Action? _afterResponse { get => _afterResponses.Value; set => _afterResponses.Value = value; }
 
     // Requests are executed one at a time by a worker, so that the reader stays free for the few requests that
     // must get through while another one is still running: cancel, pause, terminate and disconnect.
@@ -103,10 +108,6 @@ internal sealed class DebugAdapter : IDisposable
 
                 // Launching may have to wait for the client (runInTerminal) and may take long (build); breakpoints
                 // and configurationDone are expected to be accepted meanwhile.
-                case "launch" or "restart":
-                    Task.Run(() => Handle(message));
-                    break;
-
                 default:
                     _queue.Add(message);
                     break;
@@ -160,8 +161,15 @@ internal sealed class DebugAdapter : IDisposable
         try
         {
             object? body = Dispatch(message);
+            Action? afterResponse = _afterResponse;
+            _afterResponse = null;
+            if (!_configurationDone && message.Command is "launch" or "attach")
+            {
+                _pendingStartResponse = (message, body, afterResponse);
+                return;
+            }
             _connection.SendResponse(message, body);
-            Interlocked.Exchange(ref _afterResponse, null)?.Invoke();
+            afterResponse?.Invoke();
         }
         catch (OperationCanceledException)
         {
@@ -178,6 +186,7 @@ internal sealed class DebugAdapter : IDisposable
             if (message.Command is "evaluate" or "setExpression" or "setVariable"
                 && diagnostic is not ("Expression has malformed or incomplete syntax." or "Failed to parse character.")
                 && !diagnostic.StartsWith("Evaluation timed out.", StringComparison.Ordinal)
+                && diagnostic != "Implicit function evaluation is turned off by the user."
                 && !diagnostic.StartsWith("error ", StringComparison.Ordinal))
                 diagnostic = "error: " + diagnostic;
             _connection.SendErrorResponse(message, diagnostic);
@@ -190,18 +199,22 @@ internal sealed class DebugAdapter : IDisposable
         {
             case "initialize":
             {
-                if (_terminatedSent != 0)
+                if (_initialized)
                 {
                     DebugEngine old = _engine;
                     _engine = CreateEngine();
                     old.Dispose();
                     _terminatedSent = 0;
                     _launchArguments = null;
+                    _attachArguments = null;
                     _breakpointRequests.Clear();
                     _functionBreakpointRequests = [];
                     _exceptionFilterRequests = null;
                     _isAttach = false;
                 }
+                _initialized = true;
+                _configurationDone = false;
+                _pendingStartResponse = null;
                 var args = request.GetArguments<InitializeArguments>() ?? new InitializeArguments();
                 _clientLinesStartAt1 = args.LinesStartAt1;
                 _clientColumnsStartAt1 = args.ColumnsStartAt1;
@@ -211,6 +224,8 @@ internal sealed class DebugAdapter : IDisposable
                 return new Capabilities
                 {
                     SupportsConfigurationDoneRequest = true,
+                    SupportsSingleThreadExecutionRequests = true,
+                    SupportsBreakpointLocationsRequest = true,
                     SupportsReadMemoryRequest = true,
                     SupportsWriteMemoryRequest = true,
                     SupportsTerminateRequest = true,
@@ -255,38 +270,65 @@ internal sealed class DebugAdapter : IDisposable
 
             case "restart":
             {
-                if (_launchArguments == null)
-                    throw new DebuggerException("Only launched sessions can be restarted.");
+                if (_launchArguments == null && _attachArguments == null)
+                    throw new DebuggerException("No session to restart.");
                 // the client may send an updated configuration
                 if (request.GetArguments<RestartArguments>()?.Arguments is { ValueKind: System.Text.Json.JsonValueKind.Object } updated)
-                    _launchArguments = System.Text.Json.JsonSerializer.Deserialize<LaunchArguments>(updated, DapJson.Options) ?? _launchArguments;
+                {
+                    if (_isAttach)
+                        _attachArguments = System.Text.Json.JsonSerializer.Deserialize<AttachArguments>(updated, DapJson.Options) ?? _attachArguments;
+                    else
+                        _launchArguments = System.Text.Json.JsonSerializer.Deserialize<LaunchArguments>(updated, DapJson.Options) ?? _launchArguments;
+                }
 
                 DebugEngine old = _engine;
+                if (old.NoDebug)
+                {
+                    old.Terminate();
+                    old.Dispose();
+                }
                 _engine = CreateEngine();
-                old.Dispose();
+                if (!old.NoDebug)
+                    old.Dispose();
+                _terminatedSent = 0;
 
                 foreach (var (path, requests) in _breakpointRequests)
                     _engine.SetBreakpoints(path, requests);
                 _engine.SetFunctionBreakpoints(_functionBreakpointRequests);
                 if (_exceptionFilterRequests != null)
                     _engine.SetExceptionFilters(_exceptionFilterRequests);
-                Launch(_launchArguments);
+                if (_attachArguments != null && _isAttach)
+                {
+                    _attachArguments.StopAtEntry = false;
+                    Attach(_attachArguments);
+                }
+                else
+                    Launch(_launchArguments!);
                 _engine.ConfigurationDone();
                 return null;
+
             }
 
             case "attach":
             {
                 var args = request.GetArguments<AttachArguments>() ?? throw new DebuggerException("Missing attach arguments.");
-                _engine.AllowImplicitFuncEval = args.AllowImplicitFuncEval ?? true;
-                _engine.Attach(args.GetProcessId(), args.JustMyCode ?? true, args.SourceFileMap);
-                _isAttach = true;
-                SendProcessEvent(args.GetProcessId().ToString(), "attach");
+                _attachArguments = args;
+                Attach(args);
                 return null;
             }
 
             case "configurationDone":
-                _engine.ConfigurationDone();
+                _configurationDone = true;
+                _afterResponse = () =>
+                {
+                    if (_pendingStartResponse is { } pending)
+                    {
+                        _pendingStartResponse = null;
+                        _connection.SendResponse(pending.Request, pending.Body);
+                        pending.AfterResponse?.Invoke();
+                    }
+                    _engine.ConfigurationDone();
+                };
                 return null;
 
             case "setBreakpoints":
@@ -340,6 +382,17 @@ internal sealed class DebugAdapter : IDisposable
                 };
             }
 
+            case "breakpointLocations":
+            {
+                var args = request.GetArguments<BreakpointLocationsArguments>()!;
+                int line = LineFromClient(args.Line);
+                return new BreakpointLocationsResponseBody(_engine.GetBreakpointLocations(args.Source.Path ?? args.Source.Name ?? "",
+                    line, args.Column is > 0 ? ColumnFromClient(args.Column.Value) : 1,
+                    args.EndLine is > 0 ? LineFromClient(args.EndLine.Value) : line,
+                    args.EndColumn is > 0 ? ColumnFromClient(args.EndColumn.Value) : int.MaxValue)
+                    .Select(p => new BreakpointLocation(LineToClient(p.Line), ColumnToClient(p.Column), LineToClient(p.EndLine), ColumnToClient(p.EndColumn))).ToArray());
+            }
+
             case "gotoTargets":
             {
                 var args = request.GetArguments<GotoTargetsArguments>()!;
@@ -367,7 +420,7 @@ internal sealed class DebugAdapter : IDisposable
             {
                 var args = request.GetArguments<SourceArguments>()!;
                 int reference = args.Source?.SourceReference is > 0 ? args.Source.SourceReference.Value : args.SourceReference;
-                return new SourceResponseBody { Content = _engine.GetSource(reference), MimeType = "text/x-csharp" };
+                return new SourceResponseBody { Content = _engine.GetSource(reference, args.Source?.Path), MimeType = "text/x-csharp" };
             }
 
             case "dotnet/freezeThread":
@@ -452,6 +505,8 @@ internal sealed class DebugAdapter : IDisposable
             case "evaluate":
             {
                 var args = request.GetArguments<EvaluateArguments>()!;
+                if (_engine.WriteInputIfRunning(args.Expression))
+                    return new EvaluateResponseBody { Result = "", Type = "void" };
                 (VariableInfo variable, int handle) = _engine.Evaluate(args.Expression, args.FrameId, allowCalls: args.Context != "hover", hex: args.Format?.Hex == true,
                     fullStrings: args.Context == "clipboard");
                 return new EvaluateResponseBody
@@ -512,21 +567,22 @@ internal sealed class DebugAdapter : IDisposable
             case "loadedSources":
                 return new LoadedSourcesResponseBody
                 {
-                    Sources = _engine.GetLoadedSources().Select(f => new Source { Name = Path.GetFileName(f.Path), Path = f.Path }).ToArray(),
+                    Sources = _engine.GetLoadedSources().Select(f => new Source { Name = Path.GetFileName(f.Path.Replace('\\', '/')), Path = f.Path,
+                        SourceReference = f.SourceReference > 0 ? f.SourceReference : null }).ToArray(),
                 };
 
             case "continue":
-                _engine.Continue();
+                _engine.Continue(request.GetArguments<ThreadArguments>()!.ThreadId, SingleThread(request));
                 return new ContinueResponseBody();
 
             case "next":
-                _engine.Step(request.GetArguments<ThreadArguments>()!.ThreadId, StepKind.Over);
+                _engine.Step(request.GetArguments<ThreadArguments>()!.ThreadId, StepKind.Over, singleThread: SingleThread(request));
                 return null;
 
             case "stepIn":
             {
                 var args = request.GetArguments<StepInArguments>()!;
-                _engine.Step(args.ThreadId, StepKind.In, args.TargetId);
+                _engine.Step(args.ThreadId, StepKind.In, args.TargetId, SingleThread(request));
                 return null;
             }
 
@@ -548,7 +604,7 @@ internal sealed class DebugAdapter : IDisposable
             }
 
             case "stepOut":
-                _engine.Step(request.GetArguments<ThreadArguments>()!.ThreadId, StepKind.Out);
+                _engine.Step(request.GetArguments<ThreadArguments>()!.ThreadId, StepKind.Out, singleThread: SingleThread(request));
                 return null;
 
             case "pause":
@@ -583,7 +639,10 @@ internal sealed class DebugAdapter : IDisposable
                     try
                     {
                         if (terminate)
+                        {
                             _engine.Terminate();
+                            _engine.Dispose();
+                        }
                         else
                             _engine.Detach();
                     }
@@ -595,10 +654,17 @@ internal sealed class DebugAdapter : IDisposable
                 return null;
             }
 
+            case "detach":
+                _engine.Detach();
+                return null;
+
             default:
                 throw new DebuggerException($"Unsupported request '{request.Command}'.");
         }
     }
+
+    private static bool SingleThread(DapMessage request) => request.Arguments is { } arguments
+        && arguments.TryGetProperty("singleThread", out var value) && value.ValueKind == System.Text.Json.JsonValueKind.True;
 
     private void Launch(LaunchArguments args)
     {
@@ -616,7 +682,8 @@ internal sealed class DebugAdapter : IDisposable
         if (!_clientSupportsRunInTerminal)
             terminalKind = null;
 
-        _engine.AllowImplicitFuncEval = args.AllowImplicitFuncEval ?? true;
+        _engine.AllowImplicitFuncEval = args.ExpressionEvaluationOptions?.AllowImplicitFuncEval ?? args.AllowImplicitFuncEval ?? true;
+        _engine.ShowRawValues = args.ExpressionEvaluationOptions?.ShowRawValues ?? false;
         _engine.Launch(new LaunchOptions
         {
             Program = launch.Program,
@@ -624,6 +691,7 @@ internal sealed class DebugAdapter : IDisposable
             WorkingDirectory = launch.WorkingDirectory,
             Environment = launch.Environment,
             StopAtEntry = args.StopAtEntry,
+            NoDebug = args.NoDebug,
             JustMyCode = args.JustMyCode ?? true,
             StepFiltering = args.EnableStepFiltering ?? true,
             SourceFileMap = args.SourceFileMap,
@@ -639,6 +707,14 @@ internal sealed class DebugAdapter : IDisposable
         SendProcessEvent(Path.GetFileName(launch.Program), "launch");
     }
 
+    private void Attach(AttachArguments args)
+    {
+        _engine.AllowImplicitFuncEval = args.ExpressionEvaluationOptions?.AllowImplicitFuncEval ?? args.AllowImplicitFuncEval ?? true;
+        _engine.ShowRawValues = args.ExpressionEvaluationOptions?.ShowRawValues ?? false;
+        _engine.Attach(args.GetProcessId(), args.JustMyCode ?? true, args.SourceFileMap, args.StopAtEntry);
+        _isAttach = true;
+        SendProcessEvent(args.GetProcessId().ToString(), "attach");
+    }
     private void SendTerminated()
     {
         if (Interlocked.Exchange(ref _terminatedSent, 1) == 0)

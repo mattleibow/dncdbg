@@ -24,6 +24,8 @@ copied to `licenses/` beside the published executable.
 | [ClrDebug](https://github.com/lordmilko/ClrDebug) | 0.4.2 | MIT; Copyright (c) 2022 lordmilko. [`ClrDebug.LICENSE`](src/licenses/ClrDebug.LICENSE) |
 | [Microsoft.CodeAnalysis.CSharp and Microsoft.CodeAnalysis.Common](https://github.com/dotnet/roslyn) | 5.9.0 | MIT; Microsoft Corporation. [`Microsoft.MIT.LICENSE`](src/licenses/Microsoft.MIT.LICENSE), [`Roslyn.ThirdPartyNotices.rtf`](src/licenses/Roslyn.ThirdPartyNotices.rtf) |
 | [Microsoft.Diagnostics.DbgShim](https://github.com/dotnet/diagnostics) | 10.0.745401 | MIT; .NET Foundation and Contributors / Microsoft Corporation. [`Microsoft.MIT.LICENSE`](src/licenses/Microsoft.MIT.LICENSE) |
+| [Microsoft.Diagnostics.NETCore.Client](https://github.com/dotnet/diagnostics) | 0.2.750501 | MIT; .NET Foundation and Contributors / Microsoft Corporation. [`Microsoft.MIT.LICENSE`](src/licenses/Microsoft.MIT.LICENSE) |
+| Microsoft.Extensions.DependencyInjection.Abstractions / Microsoft.Extensions.Logging.Abstractions | 8.0.2 / 8.0.3 | MIT; .NET Foundation and Contributors / Microsoft Corporation. [`Microsoft.MIT.LICENSE`](src/licenses/Microsoft.MIT.LICENSE) |
 | [Microsoft.DiaSymReader](https://github.com/dotnet/symreader) | 2.0.0 | MIT; Microsoft Corporation. [`Microsoft.MIT.LICENSE`](src/licenses/Microsoft.MIT.LICENSE) |
 | Microsoft.DiaSymReader.Native | 17.0.0-beta1.21524.1 | Microsoft .NET Library license terms, preserved verbatim from the package: [`Microsoft.DiaSymReader.Native.LICENSE`](src/licenses/Microsoft.DiaSymReader.Native.LICENSE) |
 

@@ -33,6 +33,13 @@ not a separate debugger executable.
 
 Migration is in progress. The original test suite and native sources remain as
 the compatibility contract/reference until replacement behavior is validated.
+The managed implementation includes launch/attach (including startup-suspended
+processes), restart and repeated sessions, noDebug launches, redirected I/O,
+breakpoint-location queries, goto targets, embedded sources, SourceLink, and
+single-thread execution requests. `configurationDone` holds initial startup;
+source and variable references retain their appropriate session/stop lifetimes.
+See the test results for parity gaps; the presence of a feature is not a claim
+that every native edge case is already supported.
 The comparison table below describes the original native implementation, not
 measurements or a parity guarantee for the managed debugger.
 

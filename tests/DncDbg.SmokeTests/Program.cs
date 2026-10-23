@@ -43,6 +43,7 @@ Check(engineText.StartsWith("existing log\n", StringComparison.Ordinal) && engin
 Check(!engineText.Contains("\"command\":\"initialize\""), "engine and protocol logs are separate");
 await CheckProtocol(["--log=", "--logProtocol=", "--loglevel=ERROR"]);
 await CheckProtocol(["--logProtocol=" + Path.Combine(logDirectory, "missing", "protocol.log")]);
+await CheckProtocol([], deferStart: true);
 Console.WriteLine($"Passed {passed} CLI/protocol smoke checks.");
 return;
 
@@ -93,7 +94,7 @@ async Task Wait(Process process)
     }
 }
 
-async Task CheckProtocol(string[] arguments)
+async Task CheckProtocol(string[] arguments, bool deferStart = false)
 {
     using Process process = Start(arguments);
     Task<string> error = process.StandardError.ReadToEndAsync();
@@ -103,7 +104,18 @@ async Task CheckProtocol(string[] arguments)
         await Send(new { seq = 1, type = "request", command = "initialize", arguments = new { supportsMemoryReferences = true } });
         using JsonDocument initialized = await Response("initialize");
         Check(initialized.RootElement.GetProperty("body").GetProperty("supportsReadMemoryRequest").GetBoolean(), "DAP capabilities");
-        await Send(new { seq = 2, type = "request", command = "disconnect", arguments = new { } });
+        Check(initialized.RootElement.GetProperty("body").GetProperty("supportsBreakpointLocationsRequest").GetBoolean(), "breakpoint locations capability");
+        Check(initialized.RootElement.GetProperty("body").GetProperty("supportsSingleThreadExecutionRequests").GetBoolean(), "single-thread capability");
+        if (deferStart)
+        {
+            await Send(new { seq = 2, type = "request", command = "launch", arguments = new { program = typeof(Program).Assembly.Location, stopAtEntry = true } });
+            await Send(new { seq = 3, type = "request", command = "setBreakpoints", arguments = new { source = new { path = "Program.cs" }, breakpoints = Array.Empty<object>() } });
+            using JsonDocument breakpoints = await Response("setBreakpoints");
+            await Send(new { seq = 4, type = "request", command = "configurationDone", arguments = new { } });
+            using JsonDocument configured = await Response("configurationDone");
+            using JsonDocument launched = await Response("launch");
+        }
+        await Send(new { seq = deferStart ? 5 : 2, type = "request", command = "disconnect", arguments = new { } });
         using JsonDocument disconnected = await Response("disconnect");
         process.StandardInput.Close();
         await Wait(process);
@@ -140,9 +152,9 @@ async Task CheckProtocol(string[] arguments)
             var payload = new byte[length];
             await process.StandardOutput.BaseStream.ReadExactlyAsync(payload, timeout.Token);
             JsonDocument message = JsonDocument.Parse(payload);
-            if (message.RootElement.GetProperty("type").GetString() == "response"
-                && message.RootElement.GetProperty("command").GetString() == command)
+            if (message.RootElement.GetProperty("type").GetString() == "response")
             {
+                Check(message.RootElement.GetProperty("command").GetString() == command, command + " response ordering");
                 Check(message.RootElement.GetProperty("success").GetBoolean(), command + " response");
                 return message;
             }

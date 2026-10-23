@@ -82,12 +82,35 @@ internal sealed partial class ModuleMetadata
     public string? GetDebuggerTypeProxy(int typeDefToken)
     {
         TypeDefinition type = _md.GetTypeDefinition((TypeDefinitionHandle)MetadataTokens.Handle(typeDefToken));
-        if (FindAttribute(type.GetCustomAttributes(), DebuggerTypeProxyAttribute) is not { } attribute)
-            return null;
-
-        // Both constructor overloads (Type and string) serialize as a string: "Namespace.Outer+Proxy`1, Assembly, ..."
-        BlobReader reader = _md.GetBlobReader(attribute.Value);
-        if (reader.Length <= 2 || reader.ReadUInt16() != 1 || reader.ReadSerializedString() is not { } typeName)
+        string? typeName = null;
+        if (FindAttribute(type.GetCustomAttributes(), DebuggerTypeProxyAttribute) is { } attribute)
+        {
+            BlobReader reader = _md.GetBlobReader(attribute.Value);
+            if (reader.Length > 2 && reader.ReadUInt16() == 1)
+                typeName = reader.ReadSerializedString();
+        }
+        if (typeName == null && _md.IsAssembly)
+            foreach (CustomAttributeHandle handle in _md.GetAssemblyDefinition().GetCustomAttributes())
+            {
+                CustomAttribute assemblyAttribute = _md.GetCustomAttribute(handle);
+                if (GetAttributeTypeName(assemblyAttribute) != DebuggerTypeProxyAttribute)
+                    continue;
+                BlobReader reader = _md.GetBlobReader(assemblyAttribute.Value);
+                if (reader.ReadUInt16() != 1)
+                    continue;
+                string? proxyName = reader.ReadSerializedString();
+                int count = reader.ReadUInt16();
+                for (int i = 0; i < count; i++)
+                {
+                    reader.ReadByte();
+                    if (reader.ReadByte() is not (0x0e or 0x50))
+                        break;
+                    string? name = reader.ReadSerializedString(), value = reader.ReadSerializedString();
+                    if (name is "Target" or "TargetTypeName" && value?.Split(',')[0].Replace('+', '.') == GetTypeName(typeDefToken))
+                        typeName = proxyName;
+                }
+            }
+        if (typeName == null)
             return null;
         int comma = typeName.IndexOf(',');
         return (comma < 0 ? typeName : typeName[..comma]).Trim().Replace('+', '.');
@@ -162,11 +185,41 @@ internal sealed partial class ModuleMetadata
     {
         if (_pdb == null)
             return null;
-        string wanted = NormalizePath(path);
+        string wanted = NormalizeSourcePath(path);
+        bool relative = !System.IO.Path.IsPathRooted(path) && !(path.Length > 1 && path[1] == ':');
         foreach (DocumentHandle handle in _pdb.Documents)
         {
-            if (NormalizePath(_pdb.GetString(_pdb.GetDocument(handle).Name)).Equals(wanted, PathComparison))
+            string candidate = NormalizeSourcePath(_pdb.GetString(_pdb.GetDocument(handle).Name));
+            if (candidate.Equals(wanted, PathComparison) || relative && candidate.EndsWith("/" + wanted, PathComparison))
                 return handle;
+        }
+        return null;
+    }
+
+    public string? ResolveDocumentPath(string path) => FindDocument(path) is { } handle
+        ? _pdb!.GetString(_pdb.GetDocument(handle).Name) : null;
+
+    public string? GetSourceLinkUrl(string path)
+    {
+        if (_pdb == null)
+            return null;
+        foreach (CustomDebugInformationHandle handle in _pdb.CustomDebugInformation)
+        {
+            CustomDebugInformation info = _pdb.GetCustomDebugInformation(handle);
+            if (_pdb.GetGuid(info.Kind) != new Guid("cc110556-a091-4d38-9fec-25ab9a351a6a"))
+                continue;
+            using var json = System.Text.Json.JsonDocument.Parse(_pdb.GetBlobBytes(info.Value));
+            foreach (var mapping in json.RootElement.GetProperty("documents").EnumerateObject())
+            {
+                string key = mapping.Name.Replace('\\', '/');
+                string document = path.Replace('\\', '/');
+                int wildcard = key.IndexOf('*');
+                if (wildcard < 0 && key == document)
+                    return mapping.Value.GetString();
+                if (wildcard >= 0 && document.StartsWith(key[..wildcard], StringComparison.Ordinal)
+                    && document.EndsWith(key[(wildcard + 1)..], StringComparison.Ordinal))
+                    return mapping.Value.GetString()!.Replace("*", document[wildcard..(document.Length - key.Length + wildcard + 1)], StringComparison.Ordinal);
+            }
         }
         return null;
     }

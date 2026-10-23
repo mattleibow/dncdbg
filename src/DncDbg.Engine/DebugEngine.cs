@@ -105,10 +105,13 @@ public sealed partial class DebugEngine : IDisposable
 
     /// <summary>Operating system id of the debuggee, 0 before launch/attach.</summary>
     public int ProcessId => _processId;
+    public bool NoDebug { get; private set; }
+    public bool ShowRawValues { get; set; }
 
     public DebugEngine()
     {
         _values = new ValueInspector(GetMetadata, this);
+        Stopped += stop => _lastStoppedThreadId = stop.ThreadId;
         _callback.OnAnyEvent += OnManagedEvent;
     }
 
@@ -118,6 +121,7 @@ public sealed partial class DebugEngine : IDisposable
     {
         lock (_lock)
         {
+            NoDebug = options.NoDebug;
             if (_processId != 0 || _launching)
                 throw new DebuggerException("A debuggee is already running.");
             if (!File.Exists(options.Program))
@@ -175,7 +179,7 @@ public sealed partial class DebugEngine : IDisposable
             _stepFiltering = options.StepFiltering;
             _symbolLocator = new SymbolLocator(options.SymbolOptions ?? new SymbolOptions(), Log);
             SetSourceFileMap(options.SourceFileMap);
-            _stopAtEntry = options.StopAtEntry;
+            _stopAtEntry = options.StopAtEntry && !options.NoDebug;
             _launched = launched;
             _processId = launched?.ProcessId ?? external!.ProcessId;
             _resumeAction = launched?.Resume ?? external!.Resume;
@@ -197,7 +201,7 @@ public sealed partial class DebugEngine : IDisposable
                 // the same: the program has not run yet, and the debugger is the one party that knows the moment.
                 _switchConsoleOnStart = true;
             }
-            else
+            else if (!options.NoDebug)
             {
                 _unregisterToken = RegisterForRuntimeStartup(_processId);
             }
@@ -211,7 +215,7 @@ public sealed partial class DebugEngine : IDisposable
     /// <summary>.NET Framework launch: the console is switched to UTF-8 when the process exists, before managed code runs.</summary>
     private bool _switchConsoleOnStart;
 
-    public void Attach(int processId, bool justMyCode = true, IReadOnlyDictionary<string, string>? sourceFileMap = null)
+    public void Attach(int processId, bool justMyCode = true, IReadOnlyDictionary<string, string>? sourceFileMap = null, bool stopAtEntry = false)
     {
         TaskCompletionSource<Exception?> outcome;
         lock (_lock)
@@ -228,6 +232,7 @@ public sealed partial class DebugEngine : IDisposable
             AttachChecks.Verify(processId, _dbgShim, Log);
 
             _justMyCode = justMyCode;
+            _stopAtEntry = stopAtEntry;
             SetSourceFileMap(sourceFileMap);
             _isAttach = true;
             _resumed = true;
@@ -235,7 +240,7 @@ public sealed partial class DebugEngine : IDisposable
             _attachOutcome = outcome = new TaskCompletionSource<Exception?>(TaskCreationOptions.RunContinuationsAsynchronously);
             try
             {
-                _unregisterToken = RegisterForRuntimeStartup(processId);
+                _unregisterToken = _dbgShim.RegisterForRuntimeStartup(processId, OnRuntimeStartup);
             }
             catch (Exception e)
             {
@@ -243,6 +248,25 @@ public sealed partial class DebugEngine : IDisposable
                 outcome.TrySetResult(e);
             }
         }
+
+        var resumeDeadline = DateTime.UtcNow.AddSeconds(5);
+        do
+        {
+            try
+            {
+                new Microsoft.Diagnostics.NETCore.Client.DiagnosticsClient(processId).ResumeRuntime();
+                break;
+            }
+            catch (Exception e)
+            {
+                if (DateTime.UtcNow >= resumeDeadline || outcome.Task.IsCompleted)
+                {
+                    Log?.Invoke("Resume runtime: " + e.Message);
+                    break;
+                }
+                Thread.Sleep(25);
+            }
+        } while (true);
 
         // The runtime is there (checked), so the callback is due at once. Whether the attach worked is only known then.
         Exception? failure = outcome.Task.Wait(AttachTimeout)
@@ -312,11 +336,19 @@ public sealed partial class DebugEngine : IDisposable
     }
 
     /// <summary>Signals that initial breakpoints are in place and the debuggee may run.</summary>
+    private bool _waitingForConfiguration;
+
     public void ConfigurationDone()
     {
         lock (_lock)
         {
             _configurationDone = true;
+            if (_waitingForConfiguration && _process != null)
+            {
+                _waitingForConfiguration = false;
+                _stopped = false;
+                _process.Continue(false);
+            }
             ResumeIfReady();
         }
     }
@@ -474,9 +506,15 @@ public sealed partial class DebugEngine : IDisposable
             }
             finally
             {
-                _processWatcherDone.Set();
-                RaiseExited(exitCode);
-                process.Dispose();
+                try
+                {
+                    RaiseExited(exitCode);
+                }
+                finally
+                {
+                    _processWatcherDone.Set();
+                    process.Dispose();
+                }
             }
         }, TaskCreationOptions.LongRunning);
     }
@@ -515,6 +553,8 @@ public sealed partial class DebugEngine : IDisposable
         // unhandled, it ends the process itself, with code 0. Without a debugger the same death is 0xE0434352.
         if (OperatingSystem.IsWindows() && _diedOfUnhandledException && exitCode is null or 0)
             exitCode = unchecked((int)0xE0434352);
+        if (NoDebug && _terminating)
+            exitCode = 1;
         Exited?.Invoke(exitCode ?? 0);
     }
 
@@ -557,7 +597,10 @@ public sealed partial class DebugEngine : IDisposable
             }
         }
         if (!viaCorDebug)
+        {
+            _terminating = true;
             KillProcess();
+        }
     }
 
     public void Detach()
@@ -633,7 +676,7 @@ public sealed partial class DebugEngine : IDisposable
 
     public void Dispose()
     {
-        if (_isAttach)
+        if (_isAttach && !_terminating)
             Detach();
         else
             Terminate();
@@ -652,7 +695,7 @@ public sealed partial class DebugEngine : IDisposable
         }
 
         // no debuggee is left behind, whatever became of the polite way
-        if (_processWatcherStarted && !_processWatcherDone.Wait(TimeSpan.FromSeconds(3)) && !_isAttach)
+        if ((!_isAttach || _terminating) && _processWatcherStarted && !_processWatcherDone.Wait(TimeSpan.FromSeconds(3)))
         {
             KillProcess();
             _processWatcherDone.Wait(TimeSpan.FromSeconds(3));
@@ -743,6 +786,11 @@ public sealed partial class DebugEngine : IDisposable
         switch (e)
         {
             case CreateProcessCorDebugManagedCallbackEventArgs:
+                if (!_configurationDone && _isAttach)
+                {
+                    _waitingForConfiguration = true;
+                    return EventAction.InternalStop;
+                }
                 if (_switchConsoleOnStart)
                 {
                     _switchConsoleOnStart = false;
@@ -799,6 +847,16 @@ public sealed partial class DebugEngine : IDisposable
                 if (evaluating)
                     return EventAction.Continue;
                 int id = brk.Thread.Id;
+                if (_lastResumeLocation is { } last && last.Thread == id && brk.Thread.ActiveFrame is CorDebugILFrame breakFrame
+                    && KeyOf(breakFrame.Function.Module) == last.Module && breakFrame.Function.Token.Value == last.Token)
+                {
+                    ModuleMetadata? metadata = GetMetadata(breakFrame.Function.Module);
+                    int offset = breakFrame.IP.pnOffset;
+                    SourceLocation? current = metadata?.GetSourceLocation((int)last.Token, offset, out _);
+                    SourceLocation? previous = metadata?.GetSourceLocation((int)last.Token, Math.Max(0, offset - 1), out _);
+                    if (current?.Line == last.Line || previous?.Line == last.Line)
+                        return EventAction.Continue;
+                }
                 Post(() => Stopped?.Invoke(new StopInfo("pause", id, "Debugger.Break")));
                 return EventAction.Stop;
             }
@@ -809,7 +867,7 @@ public sealed partial class DebugEngine : IDisposable
             case LogMessageCorDebugManagedCallbackEventArgs log:
             {
                 string message = log.Message;
-                Post(() => Output?.Invoke("console", message));
+                Post(() => Output?.Invoke("stdout", message + "\n"));
                 return EventAction.Continue;
             }
 
@@ -1014,9 +1072,9 @@ public sealed partial class DebugEngine : IDisposable
         lock (_lock)
         {
             return _modules.Values.OrderBy(m => m.Id)
-                .SelectMany(m => (m.Metadata?.GetDocuments() ?? []).Select(ToLocalPath))
-                .Distinct(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal)
-                .Select(path => new SourceFileInfo(path))
+                .SelectMany(m => (m.Metadata?.GetDocuments() ?? []).Select(path => DescribeSource(m, path)))
+                .DistinctBy(s => s.Path, OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal)
+                .Select(s => new SourceFileInfo(s.Path, s.SourceReference))
                 .ToList();
         }
     }
@@ -1065,18 +1123,36 @@ public sealed partial class DebugEngine : IDisposable
         ReleaseStrongHandles();
     }
 
+    private int _lastStoppedThreadId;
+    private (int Thread, ModuleKey Module, uint Token, int Line)? _lastResumeLocation;
+
     private void ResumeProcess(CorDebugProcess process)
     {
+        _lastResumeLocation = null;
+        if (_lastStoppedThreadId != 0)
+        {
+            try
+            {
+                if (RequireThread(_lastStoppedThreadId).ActiveFrame is CorDebugILFrame frame
+                    && GetMetadata(frame.Function.Module)?.GetSourceLocation((int)frame.Function.Token.Value, frame.IP.pnOffset, out _) is { } location)
+                    _lastResumeLocation = (_lastStoppedThreadId, KeyOf(frame.Function.Module), frame.Function.Token.Value, location.Line);
+            }
+            catch (Exception e)
+            {
+                Log?.Invoke("Resume location unavailable: " + e.Message);
+            }
+        }
         ClearStopState();
         process.Continue(false);
     }
 
-    public void Continue()
+    public void Continue(int? threadId = null, bool singleThread = false)
     {
         lock (_lock)
         {
             if (_process == null || !_stopped)
                 return;
+            SetExecutionThread(_process, threadId, singleThread);
             ClearAsyncStep();
             ClearStepInTarget();
             ResumeProcess(_process);

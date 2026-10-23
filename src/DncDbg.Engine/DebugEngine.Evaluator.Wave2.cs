@@ -49,7 +49,7 @@ public sealed partial class DebugEngine
                 case DefaultExpressionSyntax defaultOf:
                     return Default(defaultOf.Type);
                 case SizeOfExpressionSyntax sizeOf:
-                    return new HostOperand(SizeOf(sizeOf.Type));
+                    return new HostOperand((uint)SizeOf(sizeOf.Type));
                 case InterpolatedStringExpressionSyntax interpolated:
                     return Interpolate(interpolated);
                 case ObjectCreationExpressionSyntax creation:
@@ -223,15 +223,26 @@ public sealed partial class DebugEngine
             return CreateObject(type, []);
         }
 
-        private static int SizeOf(TypeSyntax type) => (type as PredefinedTypeSyntax)?.Keyword.Kind() switch
+        private int SizeOf(TypeSyntax syntax)
         {
-            SyntaxKind.BoolKeyword or SyntaxKind.ByteKeyword or SyntaxKind.SByteKeyword => 1,
-            SyntaxKind.ShortKeyword or SyntaxKind.UShortKeyword or SyntaxKind.CharKeyword => 2,
-            SyntaxKind.IntKeyword or SyntaxKind.UIntKeyword or SyntaxKind.FloatKeyword => 4,
-            SyntaxKind.LongKeyword or SyntaxKind.ULongKeyword or SyntaxKind.DoubleKeyword => 8,
-            SyntaxKind.DecimalKeyword => 16,
-            _ => throw new DebuggerException("sizeof is only supported for the built-in value types."),
-        };
+            TypeOperand type = ResolveType(syntax.ToString().Replace(" ", "")) ?? throw new DebuggerException($"The type or namespace name '{syntax}' could not be found.");
+            int size = type.Metadata.GetTypeName(type.Token) switch
+            {
+                "System.Boolean" or "System.Byte" or "System.SByte" => 1,
+                "System.Int16" or "System.UInt16" or "System.Char" => 2,
+                "System.Int32" or "System.UInt32" or "System.Single" => 4,
+                "System.Int64" or "System.UInt64" or "System.Double" => 8,
+                "System.IntPtr" or "System.UIntPtr" => IntPtr.Size,
+                "System.Decimal" => 16,
+                _ => 0,
+            };
+            if (size > 0)
+                return size;
+            if (!type.Metadata.IsValueType(type.Token))
+                throw new DebuggerException("sizeof requires a value type.");
+            CorDebugValue? boxed = engine.RunEval(frame.ThreadId, eval => eval.NewParameterizedObjectNoConstructor(type.Class.Raw, 0, []));
+            return boxed == null ? throw new DebuggerException("The type size is unavailable.") : ValueInspector.Unwrap(boxed, out _)!.Size;
+        }
 
         private static string NameOf(ExpressionSyntax argument) => argument switch
         {

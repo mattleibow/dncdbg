@@ -49,6 +49,9 @@ public sealed partial class DebugEngine : IEvalHost
     bool IEvalHost.BudgetExceeded =>
         !_explicitExpansion && (!AllowImplicitFuncEval || _implicitEvalTimedOut || DateTime.UtcNow > _implicitEvalDeadline);
 
+    bool IEvalHost.FuncEvalAllowed => AllowImplicitFuncEval;
+    bool IEvalHost.ShowRawValues => ShowRawValues;
+
     string IEvalHost.FormatDebuggerDisplay(string template, Func<CorDebugValue?> self, InspectionContext context)
     {
         _implicitScope++;

@@ -48,7 +48,7 @@ public sealed partial class DebugEngine
         private sealed record VoidOperand : Operand;
 
         /// <param name="EnumClass">Set when <paramref name="Value"/> is the underlying value of an enum.</param>
-        private sealed record HostOperand(object? Value, CorDebugClass? EnumClass = null, string? DeclaredType = null) : Operand;
+        private sealed record HostOperand(object? Value, CorDebugClass? EnumClass = null, string? DeclaredType = null, bool IsConstant = false) : Operand;
 
         /// <param name="IsLocation">The getter returns a storage location (variable, field, element) that can be assigned to.</param>
         /// <param name="TupleNames">Names the source gives to the elements of a tuple-typed local (Item1, Item2, ... in the type).</param>
@@ -87,7 +87,34 @@ public sealed partial class DebugEngine
         public VariableInfo EvaluateToVariable(string expression, DisplayOptions? baseOptions = null)
         {
             (string code, DisplayOptions options) = SplitFormatSpecifiers(expression, baseOptions ?? DisplayOptions.Default);
-            return ToVariable(expression, Run(code), options);
+            if (!options.AllowCalls)
+                return ToVariable(code, Run(code), options);
+            bool previous = engine.AllowImplicitFuncEval;
+            engine.AllowImplicitFuncEval = true;
+            try
+            {
+                return ForceEvaluation(ToVariable(code, Run(code), options));
+            }
+            finally
+            {
+                engine.AllowImplicitFuncEval = previous;
+            }
+        }
+
+        private VariableInfo ForceEvaluation(VariableInfo value)
+        {
+            if (value.ChildrenProvider is not { } provider)
+                return value;
+            return value with
+            {
+                ChildrenProvider = (start, count) =>
+                {
+                    bool previous = engine.AllowImplicitFuncEval;
+                    engine.AllowImplicitFuncEval = true;
+                    try { return provider(start, count).Select(ForceEvaluation).ToList(); }
+                    finally { engine.AllowImplicitFuncEval = previous; }
+                },
+            };
         }
 
         /// <summary>Evaluates to a host value (enums as their underlying value); throws for non-primitive objects.</summary>
@@ -125,6 +152,8 @@ public sealed partial class DebugEngine
                     "d" => options with { Hex = false },
                     "nq" => options with { NoQuotes = true },
                     "raw" => options with { Raw = true },
+                    "hidden" => options with { Hidden = true },
+                    "ac" => options with { AllowCalls = true },
                     _ => throw new DebuggerException($"Unknown format specifier '{specifier}'. Supported: h, d, nq, raw and a number of elements."),
                 };
                 expression = expression[..comma];
@@ -230,7 +259,7 @@ public sealed partial class DebugEngine
                 case ParenthesizedExpressionSyntax p:
                     return Eval(p.Expression);
                 case LiteralExpressionSyntax literal:
-                    return new HostOperand(literal.Token.Value);
+                    return new HostOperand(literal.Token.Value, IsConstant: true);
                 case ThisExpressionSyntax:
                     return Identifier("this");
                 case IdentifierNameSyntax id:
@@ -291,7 +320,7 @@ public sealed partial class DebugEngine
             if (self == null && engine.GetILFrame(frame) is { } ilFrame
                 && engine.GetMetadata(ilFrame.Function.Module)?.GetLocalConstants((int)ilFrame.Function.Token.Value, ilFrame.IP.pnOffset)
                     .FirstOrDefault(c => c.Name == name) is { Name: not null } constant)
-                return new HostOperand(constant.Value, DeclaredType: constant.Type);
+                return new HostOperand(constant.Value, DeclaredType: constant.Type, IsConstant: true);
             if (name == ProcessIdVariable)
                 return new HostOperand((uint)engine._processId);
             if (name == ThreadIdVariable)
@@ -512,7 +541,7 @@ public sealed partial class DebugEngine
                 if (field.IsLiteral)
                 {
                     object? constant = metadata.GetConstant(field.Token, out _);
-                    return new HostOperand(constant, metadata.IsEnum(type.Token) ? type.Class : null, metadata.GetFieldType(field.Token));
+                    return new HostOperand(constant, metadata.IsEnum(type.Token) ? type.Class : null, metadata.GetFieldType(field.Token), IsConstant: true);
                 }
                 int token = field.Token;
                 EnsureTypeInitialized(type);
@@ -561,6 +590,21 @@ public sealed partial class DebugEngine
             string key = $"{type.Module.Key}:{AssemblyQualifiedName(type)}";
             if (!allowCalls || engine._initializedTypes.Contains(key) || type.Metadata.GetMethods(type.Token, ".cctor").Count == 0)
                 return;
+            if (!engine.AllowImplicitFuncEval)
+            {
+                try
+                {
+                    ulong table = unchecked((ulong)ToCorDebugType(type).TypeID.token1);
+                    // CoreCLR's MethodTable points to auxiliary data after its header, parent and module pointers.
+                    ulong auxiliary = BitConverter.ToUInt64(engine.ReadMemory(table + 16 + 2 * (ulong)IntPtr.Size, IntPtr.Size));
+                    if ((BitConverter.ToUInt32(engine.ReadMemory(auxiliary, 4)) & 1) != 0)
+                        return;
+                }
+                catch (Exception)
+                {
+                }
+                throw new DebuggerException("Implicit function evaluation is turned off by the user.");
+            }
             CorDebugType[] arguments = type.TypeArguments?.Select(ToCorDebugType).ToArray() ?? [];
             CorDebugValue? instance = engine.RunEval(frame.ThreadId, eval => eval.NewParameterizedObjectNoConstructor(
                 type.Class.Raw, arguments.Length, arguments.Select(t => t.Raw).ToArray()));
@@ -748,6 +792,8 @@ public sealed partial class DebugEngine
 
         private Operand Invoke(InvocationExpressionSyntax node)
         {
+            if (!engine.AllowImplicitFuncEval)
+                throw new DebuggerException("Implicit function evaluation is turned off by the user.");
             if (node.Expression is IdentifierNameSyntax { Identifier.ValueText: "nameof" } && node.ArgumentList.Arguments.Count == 1)
                 return new HostOperand(NameOf(node.ArgumentList.Arguments[0].Expression));
             if (!allowCalls)
@@ -1111,7 +1157,8 @@ public sealed partial class DebugEngine
                 "System.SByte" => ["System.Int16", "System.Int32", "System.Int64", "System.Single", "System.Double", "System.Decimal"],
                 "System.Byte" => ["System.Int16", "System.UInt16", "System.Int32", "System.UInt32", "System.Int64", "System.UInt64", "System.Single", "System.Double", "System.Decimal"],
                 "System.Int16" => ["System.Int32", "System.Int64", "System.Single", "System.Double", "System.Decimal"],
-                "System.UInt16" or "System.Char" => ["System.Int32", "System.UInt32", "System.Int64", "System.UInt64", "System.Single", "System.Double", "System.Decimal"],
+                "System.UInt16" => ["System.Int32", "System.UInt32", "System.Int64", "System.UInt64", "System.Single", "System.Double", "System.Decimal"],
+                "System.Char" => ["System.UInt16", "System.Int32", "System.UInt32", "System.Int64", "System.UInt64", "System.Single", "System.Double", "System.Decimal"],
                 "System.Int32" => ["System.Int64", "System.Single", "System.Double", "System.Decimal"],
                 "System.UInt32" => ["System.Int64", "System.UInt64", "System.Single", "System.Double", "System.Decimal"],
                 "System.Int64" or "System.UInt64" => ["System.Single", "System.Double", "System.Decimal"],
@@ -1290,7 +1337,7 @@ public sealed partial class DebugEngine
                     SyntaxKind.LogicalNotExpression => !operand,
                     SyntaxKind.BitwiseNotExpression => ~operand,
                     _ => throw new DebuggerException($"Operator '{node.OperatorToken.Text}' is not supported."),
-                }, enumClass);
+                }, enumClass, IsConstant: value is HostOperand { IsConstant: true });
             }
             catch (Microsoft.CSharp.RuntimeBinder.RuntimeBinderException)
             {
@@ -1308,7 +1355,8 @@ public sealed partial class DebugEngine
                         Operand left = Eval(node.Left);
                         Operand right = Eval(node.Right);
                         if (ToHost(left) is not bool condition)
-                            throw BinaryOperatorError(node.OperatorToken.Text, left, right);
+                            throw OperandType(left) == "decimal" ? BinaryOperatorError(node.OperatorToken.Text, left, right)
+                                : new DebuggerException($"Cannot implicitly convert type '{OperandType(left)}' to 'bool'");
                         return ToHost(right) is bool result ? new HostOperand(node.Kind() == SyntaxKind.LogicalAndExpression
                             ? condition && result : condition || result)
                             : throw BinaryOperatorError(node.OperatorToken.Text, left, right);
@@ -1357,6 +1405,10 @@ public sealed partial class DebugEngine
             }
 
             dynamic? a = l, b = r;
+            if (kind is SyntaxKind.EqualsExpression or SyntaxKind.NotEqualsExpression or SyntaxKind.LessThanExpression
+                or SyntaxKind.LessThanOrEqualExpression or SyntaxKind.GreaterThanExpression or SyntaxKind.GreaterThanOrEqualExpression
+                && (l is ulong && r is sbyte or short or int or long || r is ulong && l is sbyte or short or int or long))
+                throw new DebuggerException($"Operator '{operatorText}' is ambiguous on operands of type '{OperandType(leftOperand)}' and '{OperandType(rightOperand)}'");
             try
             {
                 return new HostOperand(kind switch
@@ -1377,6 +1429,7 @@ public sealed partial class DebugEngine
                     SyntaxKind.ExclusiveOrExpression => a ^ b,
                     SyntaxKind.LeftShiftExpression => a << b,
                     SyntaxKind.RightShiftExpression => a >> b,
+                    SyntaxKind.UnsignedRightShiftExpression => UnsignedShift(l, r, leftOperand, rightOperand),
                     _ => throw new DebuggerException($"Operator '{operatorText}' is not supported."),
                 });
             }
@@ -1521,7 +1574,11 @@ public sealed partial class DebugEngine
 
             T Number<T>() where T : struct
             {
-                if (value is bool or string or char && typeof(T) != typeof(char))
+                string fromType = value.GetType().FullName!, toType = typeof(T).FullName!;
+                bool constantConversion = source is HostOperand { IsConstant: true, Value: int }
+                    && typeof(T) is var destination && (destination == typeof(sbyte) || destination == typeof(byte)
+                        || destination == typeof(short) || destination == typeof(ushort) || destination == typeof(uint) || destination == typeof(ulong));
+                if (fromType != toType && !IsWidening(fromType, toType) && !constantConversion)
                     throw Mismatch();
                 try
                 {

@@ -212,7 +212,13 @@ internal sealed partial class ModuleMetadata : IDisposable
                 SequencePoint p = candidate.Point;
                 if (p.EndLine < line)
                     continue;
-                if (best == null || IsBetter(p, best.Value.Point, line))
+                if (column is { } requestedColumn && p.EndLine == line && p.EndColumn <= requestedColumn)
+                    continue;
+                bool preferInnerMethod = best is { } previous && candidate.MethodToken != previous.Token
+                    && p.StartLine > line && previous.Point.StartLine < line && p.EndLine <= previous.Point.EndLine;
+                bool keepInnerMethod = best is { } inner && candidate.MethodToken != inner.Token
+                    && inner.Point.StartLine > line && p.StartLine < line && inner.Point.EndLine <= p.EndLine;
+                if (best == null || preferInnerMethod || !keepInnerMethod && IsBetter(p, best.Value.Point, line))
                     best = candidate;
                 if (column is { } c && Contains(p, line, c) && (bestAtColumn == null || Span(p) < Span(bestAtColumn.Value.Point)))
                     bestAtColumn = candidate;
@@ -246,6 +252,32 @@ internal sealed partial class ModuleMetadata : IDisposable
                 segments.Add(segment);
         }
         return string.Join("/", segments);
+    }
+
+    public IReadOnlyList<ResolvedBreakpoint> GetBreakpointLocations(string path, int line, int column, int endLine, int endColumn)
+    {
+        if (_pdb == null)
+            return [];
+        string wanted = NormalizeSourcePath(path);
+        bool relative = !System.IO.Path.IsPathRooted(path) && !(path.Length > 1 && path[1] == ':');
+        var documents = PointsByDocument.Select(entry => (Path: NormalizeSourcePath(_pdb.GetString(_pdb.GetDocument(entry.Key).Name)), Points: entry.Value)).ToList();
+        bool Matches(string candidate, StringComparison comparison) =>
+            candidate.Equals(wanted, comparison) || relative && candidate.EndsWith("/" + wanted, comparison);
+        StringComparison comparison = documents.Any(d => Matches(d.Path, PathComparison)) ? PathComparison : StringComparison.OrdinalIgnoreCase;
+        return documents.Where(d => Matches(d.Path, comparison)).SelectMany(d => d.Points)
+            .Where(p => (p.Point.StartLine, p.Point.StartColumn).CompareTo((line, column)) >= 0
+                && (p.Point.EndLine, p.Point.EndColumn).CompareTo((endLine, endColumn)) <= 0)
+            .Select(p => new ResolvedBreakpoint(p.MethodToken, p.Point.Offset, p.Point.StartLine, p.Point.StartColumn, p.Point.EndLine, p.Point.EndColumn))
+            .OrderBy(p => p.Line).ThenBy(p => p.Column).ToList();
+    }
+
+    public IReadOnlyList<ResolvedBreakpoint> ResolveBreakpoints(string path, int line, int? column)
+    {
+        if (ResolveBreakpoint(path, line, column) is not { } resolved)
+            return [];
+        return GetBreakpointLocations(path, resolved.Line, resolved.Column, resolved.EndLine, resolved.EndColumn)
+            .Where(p => p.Line == resolved.Line && p.Column == resolved.Column && p.EndLine == resolved.EndLine && p.EndColumn == resolved.EndColumn)
+            .DistinctBy(p => (p.MethodToken, p.ILOffset)).ToList();
     }
 
     // Preference: a point starting on the line; then the innermost point spanning the line
@@ -379,6 +411,12 @@ internal sealed partial class ModuleMetadata : IDisposable
     {
         MethodDefinition method = _md.GetMethodDefinition((MethodDefinitionHandle)MetadataTokens.Handle(methodToken));
         string name = _md.GetString(method.Name);
+        if (name == "MoveNext" && _pdb != null)
+        {
+            MethodDefinitionHandle kickoff = _pdb.GetMethodDebugInformation((MethodDefinitionHandle)MetadataTokens.Handle(methodToken)).GetStateMachineKickoffMethod();
+            if (!kickoff.IsNil)
+                return GetMethodName(MetadataTokens.GetToken(kickoff), typeArguments);
+        }
         TypeDefinitionHandle typeHandle = method.GetDeclaringType();
         bool generated = false;
 

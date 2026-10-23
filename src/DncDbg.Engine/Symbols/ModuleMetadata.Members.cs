@@ -23,7 +23,7 @@ internal sealed partial class ModuleMetadata
 
     private Dictionary<string, int>? _typesByName;
 
-    public string GetParameterDisplay(int methodToken)
+    public string GetParameterDisplay(int methodToken, IReadOnlyList<string?>? typeArguments = null)
     {
         var handle = (MethodDefinitionHandle)MetadataTokens.Handle(methodToken);
         if (_pdb != null)
@@ -34,10 +34,29 @@ internal sealed partial class ModuleMetadata
         }
         MethodDefinition method = _md.GetMethodDefinition(handle);
         MethodSignature<string> signature = method.DecodeSignature(SignatureNames.Instance, this);
-        var names = method.GetParameters().Select(h => _md.GetParameter(h))
-            .Where(p => p.SequenceNumber > 0).ToDictionary(p => p.SequenceNumber, p => _md.GetString(p.Name));
+        string[] typeParameters = GetTypeGenericParameters(MetadataTokens.GetToken(method.GetDeclaringType()));
+        string[] methodParameters = GetMethodGenericParameters(MetadataTokens.GetToken(handle));
+        var parameters = method.GetParameters().Select(h => _md.GetParameter(h))
+            .Where(p => p.SequenceNumber > 0).ToDictionary(p => p.SequenceNumber);
         return "(" + string.Join(", ", signature.ParameterTypes.Select((type, i) =>
-            DisplayType(type) + (names.TryGetValue(i + 1, out string? name) ? " " + name : ""))) + ")";
+        {
+            for (int parameterIndex = methodParameters.Length - 1; parameterIndex >= 0; parameterIndex--)
+            {
+                int argumentIndex = typeParameters.Length + parameterIndex;
+                string replacement = typeArguments != null && argumentIndex < typeArguments.Count
+                    ? typeArguments[argumentIndex] ?? methodParameters[parameterIndex] : methodParameters[parameterIndex];
+                type = type.Replace("!!" + parameterIndex, replacement, StringComparison.Ordinal);
+            }
+            for (int parameterIndex = typeParameters.Length - 1; parameterIndex >= 0; parameterIndex--)
+                type = type.Replace("!" + parameterIndex, typeArguments != null && parameterIndex < typeArguments.Count
+                    ? typeArguments[parameterIndex] ?? typeParameters[parameterIndex] : typeParameters[parameterIndex], StringComparison.Ordinal);
+            if (!parameters.TryGetValue(i + 1, out Parameter parameter))
+                return DisplayType(type);
+            if (type.StartsWith("ref ", StringComparison.Ordinal))
+                type = ((parameter.Attributes & ParameterAttributes.Out) != 0 ? "out "
+                    : (parameter.Attributes & ParameterAttributes.In) != 0 ? "in " : "ref ") + type[4..];
+            return DisplayType(type) + " " + _md.GetString(parameter.Name);
+        })) + ")";
     }
 
     public static string DisplayType(string type)
@@ -52,7 +71,19 @@ internal sealed partial class ModuleMetadata
             ("System.IntPtr", "nint"), ("System.UIntPtr", "nuint"),
         })
             type = type.Replace(name, alias, StringComparison.Ordinal);
-        return type;
+        type = System.Text.RegularExpressions.Regex.Replace(type, @"`\d+", "");
+        var display = new System.Text.StringBuilder();
+        int arrayDepth = 0;
+        for (int i = 0; i < type.Length; i++)
+        {
+            char c = type[i];
+            if (c == '[') arrayDepth++;
+            if (c == ']') arrayDepth--;
+            display.Append(c);
+            if (c == ',' && arrayDepth == 0 && i + 1 < type.Length && type[i + 1] != ' ')
+                display.Append(' ');
+        }
+        return display.ToString();
     }
 
     public string GetFieldType(int fieldToken) => _md.GetFieldDefinition((FieldDefinitionHandle)MetadataTokens.Handle(fieldToken))

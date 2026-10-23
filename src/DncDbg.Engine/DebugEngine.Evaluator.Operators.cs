@@ -115,6 +115,26 @@ public sealed partial class DebugEngine
         private bool IsStringOperand(Operand operand) => ClrTypeOf(operand) == "System.String"
             || operand is RemoteOperand remote && remote.Getter() is { } value && _values.GetTypeName(value) == "string";
 
+        private object UnsignedShift(object? left, object? right, Operand leftOperand, Operand rightOperand)
+        {
+            if (right is not (char or byte or ushort or sbyte or short or int))
+                throw BinaryOperatorError(">>>", leftOperand, rightOperand);
+            int count = Convert.ToInt32(right, System.Globalization.CultureInfo.InvariantCulture);
+            return left switch
+            {
+                char v => (int)v >>> count,
+                byte v => (int)v >>> count,
+                ushort v => (int)v >>> count,
+                sbyte v => (int)v >>> count,
+                short v => (int)v >>> count,
+                int v => v >>> count,
+                uint v => v >>> count,
+                long v => v >>> count,
+                ulong v => v >>> count,
+                _ => throw BinaryOperatorError(">>>", leftOperand, rightOperand),
+            };
+        }
+
         private bool CanCoalesce(Operand left, Operand right)
         {
             bool IsReference(Operand operand) => operand switch

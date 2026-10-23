@@ -35,19 +35,33 @@ public sealed partial class DebugEngine
 
     Func<CorDebugValue?>? IEvalHost.CreateTypeProxy(string proxyTypeName, Func<CorDebugValue?> target, InspectionContext context)
     {
-        if (FindType(proxyTypeName, AppDomainOf(context)) is not { } found)
-            return null;
-        MethodDescription? constructor = found.Module.Metadata!.GetMethods(found.Token, ".ctor").FirstOrDefault(m => !m.IsStatic && m.ParameterTypes.Length == 1);
         CorDebugValue? self = target();
         CorDebugValue? unwrapped = self == null ? null : ValueInspector.Unwrap(self, out _);
-        if (constructor == null || self == null || unwrapped == null)
+        if (self == null || unwrapped == null)
+            return null;
+        var found = FindType(proxyTypeName, AppDomainOf(context));
+        if (found == null)
+            foreach (ValueInspector.TypeLevel level in _values.GetTypeLevels(unwrapped))
+            {
+                foreach (string name in new[] { level.Metadata.GetTypeName(level.Token) + "." + proxyTypeName,
+                    level.Metadata.GetTypeNamespace(level.Token) + "." + proxyTypeName })
+                    found ??= FindType(name, AppDomainOf(context));
+                if (found != null)
+                    break;
+            }
+        if (found is not { } proxyType)
+            return null;
+        MethodDescription? constructor = proxyType.Module.Metadata!.GetMethods(proxyType.Token, ".ctor").FirstOrDefault(m => !m.IsStatic && m.ParameterTypes.Length == 1);
+        if (constructor == null)
             return null;
 
         // a generic proxy (ICollectionDebugView<T>) is instantiated over the type arguments of the object it shows
-        ICorDebugType[] typeArguments = found.Module.Metadata.GetTypeGenericParameters(found.Token).Length == 0
-            ? []
-            : ValueInspector.TypeArgumentsOf(unwrapped.ExactType).Select(t => t.Raw).ToArray();
-        CorDebugFunction function = found.Module.Module.GetFunctionFromToken(new mdMethodDef(constructor.Token));
+        ICorDebugType[] actual = ValueInspector.TypeArgumentsOf(unwrapped.ExactType).Select(t => t.Raw).ToArray();
+        int parameterCount = proxyType.Module.Metadata.GetTypeGenericParameters(proxyType.Token).Length;
+        if (parameterCount > 0 && actual.Length == 0)
+            return null;
+        ICorDebugType[] typeArguments = Enumerable.Range(0, parameterCount).Select(i => actual[i % actual.Length]).ToArray();
+        CorDebugFunction function = proxyType.Module.Module.GetFunctionFromToken(new mdMethodDef(constructor.Token));
         ICorDebugValue argument = (unwrapped.Type == CorElementType.ValueType ? unwrapped : self).Raw;
         CorDebugValue? proxy = RunEval(context.ThreadId, eval => eval.NewParameterizedObject(function.Raw, typeArguments.Length, typeArguments, 1, [argument]));
         return proxy == null ? null : Stabilize(() => proxy);
@@ -108,6 +122,7 @@ public sealed partial class DebugEngine
     // ---------------------------------------------------------------- set next statement
 
     private readonly Dictionary<int, (LoadedModule Module, ResolvedBreakpoint Location)> _gotoTargets = [];
+    private int _nextGotoTarget;
 
     /// <summary>Places in the given line the instruction pointer of a stopped thread could be moved to.</summary>
     public IReadOnlyList<GotoTargetInfo> GetGotoTargets(string sourcePath, int line, int? column)
@@ -119,18 +134,24 @@ public sealed partial class DebugEngine
             var result = new List<GotoTargetInfo>();
             foreach (LoadedModule module in _modules.Values)
             {
-                if (module.Metadata?.ResolveBreakpoint(pdbPath, line, column) is not { } location || location.Line != line)
+                if (module.Metadata == null)
                     continue;
-                // only within the method some thread is currently executing
-                bool reachable = process.Threads.Any(t => TryGet(() => t.ActiveFrame) is CorDebugILFrame frame
-                    && frame.Function.Token.Value == (uint)location.MethodToken
-                    && KeyOf(frame.Function.Module) == module.Key);
-                if (!reachable)
-                    continue;
-                int id = ++_nextHandle;
-                _gotoTargets[id] = (module, location);
-                result.Add(new GotoTargetInfo(id, $"Line {location.Line}", location.Line, location.Column, location.EndLine, location.EndColumn));
+                foreach (var method in module.Metadata.GetBreakpointLocations(pdbPath, line, 1, line, int.MaxValue).GroupBy(p => p.MethodToken))
+                {
+                    ResolvedBreakpoint? resolved = method.Where(p => column == null || p.EndColumn > column)
+                        .OrderBy(p => p.Column).Select(p => (ResolvedBreakpoint?)p).FirstOrDefault();
+                    if (resolved is not { } location)
+                        continue;
+                    CorDebugILFrame? current = process.Threads.Select(t => TryGet(() => t.ActiveFrame)).OfType<CorDebugILFrame>()
+                        .FirstOrDefault(f => f.Function.Token.Value == (uint)location.MethodToken && KeyOf(f.Function.Module) == module.Key);
+                    current?.CanSetIP(location.ILOffset);
+                    int id = ++_nextGotoTarget;
+                    _gotoTargets[id] = (module, location);
+                    result.Add(new GotoTargetInfo(id, $"Line {location.Line}", location.Line, location.Column, location.EndLine, location.EndColumn));
+                }
             }
+            if (result.Count == 0)
+                throw new DebuggerException("No goto target is available at this location.");
             return result;
         }
     }
@@ -180,9 +201,10 @@ public sealed partial class DebugEngine
             _exceptionConditions.Clear();
             foreach (ExceptionFilterRequest filter in filters.Where(f => !string.IsNullOrWhiteSpace(f.Condition)))
             {
+                bool excludeList = filter.Condition!.TrimStart().StartsWith('!');
                 _exceptionConditions[filter.Filter] = filter.Condition!
-                    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                    .Select(item => (Exclude: item.StartsWith('!'), Name: item.TrimStart('!').Trim()))
+                    .Split([' ', '\t', '\r', '\n', ','], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                    .Select(item => (Exclude: excludeList || item.StartsWith('!'), Name: item.TrimStart('!').Trim()))
                     .Select(item => (item.Exclude, new Regex("^" + Regex.Escape(item.Name).Replace("\\*", ".*") + "$", RegexOptions.CultureInvariant)))
                     .ToList();
             }
@@ -200,8 +222,7 @@ public sealed partial class DebugEngine
             CorDebugValue? unwrapped = exception == null ? null : ValueInspector.Unwrap(exception, out _);
             if (unwrapped == null)
                 return true;
-            // the exception's type and all of its base types
-            List<string> names = _values.GetTypeLevels(unwrapped).Select(l => l.Metadata.GetTypeName(l.Token)).ToList();
+            List<string> names = [_values.GetTypeName(unwrapped)];
             if (condition.Any(c => c.Exclude && names.Any(c.Pattern.IsMatch)))
                 return false;
             return condition.All(c => c.Exclude) || condition.Any(c => !c.Exclude && names.Any(c.Pattern.IsMatch));
@@ -253,7 +274,7 @@ public sealed partial class DebugEngine
     private (string Path, int SourceReference) DescribeSource(LoadedModule? module, string pdbPath)
     {
         string local = ToLocalPath(pdbPath);
-        if (File.Exists(local) || module?.Metadata?.HasEmbeddedSource(pdbPath) != true)
+        if (module?.Metadata == null)
             return (local, 0);
 
         string key = module.Id + "|" + pdbPath;
@@ -265,20 +286,44 @@ public sealed partial class DebugEngine
         return (local, id);
     }
 
-    public string GetSource(int sourceReference)
+    private static readonly HttpClient SourceClient = new() { Timeout = TimeSpan.FromSeconds(10) };
+
+    public string GetSource(int sourceReference, string? sourcePath = null)
     {
         lock (_lock)
         {
             if (!_sourceReferences.TryGetValue(sourceReference, out var source))
-                throw new DebuggerException($"Unknown source reference {sourceReference}.");
-            return source.Module.Metadata?.GetEmbeddedSource(source.Document)
-                ?? throw new DebuggerException("The source is not available.");
+            {
+                if (string.IsNullOrEmpty(sourcePath))
+                    throw new DebuggerException($"Unknown source reference {sourceReference}.");
+                source = _modules.Values.Select(m => (Module: m, Document: m.Metadata?.ResolveDocumentPath(ToPdbPath(sourcePath))))
+                    .Where(s => s.Document != null).Select(s => (s.Module, s.Document!)).FirstOrDefault();
+                if (source.Module == null)
+                    throw new DebuggerException("The source is not available.");
+            }
+            if (source.Module.Metadata?.GetEmbeddedSource(source.Document) is { } embedded)
+                return embedded;
+            string local = ToLocalPath(source.Document);
+            if (File.Exists(local))
+                return File.ReadAllText(local);
+            if (source.Module.Metadata?.GetSourceLinkUrl(source.Document) is { } url
+                && Uri.TryCreate(url, UriKind.Absolute, out Uri? uri) && uri.Scheme is "https" or "http")
+                return SourceClient.GetStringAsync(uri).GetAwaiter().GetResult();
+            throw new DebuggerException("The source is not available.");
         }
     }
 
     // ---------------------------------------------------------------- threads
 
     private readonly HashSet<int> _frozenThreads = [];
+    private int? _executionThread;
+
+    private void SetExecutionThread(CorDebugProcess process, int? threadId, bool singleThread)
+    {
+        _executionThread = singleThread ? threadId ?? throw new DebuggerException("A thread is required for single-thread execution.") : null;
+        process.SetAllThreadsDebugState(CorDebugThreadState.THREAD_RUN, null!);
+        RestoreFrozenThreads(process);
+    }
 
     /// <summary>A frozen thread stays suspended while the rest of the process runs.</summary>
     public void SetThreadFrozen(int threadId, bool frozen)
@@ -297,6 +342,12 @@ public sealed partial class DebugEngine
     // A func-eval suspends and then resumes all threads; the user's frozen ones have to be frozen again.
     private void RestoreFrozenThreads(CorDebugProcess process)
     {
+        if (_executionThread is { } executionThreadId)
+        {
+            CorDebugThread thread = RequireThread(executionThreadId);
+            process.SetAllThreadsDebugState(CorDebugThreadState.THREAD_SUSPEND, thread.Raw);
+            thread.DebugState = CorDebugThreadState.THREAD_RUN;
+        }
         foreach (int threadId in _frozenThreads.ToList())
         {
             try

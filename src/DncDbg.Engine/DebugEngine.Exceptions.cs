@@ -41,7 +41,7 @@ public sealed partial class DebugEngine
                 bool inUserCode = IsUserFrame(e.Frame);
                 if (inUserCode)
                     _passedUserCode.Add(threadId);
-                if (!_breakOnThrown || (_justMyCode && !inUserCode) || !MatchesExceptionCondition(FilterAll, thread))
+                if (!_breakOnThrown || !MatchesExceptionCondition(FilterAll, thread))
                     return EventAction.Continue;
                 _firstChanceReported.Add(threadId);
                 return StopAtException(thread, "always");
@@ -58,7 +58,7 @@ public sealed partial class DebugEngine
                 // The stack is still intact here. Code the user cannot see is about to swallow an exception that came
                 // out of the user's code: for the user that is as good as unhandled.
                 bool userUnhandled = _breakOnUserUnhandled && _justMyCode && _passedUserCode.Contains(threadId)
-                    && !_firstChanceReported.Contains(threadId) && !IsUserFrame(e.Frame)
+                    && !IsUserFrame(e.Frame)
                     && MatchesExceptionCondition(FilterUserUnhandled, thread);
                 _firstChanceReported.Remove(threadId);
                 _passedUserCode.Remove(threadId);

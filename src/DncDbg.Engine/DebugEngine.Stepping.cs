@@ -37,12 +37,13 @@ public sealed partial class DebugEngine
     private AsyncStep? _asyncStep;
 
     /// <param name="targetId">For a step in: which call of the current statement to enter (see <see cref="GetStepInTargets"/>).</param>
-    public void Step(int threadId, StepKind kind, int? targetId = null)
+    public void Step(int threadId, StepKind kind, int? targetId = null, bool singleThread = false)
     {
         lock (_lock)
         {
             CorDebugProcess process = RequireStopped();
             CorDebugThread thread = RequireThread(threadId);
+            SetExecutionThread(process, threadId, singleThread);
             ClearAsyncStep();
             ClearStepInTarget();
             _leavingFilteredMethod = false;

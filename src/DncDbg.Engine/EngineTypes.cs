@@ -15,6 +15,7 @@ public sealed class LaunchOptions
     public string? WorkingDirectory { get; init; }
     public IReadOnlyDictionary<string, string?>? Environment { get; init; }
     public bool StopAtEntry { get; init; }
+    public bool NoDebug { get; init; }
     public bool JustMyCode { get; init; } = true;
 
     /// <summary>Where to look for symbols that are not next to their module.</summary>
@@ -79,6 +80,6 @@ public sealed record ModuleLoadInfo(int Id, string Name, string Path, bool HasSy
 /// <param name="BreakMode">Why the debugger stopped: "always" (thrown), "unhandled" or "userUnhandled".</param>
 public sealed record ExceptionData(string TypeName, string? Message, string BreakMode, string? StackTrace = null, ExceptionData? Inner = null);
 
-public sealed record SourceFileInfo(string Path);
+public sealed record SourceFileInfo(string Path, int SourceReference = 0);
 
 public sealed class DebuggerException(string message) : Exception(message);

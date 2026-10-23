@@ -19,6 +19,8 @@ public sealed class ErrorMessage
 
 public sealed class Capabilities
 {
+    public bool SupportsSingleThreadExecutionRequests { get; set; }
+    public bool SupportsBreakpointLocationsRequest { get; set; }
     public bool SupportsReadMemoryRequest { get; set; }
     public bool SupportsWriteMemoryRequest { get; set; }
     public bool SupportsConfigurationDoneRequest { get; set; }
@@ -93,6 +95,7 @@ public sealed class LaunchArguments
 
     /// <summary>Describe values by running the debuggee's code (ToString(), property getters, [DebuggerDisplay]). Default true.</summary>
     public bool? AllowImplicitFuncEval { get; set; }
+    public ExpressionEvaluationOptions? ExpressionEvaluationOptions { get; set; }
 
     /// <summary>Path prefix recorded in the PDB -> directory on this machine.</summary>
     public Dictionary<string, string>? SourceFileMap { get; set; }
@@ -163,6 +166,8 @@ public sealed class RunInTerminalResponseBody
 
 public sealed class AttachArguments
 {
+    public bool StopAtEntry { get; set; }
+    public ExpressionEvaluationOptions? ExpressionEvaluationOptions { get; set; }
     public JsonElement ProcessId { get; set; }
     public bool? JustMyCode { get; set; }
     public bool? AllowImplicitFuncEval { get; set; }
@@ -174,6 +179,12 @@ public sealed class AttachArguments
         JsonValueKind.String => int.Parse(ProcessId.GetString()!),
         _ => throw new InvalidOperationException("'processId' is required for attach."),
     };
+}
+
+public sealed class ExpressionEvaluationOptions
+{
+    public bool? AllowImplicitFuncEval { get; set; }
+    public bool ShowRawValues { get; set; }
 }
 
 public sealed class DisconnectArguments

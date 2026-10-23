@@ -200,7 +200,12 @@ public sealed partial class DebugEngine
                 return false;
             if (File.Exists(bp.Path) && metadata.MatchesChecksum(pdbPath, bp.Path!) == false)
                 bp.Warning = "The source file differs from the one the module was built with; the breakpoint may be on a different line.";
-            bp.Bound.Add(AcquireNativeBreakpoint(module, resolved.MethodToken, resolved.ILOffset));
+            foreach (var location in metadata.ResolveBreakpoints(pdbPath, bp.RequestedLine, bp.RequestedColumn))
+            {
+                if (!metadata.IsHiddenMethod(location.MethodToken)
+                    && (!_justMyCode || IsUserCode(module.Module.GetFunctionFromToken(new mdMethodDef(location.MethodToken)))))
+                    bp.Bound.Add(AcquireNativeBreakpoint(module, location.MethodToken, location.ILOffset));
+            }
             bp.Resolved = (resolved.Line, resolved.Column, resolved.EndLine, resolved.EndColumn);
             return true;
         }

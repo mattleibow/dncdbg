@@ -45,7 +45,7 @@ internal static class AttachChecks
             hasRuntime = false;
         }
         if (!hasRuntime)
-            throw new DebuggerException($"Process {processId} does not host the .NET runtime (or cannot be accessed): there is nothing to attach to.");
+            log?.Invoke($"Runtime startup is not yet visible for process {processId}; waiting for the startup registration.");
     }
 
     /// <returns>null if no debugger is attached; otherwise text to add to the message (may be empty).</returns>

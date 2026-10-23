@@ -2,6 +2,11 @@
 
 This document shows, message by message and field by field, which parts of the [Debug Adapter Protocol](https://microsoft.github.io/debug-adapter-protocol/) are supported by DNCDbg.
 
+> During the C# migration, the detailed matrix below remains the native
+> implementation's compatibility contract, not a declaration of complete managed
+> parity. The managed adapter advertises its currently implemented capabilities
+> in the `initialize` response. Existing acceptance assertions remain unchanged.
+
 How to read the blocks below:
 
 - Field names, signatures, and their order are identical to the official DAP specification.

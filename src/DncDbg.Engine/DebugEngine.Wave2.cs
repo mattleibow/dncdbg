@@ -19,10 +19,8 @@ public sealed partial class DebugEngine
         lock (_lock)
         {
             RequireStopped();
-            if (frameId == null)
-                throw new DebuggerException("Expressions can only be evaluated in the context of a stack frame.");
             StartImplicitEvalBudget();
-            var evaluator = new Evaluator(this, ResolveFrame(frameId.Value), allowCalls: true);
+            var evaluator = new Evaluator(this, frameId is > 0 ? ResolveFrame(frameId.Value) : TopFrame(_lastStoppedThreadId), allowCalls: true);
             evaluator.EvaluateToVariable($"({expression}) = ({value})");
             return WithHandle(evaluator.EvaluateToVariable(expression));
         }

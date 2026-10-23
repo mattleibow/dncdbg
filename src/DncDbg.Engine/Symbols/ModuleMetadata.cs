@@ -308,6 +308,8 @@ internal sealed partial class ModuleMetadata : IDisposable
         return points.Count == 0 ? null : points;
     }
 
+    public int? FirstVisibleOffset(int methodToken) => GetSequencePoints(methodToken)?.FirstOrDefault(p => !p.IsHidden).Offset;
+
     /// <summary>Maps an IL offset to source. Returns null for code without (visible) line info.</summary>
     public SourceLocation? GetSourceLocation(int methodToken, int ilOffset, out bool isHidden)
     {
@@ -353,6 +355,10 @@ internal sealed partial class ModuleMetadata : IDisposable
         {
             if (!points[i].IsHidden)
             {
+                SequencePoint current = points[index], next = points[i];
+                if (!current.IsHidden && current.StartLine == next.StartLine && current.StartColumn == next.StartColumn
+                    && current.EndLine == next.EndLine && current.EndColumn == next.EndColumn)
+                    continue;
                 end = points[i].Offset;
                 break;
             }

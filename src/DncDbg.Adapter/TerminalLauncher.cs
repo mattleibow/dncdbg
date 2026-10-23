@@ -16,7 +16,7 @@ internal static class TerminalLauncher
 
     private static readonly TimeSpan ClientTimeout = TimeSpan.FromSeconds(60);
 
-    public static ExternalLaunch Launch(DapConnection connection, ResolvedLaunch launch, string kind)
+    public static ExternalLaunch Launch(DapConnection connection, ResolvedLaunch launch, string kind, CancellationToken cancellationToken)
     {
         var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
@@ -41,6 +41,7 @@ internal static class TerminalLauncher
             DateTime deadline = DateTime.UtcNow + ClientTimeout;
             while (!accept.IsCompleted)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 if (response.IsCompleted && response.Result.Success != true)
                     throw new DebuggerException("The client could not start a terminal: " + response.Result.Message);
                 if (DateTime.UtcNow > deadline)

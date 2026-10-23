@@ -12,6 +12,8 @@ public sealed partial class DebugEngine : IEvalHost
         public bool Completed { get; set; }
         public bool ThrewException { get; set; }
         public bool Cancelled { get; set; }
+        public bool CrossThreadDependency { get; set; }
+        public int ThreadId { get; init; }
     }
 
     private static readonly TimeSpan EvalTimeout = TimeSpan.FromSeconds(5);
@@ -47,7 +49,7 @@ public sealed partial class DebugEngine : IEvalHost
     private readonly List<(CorDebugEval Eval, int ThreadId)> _abandonedEvals = [];
 
     bool IEvalHost.BudgetExceeded =>
-        !_explicitExpansion && (!AllowImplicitFuncEval || _implicitEvalTimedOut || DateTime.UtcNow > _implicitEvalDeadline);
+        !AllowImplicitFuncEval || !_explicitExpansion && (_implicitEvalTimedOut || DateTime.UtcNow > _implicitEvalDeadline);
 
     bool IEvalHost.FuncEvalAllowed => AllowImplicitFuncEval;
     bool IEvalHost.ShowRawValues => ShowRawValues;
@@ -78,6 +80,8 @@ public sealed partial class DebugEngine : IEvalHost
     {
         _requestCancelled = true;
         _shuttingDown |= sessionEnds;
+        if (sessionEnds)
+            _lifetime.Stop();
         Task.Run(CancelEvaluation);
     }
 
@@ -99,21 +103,12 @@ public sealed partial class DebugEngine : IEvalHost
                 return;
             pending.Cancelled = true;
             Monitor.PulseAll(_lock);
-            try
-            {
-                Synchronize(_process);
-                pending.Eval.Abort();
-                _process.Continue(false);
-            }
-            catch (Exception e)
-            {
-                Log?.Invoke("Failed to abort the evaluation: " + e.Message);
-            }
         }
     }
 
     private readonly List<CorDebugHandleValue> _strongHandles = [];
     private PendingEval? _pendingEval;
+    private bool _pauseDuringEvaluation;
 
     /// <summary>
     /// Runs an evaluation on <paramref name="threadId"/> and waits for it. Must be called with the engine lock held;
@@ -122,6 +117,7 @@ public sealed partial class DebugEngine : IEvalHost
     /// </summary>
     private CorDebugValue? RunEval(int threadId, Action<CorDebugEval> start, bool returnException = false)
     {
+        using var operation = _lifetime.Enter();
         CorDebugProcess process = RequireStopped();
         if (_pendingEval != null)
             throw new EvalFailedException("Evaluation not possible: another evaluation is in progress.");
@@ -142,10 +138,18 @@ public sealed partial class DebugEngine : IEvalHost
             throw new EvalFailedException("Evaluation not possible: " + ErrorText.Describe(e));
         }
 
-        var pending = new PendingEval(eval);
+        var pending = new PendingEval(eval) { ThreadId = threadId };
         _pendingEval = pending;
+        CorDebugClass? notificationClass = null;
         try
         {
+            foreach (LoadedModule module in _modules.Values)
+                if (module.Metadata?.FindType("System.Diagnostics.Debugger.CrossThreadDependencyNotification") is { } token)
+                {
+                    notificationClass = module.Module.GetClassFromToken(new mdTypeDef(token));
+                    process.SetEnableCustomNotification(notificationClass.Raw, true);
+                    break;
+                }
             // Only the evaluating thread runs, so the evaluation cannot be blocked on (or disturb) other threads' progress.
             process.SetAllThreadsDebugState(CorDebugThreadState.THREAD_SUSPEND, thread.Raw);
             _stopped = false;
@@ -164,20 +168,25 @@ public sealed partial class DebugEngine : IEvalHost
                     Output?.Invoke("console", "Describing a value took too long (ToString(), a property getter or a [DebuggerDisplay] expression does not return). " +
                         "Until the program continues values are shown without running its code; expressions are still evaluated." + Environment.NewLine);
                 }
-                if (!pending.Cancelled)
+                if (!pending.Completed)
                 {
-                    Synchronize(process);
+                    if (!_stopped)
+                        Synchronize(process);
                     eval.Abort();
+                    _stopped = false;
                     process.Continue(false);
                 }
                 if (!WaitForEval(pending, AbortTimeout, stopOnCancel: false))
                 {
-                    Synchronize(process);
+                    if (!_stopped)
+                        Synchronize(process);
                     eval.RudeAbort();
+                    _stopped = false;
                     process.Continue(false);
                     if (!WaitForEval(pending, AbortTimeout, stopOnCancel: false))
                     {
-                        Synchronize(process);
+                        if (!_stopped)
+                            Synchronize(process);
                         _stopped = true;
                         reason += " The evaluated code could not be interrupted and is still running on its thread.";
                         _abandonedEvals.Add((eval, threadId));
@@ -191,6 +200,8 @@ public sealed partial class DebugEngine : IEvalHost
 
             if (_processExited || _process == null)
                 throw new EvalFailedException("The debuggee exited during the evaluation.");
+            if (pending.CrossThreadDependency)
+                throw new EvalFailedException("error");
 
             CorDebugValue? result = null;
             try
@@ -217,7 +228,15 @@ public sealed partial class DebugEngine : IEvalHost
         }
         finally
         {
+            if (notificationClass != null && !_processExited)
+                try { process.SetEnableCustomNotification(notificationClass.Raw, false); }
+                catch (Exception) { }
             _pendingEval = null;
+            if (_pauseDuringEvaluation && _stopped && !_shuttingDown)
+            {
+                _pauseDuringEvaluation = false;
+                Task.Run(() => Stopped?.Invoke(new StopInfo("pause", threadId)));
+            }
             try
             {
                 // once Stop has hung, every other call into the debugging interface blocks behind it
@@ -278,7 +297,7 @@ public sealed partial class DebugEngine : IEvalHost
         {
             return RunEval(threadId, eval => eval.CallParameterizedFunction(
                 function.Raw, typeArguments.Length, typeArguments.Select(t => t.Raw).ToArray(),
-                arguments.Length, arguments.Select(a => a.Raw).ToArray()), returnException: !isImplicit);
+                arguments.Length, arguments.Select(a => a.Raw).ToArray()), returnException: true);
         }
         finally
         {

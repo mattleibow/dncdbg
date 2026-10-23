@@ -195,7 +195,18 @@ public sealed class DapConnection : IDisposable
 
     public void Dispose()
     {
+        CancelPendingRequests();
         _input.Dispose();
         _output.Dispose();
+    }
+
+    public void CancelPendingRequests()
+    {
+        lock (_pendingRequests)
+        {
+            foreach (var completion in _pendingRequests.Values)
+                completion.TrySetCanceled();
+            _pendingRequests.Clear();
+        }
     }
 }

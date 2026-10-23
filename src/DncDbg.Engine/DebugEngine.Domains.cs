@@ -194,6 +194,9 @@ public sealed partial class DebugEngine
         }
         foreach (CodeLocation location in _nativeBreakpoints.Keys.Where(l => l.Module == removed.Key).ToList())
             _nativeBreakpoints.Remove(location);
+        foreach (CodeLocation location in _initializationSites.Keys.Where(l => l.Module == removed.Key).ToList())
+            _initializationSites.Remove(location);
+        _completedInitializers.RemoveWhere(t => t.Module == removed.Key);
         if (_entryBreakpoint?.Module == removed.Key)
             _entryBreakpoint = null;
         foreach (int id in _gotoTargets.Where(t => t.Value.Module == removed).Select(t => t.Key).ToList())

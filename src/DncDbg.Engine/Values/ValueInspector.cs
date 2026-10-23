@@ -237,7 +237,7 @@ internal sealed partial class ValueInspector
                     };
                 }
 
-            case CorElementType.Class when typeName == "System.String":
+            case CorElementType.Class when typeName is "System.String" or "string":
                 // a string reached through its address (ICorDebugProcess.GetObject) is typed as a plain object
                 return Leaf(FormatHost(ReadStringValue(target, StringLimit(options)), options).Text, "string");
 
@@ -327,21 +327,18 @@ internal sealed partial class ValueInspector
         bool rawView = options.Raw;
         if (!options.Raw && IsSpan(typeName))
             return DescribeSpan(name, getter, stable, typeName, evaluateName, context, options);
-        if (!options.Raw)
+        if (TryGet(() => TryGetCollection(stable, typeName, context, childOptions)) is { } collection)
         {
-            if (TryGet(() => TryGetCollection(stable, typeName, context, childOptions)) is { } collection)
-            {
                 display = "Count = " + collection.Count;
-                indexed = collection.Count;
-            }
-            else
-            {
+                indexed = options.Raw ? 0 : collection.Count;
+        }
+        else if (!options.Raw)
+        {
                 display = TryGet(() => FormatWellKnown(stable, typeName, context, childOptions))
                     ?? TryGet(() => FormatWithDebuggerDisplay(stable, context))
                     ?? TryGet(() => FormatException(stable))
                     ?? TryGet(() => FormatWithToString(stable, context))
                     ?? display;
-            }
         }
         return new VariableInfo
         {
@@ -899,7 +896,7 @@ internal sealed partial class ValueInspector
         {
             // after a timeout the host stops evaluating implicitly, which turns the remaining properties into lazy ones
             evaluationBroken = e.Message.Contains("not possible", StringComparison.Ordinal);
-            return new VariableInfo { Name = property.Name, Value = "<" + e.Message + ">" };
+            return new VariableInfo { Name = property.Name, Value = "<error>", Type = "" };
         }
         catch (Exception e)
         {
@@ -944,12 +941,15 @@ internal sealed partial class ValueInspector
             {
                 if (!field.IsStatic && !field.IsLiteral)
                     continue;
+                if (!options.Raw && field.Name.StartsWith('<') && field.Name.EndsWith(">k__BackingField", StringComparison.Ordinal))
+                    continue;
                 string evaluateName = typeName + "." + field.Name;
                 if (field.IsLiteral)
                 {
                     object? constant = level.Metadata.GetConstant(field.Token, out _);
                     VariableInfo info = DescribeHost(field.Name, constant, null, options);
-                    result.Add(new VariableInfo { Name = info.Name, Value = info.Value, Type = info.Type, EvaluateName = evaluateName });
+                    result.Add(new VariableInfo { Name = info.Name, Value = info.Value,
+                        Type = constant == null ? ModuleMetadata.DisplayType(level.Metadata.GetFieldType(field.Token)) : info.Type, EvaluateName = evaluateName });
                     continue;
                 }
                 CorDebugType type = level.Type;
@@ -971,13 +971,13 @@ internal sealed partial class ValueInspector
     {
         try
         {
-            VariableInfo value = _host.EvaluateStatic(expression, context, options) with { Name = name };
+            VariableInfo value = _host.EvaluateStatic(expression, context, options) with { Name = name, EvaluateName = expression };
             return value.Value.StartsWith("<error", StringComparison.Ordinal)
                 ? value with { Value = "<error>", Type = "" } : value;
         }
         catch (Exception e) when (e is DebuggerException or EvalFailedException)
         {
-            return new VariableInfo { Name = name, Value = "<error>", Type = "" };
+            return new VariableInfo { Name = name, Value = "<error>", Type = "", EvaluateName = expression };
         }
     }
 
@@ -1599,6 +1599,10 @@ internal sealed partial class ValueInspector
                     string name = _getMetadata(cls.Module)?.GetTypeName((int)cls.Token.Value) ?? $"<type 0x{cls.Token.Value:X8}>";
                     if (name == "System.Decimal")
                         return "decimal";
+                    if (name == "System.String")
+                        return "string";
+                    if (name == "System.Object")
+                        return "object";
                     CorDebugType[] typeArgs = TypeArgumentsOf(type);
                     return typeArgs.Length == 0 ? name : ApplyTypeArguments(name, typeArgs.Select(TypeName).ToArray());
                 }

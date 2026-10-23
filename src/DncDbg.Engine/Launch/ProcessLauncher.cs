@@ -34,7 +34,7 @@ internal static class ProcessLauncher
     /// it creates the process itself.
     /// </param>
     public static LaunchedProcess Launch(DbgShim dbgShim, string program, IReadOnlyList<string> args, string? cwd,
-        IReadOnlyDictionary<string, string?>? env, CorDebug? framework = null)
+        IReadOnlyDictionary<string, string?>? env, CorDebug? framework = null, bool noDebug = false)
     {
         List<string> argv = BuildArguments(program, args);
 
@@ -52,7 +52,7 @@ internal static class ProcessLauncher
                 ? LaunchFramework(framework, string.Join(' ', argv.Select(QuoteArgument)), cwd, env, hIn, hOut, hErr, out process)
                 : OperatingSystem.IsWindows()
                     ? LaunchWindows(string.Join(' ', argv.Select(QuoteArgument)), cwd, env, hIn, hOut, hErr)
-                    : LaunchUnix(dbgShim, argv, cwd, env, (int)hIn, (int)hOut, (int)hErr);
+                    : LaunchUnix(dbgShim, argv, cwd, env, (int)hIn, (int)hOut, (int)hErr, noDebug);
 
             stdin.DisposeLocalCopyOfClientHandle();
             stdout.DisposeLocalCopyOfClientHandle();
@@ -296,7 +296,7 @@ internal static class ProcessLauncher
         "/bin/sh -c 'echo \"pid $$\" > \"$0\"; read line < \"$1\"; shift; exec \"$@\"' \"$ctl\" \"$go\" \"$@\" <&0 &\n" +
         "child=$!\n" +
         // the control FIFO goes first: without the debugger nobody reads it, and the report below would block forever
-        "( exec >/dev/null 2>&1; verdict=; read verdict < \"$alive\"; [ \"$verdict\" = detach ] || { rm -f \"$ctl\"; kill -9 $child; } ) &\n" +
+        "( exec >/dev/null 2>&1; verdict=; read verdict < \"$alive\"; if [ \"$verdict\" = detach ]; then echo detached > \"$ctl\"; else rm -f \"$ctl\"; kill -9 $child; fi ) &\n" +
         "watchdog=$!\n" +
         "wait $child 2>/dev/null\n" + // dash prints the remark from "wait" as well
         "code=$?\n" +
@@ -307,7 +307,7 @@ internal static class ProcessLauncher
     // The PAL's CreateProcess forks with the parent's fds 0/1/2, so the pipes are
     // put in place of our own stdio for the duration of the call.
     private static (int, Action, Task<int?>?, Action?) LaunchUnix(DbgShim dbgShim, List<string> argv, string? cwd,
-        IReadOnlyDictionary<string, string?>? env, int fdIn, int fdOut, int fdErr)
+        IReadOnlyDictionary<string, string?>? env, int fdIn, int fdOut, int fdErr, bool noDebug)
     {
         string directory = Directory.CreateTempSubdirectory("dncdbg-").FullName;
         string script = Path.Combine(directory, "launch.sh"), control = Path.Combine(directory, "ctl"), go = Path.Combine(directory, "go");
@@ -326,17 +326,35 @@ internal static class ProcessLauncher
             aliveStream = new FileStream(alive, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite, 1);
 
             string commandLine = string.Join(' ', new[] { "/bin/sh", script, control, go, alive }.Concat(argv).Select(QuoteArgument));
-            CreateProcessForLaunchResult result;
+            CreateProcessForLaunchResult result = default;
+            int managedShell = 0;
             lock (s_stdioSwapLock)
             {
                 int saved0 = dup(0), saved1 = dup(1), saved2 = dup(2);
+                fcntl(saved0, 2, 1);
+                fcntl(saved1, 2, 1);
+                fcntl(saved2, 2, 1);
                 try
                 {
                     dup2(fdIn, 0);
                     dup2(fdOut, 1);
                     dup2(fdErr, 2);
-                    result = dbgShim.CreateProcessForLaunch(commandLine, true, envHandle.AddrOfPinnedObject(),
-                        string.IsNullOrEmpty(cwd) ? null! : cwd);
+                    if (noDebug)
+                    {
+                        var start = new System.Diagnostics.ProcessStartInfo("/bin/sh") { UseShellExecute = false };
+                        foreach (string argument in new[] { script, control, go, alive }.Concat(argv))
+                            start.ArgumentList.Add(argument);
+                        if (!string.IsNullOrEmpty(cwd))
+                            start.WorkingDirectory = cwd;
+                        foreach (var entry in env ?? new Dictionary<string, string?>())
+                            if (entry.Value == null) start.Environment.Remove(entry.Key);
+                            else start.Environment[entry.Key] = entry.Value;
+                        using var process = System.Diagnostics.Process.Start(start)!;
+                        managedShell = process.Id;
+                    }
+                    else
+                        result = dbgShim.CreateProcessForLaunch(commandLine, true, envHandle.AddrOfPinnedObject(),
+                            string.IsNullOrEmpty(cwd) ? null! : cwd);
                 }
                 finally
                 {
@@ -345,8 +363,11 @@ internal static class ProcessLauncher
                     Restore(saved2, 2);
                 }
             }
-            dbgShim.ResumeProcess(result.ResumeHandle);
-            dbgShim.CloseResumeHandle(result.ResumeHandle);
+            if (!noDebug)
+            {
+                dbgShim.ResumeProcess(result.ResumeHandle);
+                dbgShim.CloseResumeHandle(result.ResumeHandle);
+            }
 
             var reader = new StreamReader(controlStream, Encoding.ASCII, false, 64, leaveOpen: true);
             Task<string?> first = Task.Run(reader.ReadLine);
@@ -354,12 +375,21 @@ internal static class ProcessLauncher
                 throw new DebuggerException("The launcher shell did not report the process id" + (first.IsCompleted ? $": '{first.Result}'." : "."));
 
             FileStream controlOwned = controlStream, goOwned = goStream, aliveOwned = aliveStream;
-            int shell = result.ProcessId;
-            Task<int?> exitCode = Task.Run(() =>
+            var detached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            int abandoned = 0;
+            int shell = noDebug ? managedShell : result.ProcessId;
+            Task<int?> exitCode = Task.Run<int?>(() =>
             {
                 try
                 {
-                    return reader.ReadLine()?.Split(' ') is ["exit", var codeText] && int.TryParse(codeText, out int code) ? code : (int?)null;
+                    while (reader.ReadLine() is { } line)
+                    {
+                        if (line == "detached")
+                            detached.TrySetResult();
+                        else if (line.Split(' ') is ["exit", var codeText] && int.TryParse(codeText, out int code))
+                            return code;
+                    }
+                    return null;
                 }
                 catch (Exception e) when (e is IOException or ObjectDisposedException)
                 {
@@ -381,10 +411,14 @@ internal static class ProcessLauncher
                 goOwned.Flush();
             }, exitCode, () =>
             {
+                if (Interlocked.Exchange(ref abandoned, 1) != 0)
+                    return;
                 try
                 {
                     aliveOwned.Write("detach\n"u8);
                     aliveOwned.Flush();
+                    if (!detached.Task.Wait(TimeSpan.FromSeconds(5)))
+                        return;
                 }
                 catch (Exception e) when (e is IOException or ObjectDisposedException)
                 {
@@ -434,6 +468,8 @@ internal static class ProcessLauncher
 
     [DllImport("libc", SetLastError = true)]
     private static extern int dup(int fd);
+    [DllImport("libc", SetLastError = true)]
+    private static extern int fcntl(int fd, int command, int flags);
 
     [DllImport("libc", SetLastError = true)]
     private static extern int dup2(int oldfd, int newfd);

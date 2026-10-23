@@ -9,5 +9,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/DncDbg.Adapter/DncDbg.Adapter.csproj" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="../../src/DncDbg.Engine/DncDbg.Engine.csproj" />
   </ItemGroup>
 </Project>

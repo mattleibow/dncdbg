@@ -182,11 +182,11 @@ public sealed partial class DebugEngine
             return last;
         }
 
-        public void Assign(Func<CorDebugValue?> location, string expression)
+        public void Assign(Func<CorDebugValue?> location, string expression, string? targetName = null)
         {
             try
             {
-                AssignCore(location, Run(expression));
+                AssignCore(location, Run(expression), targetName == null ? null : DeclaredLocalType(targetName));
             }
             catch (EvalFailedException e)
             {
@@ -200,7 +200,10 @@ public sealed partial class DebugEngine
             ExpressionSyntax syntax = SyntaxFactory.ParseExpression(RewritePseudoVariables(expression));
             Diagnostic? error = syntax.GetDiagnostics().FirstOrDefault(d => d.Severity == DiagnosticSeverity.Error);
             if (error != null)
+            {
+                engine.Log?.Invoke($"Invalid evaluation syntax: {expression}: {error}");
                 throw new DebuggerException(error.Id == "CS1012" ? "Failed to parse character." : "Expression has malformed or incomplete syntax.");
+            }
             try
             {
                 return Eval(syntax);
@@ -237,8 +240,10 @@ public sealed partial class DebugEngine
                 case RemoteOperand remote:
                     {
                         VariableInfo result = _values.Describe(name, remote.Getter, name, _context, options);
+                        if (result.Value.StartsWith("<error:", StringComparison.Ordinal))
+                            throw new DebuggerException(result.Value[8..^1]);
                         if (!remote.IsLocation)
-                            result.MemoryReference = "0x0000000000000000";
+                            result = result with { Location = null, MemoryReference = "0x0000000000000000" };
                         return result;
                     }
                 case TypeOperand type:
@@ -268,7 +273,8 @@ public sealed partial class DebugEngine
                     return ResolveType(predefined.ToString()) ?? throw new DebuggerException($"Type '{predefined}' not found.");
                 case MemberAccessExpressionSyntax { RawKind: (int)SyntaxKind.SimpleMemberAccessExpression, Name: GenericNameSyntax genericMember } genericAccess:
                     {
-                        string prefix = Eval(genericAccess.Expression) switch
+                        Operand owner = Eval(genericAccess.Expression);
+                        string prefix = owner switch
                         {
                             NamespaceOperand ns => ns.Name + ".",
                             TypeOperand outer => outer.Metadata.GetTypeName(outer.Token) + ".",
@@ -276,7 +282,8 @@ public sealed partial class DebugEngine
                         };
                         string name = prefix + genericMember.Identifier.ValueText + "`" + genericMember.TypeArgumentList.Arguments.Count;
                         TypeOperand definition = ResolveQualifiedType(name) ?? throw new DebuggerException($"Type '{genericAccess}' not found.");
-                        return definition with { TypeArguments = genericMember.TypeArgumentList.Arguments.Select(ResolveType).ToList() };
+                        return definition with { TypeArguments = (owner is TypeOperand { TypeArguments: { } outerArguments } ? outerArguments : [])
+                            .Concat(genericMember.TypeArgumentList.Arguments.Select(ResolveType)).ToList() };
                     }
                 case MemberAccessExpressionSyntax { RawKind: (int)SyntaxKind.SimpleMemberAccessExpression } member:
                     return Member(Eval(member.Expression), SimpleName(member.Name));
@@ -351,6 +358,12 @@ public sealed partial class DebugEngine
             foreach (TypeOperand enclosing in EnclosingTypes())
                 if (TryMember(enclosing, name) is { } staticMember)
                     return staticMember;
+            foreach (TypeOperand imported in ImportedTypes())
+                if (TryMember(imported, name) is { } importedMember)
+                    return importedMember;
+            if (Imports.FirstOrDefault(i => i.Alias == name) is { } alias)
+                return alias.Kind == System.Reflection.Metadata.ImportDefinitionKind.AliasType
+                    ? ResolveType(SyntaxFactory.ParseTypeName(ModuleMetadata.DisplayType(alias.Target))) : new NamespaceOperand(alias.Target);
 
             return (Operand?)ResolveType(name) ?? new NamespaceOperand(name);
         }
@@ -370,11 +383,26 @@ public sealed partial class DebugEngine
             if (!engine._modules.TryGetValue(function.Module, out LoadedModule? module) || module.Metadata == null)
                 return null;
             int declaring = module.Metadata.GetDeclaringType((int)function.Token.Value);
-            return new TypeOperand(module, module.Metadata.GetEnclosingUserType(declaring));
+            int userType = module.Metadata.GetEnclosingUserType(declaring);
+            int count = module.Metadata.GetTypeGenericParameters(userType).Length;
+            if (count == 0)
+                return new TypeOperand(module, userType);
+            CorDebugILFrame il = engine.RequireILFrame(frame);
+            CorDebugType[] actual = il.TypeParameters;
+            if (!module.Metadata.GetMethodParameters((int)function.Token.Value).IsStatic
+                && ValueInspector.Unwrap(il.GetArgument(0), out _) is { } instance
+                && ValueInspector.TypeArgumentsOf(instance.ExactType) is { Length: > 0 } fromInstance)
+                actual = fromInstance;
+            List<TypeOperand?> arguments = actual.Take(count).Select(TypeOperandOf).ToList();
+            return new TypeOperand(module, userType, arguments.Count == count && arguments.All(a => a != null)
+                ? arguments.Select(a => a!).ToList() : null);
         }
 
         private TypeOperand? ResolveType(string name)
         {
+            name = ExpandNamespaceAlias(name);
+            if (Imports.FirstOrDefault(i => i.Alias == name && i.Kind == System.Reflection.Metadata.ImportDefinitionKind.AliasType) is { } alias)
+                return ResolveType(SyntaxFactory.ParseTypeName(ModuleMetadata.DisplayType(alias.Target)));
             string? keyword = name switch
             {
                 "bool" => "System.Boolean",
@@ -410,6 +438,8 @@ public sealed partial class DebugEngine
                     ns = dot < 0 ? "" : ns[..dot];
                 }
                 candidates.AddRange(s_implicitNamespaces.Select(n => n + "." + name));
+                candidates.AddRange(Imports.Where(i => i.Alias == null && i.Kind is System.Reflection.Metadata.ImportDefinitionKind.ImportNamespace
+                    or System.Reflection.Metadata.ImportDefinitionKind.ImportAssemblyNamespace).Select(i => i.Target + "." + name));
             }
 
             foreach (string candidate in candidates)
@@ -489,7 +519,7 @@ public sealed partial class DebugEngine
         private TypeOperand ResolveType(TypeSyntax syntax) =>
             ResolveGenericType(syntax)
             ?? ResolveType(syntax.ToString().Replace(" ", ""))
-            ?? throw new DebuggerException($"Type '{syntax}' not found.");
+            ?? throw new DebuggerException($"The type or namespace name '{syntax}' couldn't be found");
 
         // ---------------------------------------------------------------- member access
 
@@ -545,8 +575,28 @@ public sealed partial class DebugEngine
                 }
                 int token = field.Token;
                 EnsureTypeInitialized(type);
-                CorDebugClass cls = type.Class;
-                return new RemoteOperand(() => StaticFieldValue(cls, token), IsLocation: true);
+                if (metadata.IsThreadStaticField(token))
+                {
+                    try { _ = StaticFieldValue(type, token); }
+                    catch (DebuggerException)
+                    {
+                        TypeSignature signature = TypeSignature.Parse(metadata.GetFieldType(token)).Substitute(
+                            (type.TypeArguments ?? []).Select(t => ClosedSignature(ToCorDebugType(t))).ToList());
+                        if (signature.ArrayRank > 0)
+                            return new HostOperand(null, DeclaredType: signature.ToString());
+                        CorDebugType fieldType = BuildType(signature);
+                        if (fieldType.Type == CorElementType.ValueType)
+                        {
+                            CorDebugType[] arguments = ValueInspector.TypeArgumentsOf(fieldType);
+                            CorDebugValue? boxed = engine.RunEval(frame.ThreadId, eval => eval.NewParameterizedObjectNoConstructor(
+                                fieldType.Class.Raw, arguments.Length, arguments.Select(a => a.Raw).ToArray()));
+                            Func<CorDebugValue?> stable = engine.Stabilize(() => boxed);
+                            return new RemoteOperand(() => stable() is { } value ? ValueInspector.Unwrap(value, out _) : null);
+                        }
+                        return new RemoteOperand(() => engine.RequireThread(frame.ThreadId).CreateEval().CreateValueForType(fieldType.Raw));
+                    }
+                }
+                return new RemoteOperand(() => StaticFieldValue(type, token), IsLocation: true);
             }
 
             if (metadata.GetProperties(type.Token).Any(p => p.Name == name && p.IsStatic))
@@ -559,9 +609,12 @@ public sealed partial class DebugEngine
                 ? StaticMember(baseType, name) : null;
         }
 
-        private CorDebugValue StaticFieldValue(CorDebugClass cls, int fieldToken)
+        private CorDebugValue StaticFieldValue(TypeOperand type, int fieldToken)
         {
             ICorDebugFrame? rawFrame = engine.GetILFrame(frame)?.Raw;
+            if (type.TypeArguments is { Count: > 0 })
+                return ToCorDebugType(type).GetStaticFieldValue(new mdFieldDef(fieldToken), rawFrame!);
+            CorDebugClass cls = type.Class;
             var attempts = new Func<CorDebugValue>[]
             {
                 () => cls.GetStaticFieldValue(fieldToken, rawFrame!),
@@ -592,17 +645,9 @@ public sealed partial class DebugEngine
                 return;
             if (!engine.AllowImplicitFuncEval)
             {
-                try
-                {
-                    ulong table = unchecked((ulong)ToCorDebugType(type).TypeID.token1);
-                    // CoreCLR's MethodTable points to auxiliary data after its header, parent and module pointers.
-                    ulong auxiliary = BitConverter.ToUInt64(engine.ReadMemory(table + 16 + 2 * (ulong)IntPtr.Size, IntPtr.Size));
-                    if ((BitConverter.ToUInt32(engine.ReadMemory(auxiliary, 4)) & 1) != 0)
-                        return;
-                }
-                catch (Exception)
-                {
-                }
+                if (engine._completedInitializers.Contains((type.Module.Key, type.Token))
+                    && type.Metadata.GetTypeGenericParameters(type.Token).Length == 0)
+                    return;
                 throw new DebuggerException("Implicit function evaluation is turned off by the user.");
             }
             CorDebugType[] arguments = type.TypeArguments?.Select(ToCorDebugType).ToArray() ?? [];
@@ -678,17 +723,11 @@ public sealed partial class DebugEngine
             foreach (MethodLevel level in MethodLevels(unwrapped))
             {
                 PropertyDescription? property = level.Metadata.GetProperties(level.Token).FirstOrDefault(p => p.Name == name && !p.IsIndexer);
-                if (property == null)
+                if (property == null || property.IsStatic)
                     continue;
-                return property.IsStatic
-                    ? Call(null, new TypeOperand(ModuleOf(level), level.Token), "get_" + name, [], isPropertyAccess: true)
-                    : Call(target, null, "get_" + name, [], isPropertyAccess: true);
+                return Call(target, null, "get_" + name, [], isPropertyAccess: true);
             }
 
-            // static fields and constants are reachable through an instance in the debugger, as a convenience
-            foreach (MethodLevel level in MethodLevels(unwrapped))
-                if (StaticMember(new TypeOperand(ModuleOf(level), level.Token), name) is { } member and not TypeOperand)
-                    return member;
             return null;
         }
 
@@ -746,7 +785,7 @@ public sealed partial class DebugEngine
 
             CorDebugValue? unwrapped = remote.Getter() is { } v ? ValueInspector.Unwrap(v, out _) : null;
             if (unwrapped == null)
-                throw new DebuggerException("NullReferenceException: the value is null.");
+                throw new DebuggerException("0x80070057: NullReferenceException: the value is null.");
 
             if (unwrapped.Type == CorElementType.ValueType && ValueInspector.IsSpan(_values.GetTypeName(unwrapped)))
             {
@@ -801,6 +840,19 @@ public sealed partial class DebugEngine
             List<Operand> arguments = node.ArgumentList.Arguments.Select(a => Eval(a.Expression)).ToList();
             if (arguments.Any(a => a is LambdaOperand))
                 return InvokeWithLambda(node, arguments);
+            if (node.Expression is GenericNameSyntax unqualified)
+            {
+                _explicitTypeArguments = unqualified.TypeArgumentList.Arguments.Select(t => ToCorDebugType(ResolveType(t))).ToList();
+                try
+                {
+                    if (Locals.FirstOrDefault(l => l.Name == "this") is { Getter: { } selfGetter }
+                        && TryCall(new RemoteOperand(selfGetter), null, unqualified.Identifier.ValueText, arguments, false) is { } instanceCall)
+                        return instanceCall;
+                    return EnclosingType() is { } type ? Call(null, type, unqualified.Identifier.ValueText, arguments, false)
+                        : throw new DebuggerException("No enclosing type.");
+                }
+                finally { _explicitTypeArguments = null; }
+            }
 
             // Method<T>(...): the type arguments are given instead of inferred
             if (node.Expression is MemberAccessExpressionSyntax { Name: GenericNameSyntax genericMethod } genericCall)
@@ -828,6 +880,9 @@ public sealed partial class DebugEngine
                         }
                         if (EnclosingType() is { } enclosing && TryCall(null, enclosing, name, arguments, false) is { } viaType)
                             return viaType;
+                        foreach (TypeOperand imported in ImportedTypes())
+                            if (TryCall(null, imported, name, arguments, false) is { } viaImport)
+                                return viaImport;
                         // not a method: a delegate in a local, a field or a property
                         if (Identifier(name) is RemoteOperand callable)
                             return CallOn(callable, "Invoke", arguments);
@@ -857,7 +912,7 @@ public sealed partial class DebugEngine
             TryCall(target, null, name, arguments, isPropertyAccess: false)
             ?? TryCallExtension(target, name, arguments)
             ?? TryCall(target, null, name, arguments, isPropertyAccess: false, explicitImplementations: true)
-            ?? throw new DebuggerException($"No method or extension method '{name}' takes {arguments.Count} argument(s) of these types.");
+            ?? throw new DebuggerException($"0x80070057: No method or extension method '{name}' takes {arguments.Count} argument(s) of these types.");
 
         private Operand CallOnHostOrExtension(Operand target, object? value, string name, List<Operand> arguments)
         {
@@ -868,7 +923,7 @@ public sealed partial class DebugEngine
             catch (DebuggerException e) when (e.Message.StartsWith("No overload", StringComparison.Ordinal) || e.Message.StartsWith("The operation is only", StringComparison.Ordinal))
             {
                 return TryCallExtension(target, name, arguments)
-                    ?? throw new DebuggerException($"No method or extension method '{name}' takes {arguments.Count} argument(s) of these types.");
+                    ?? throw new DebuggerException($"0x80070057: No method or extension method '{name}' takes {arguments.Count} argument(s) of these types.");
             }
         }
 
@@ -903,8 +958,8 @@ public sealed partial class DebugEngine
             if (!allowCalls && !isPropertyAccess)
                 throw new DebuggerException("Method calls are not evaluated in this context.");
             return TryCall(target, type, name, arguments, isPropertyAccess)
-                ?? (target == null ? null : TryCall(target, type, name, arguments, isPropertyAccess, explicitImplementations: true))
-                ?? throw new DebuggerException($"No overload of '{name}' takes {arguments.Count} argument(s) of these types.");
+                ?? (target == null || name == "get_Item" ? null : TryCall(target, type, name, arguments, isPropertyAccess, explicitImplementations: true))
+                ?? throw new DebuggerException($"0x80070057: No overload of '{name}' takes {arguments.Count} argument(s) of these types.");
         }
 
         /// <summary>Base-type chain to search members in, including for primitives, strings and arrays.</summary>
@@ -954,8 +1009,14 @@ public sealed partial class DebugEngine
                 List<MethodDescription> candidates = explicitImplementations
                     ? level.Metadata.GetExplicitImplementations(level.Token, name)
                     : level.Metadata.GetMethods(level.Token, name);
-                foreach (MethodDescription method in candidates)
+                foreach (MethodDescription candidate in candidates)
                 {
+                    if (isPropertyAccess && name == "get_Item"
+                        && !level.Metadata.GetProperties(level.Token).Any(p => p.GetterToken == candidate.Token && p.IsIndexer))
+                        continue;
+                    MethodDescription method = CloseParameters(candidate, level.Type, target == null ? type : null);
+                    if (_explicitTypeArguments != null && method.GenericParameterCount != _explicitTypeArguments.Count)
+                        continue;
                     if (onlyToken != null && method.Token != onlyToken)
                         continue;
                     if (method.IsStatic != (target == null) || method.ParameterTypes.Length < arguments.Count)
@@ -982,6 +1043,15 @@ public sealed partial class DebugEngine
             (MethodLevel chosenLevel, MethodDescription chosen, Dictionary<int, TypeSignature> inferred, arguments) = best.Value;
             arguments = arguments.Select((argument, i) => FindImplicitConversion(argument, chosen.ParameterTypes[i]) is { } conversion
                 ? ApplyConversion(argument, conversion) : argument).ToList();
+            arguments = arguments.Select((argument, i) =>
+            {
+                string? sourceType = ClrTypeOf(argument);
+                string parameter = chosen.ParameterTypes[i];
+                if (sourceType != null && sourceType != parameter && IsWidening(sourceType, parameter)
+                    && TryToHost(argument, out object? value, out _))
+                    return (Operand)new HostOperand(Convert.ChangeType(value, Type.GetType(parameter)!, System.Globalization.CultureInfo.InvariantCulture));
+                return argument;
+            }).ToList();
 
             // Anything that runs code (string creation) comes first: it invalidates plain ICorDebug values.
             // A method of System.Enum, System.ValueType or System.Object wants a boxed "this".
@@ -1061,7 +1131,7 @@ public sealed partial class DebugEngine
             {
                 // inferred while matching the arguments against the parameter types (IEnumerable<T> <- List<int>)
                 if (!inferred.TryGetValue(g, out TypeSignature? typeArgument))
-                    throw new DebuggerException($"The type arguments for method '{name}' cannot be inferred.");
+                    throw new DebuggerException($"0x80070057: The type arguments for method '{name}' cannot be inferred.");
                 typeArguments.Add(BuildType(typeArgument));
             }
 
@@ -1080,6 +1150,7 @@ public sealed partial class DebugEngine
                     ? new HostOperand(bits.Underlying, bits.Class)
                     : new HostOperand(host);
             }
+
             return new RemoteOperand(engine.Stabilize(() => result));
         }
 
@@ -1366,7 +1437,7 @@ public sealed partial class DebugEngine
                         Operand left = Eval(node.Left);
                         Operand right = Eval(node.Right);
                         if (!CanCoalesce(left, right))
-                            throw new DebuggerException("error CS0019: " + BinaryOperatorError("??", left, right).Message);
+                            throw new DebuggerException($"error CS0019: Operator ?? cannot be applied to operands of type '{OperandType(left)}' and '{OperandType(right)}'");
                         return IsNull(left) ? right : left;
                     }
                 case SyntaxKind.IsExpression:
@@ -1499,14 +1570,29 @@ public sealed partial class DebugEngine
 
         // ---------------------------------------------------------------- assignment
 
-        private void AssignCore(Func<CorDebugValue?> location, Operand source)
+        private void AssignCore(Func<CorDebugValue?> location, Operand source, string? declaredType = null)
         {
             CorDebugValue target = location() ?? throw new DebuggerException("The variable is not available.");
+            string targetName = _values.GetClrTypeName(target) ?? _values.ClrTypeName(target.ExactType);
+            if (FindImplicitConversion(source, targetName) is { } conversion)
+            {
+                source = ApplyConversion(source, conversion);
+                target = location() ?? throw new DebuggerException("The variable is not available.");
+            }
             bool targetIsReference = target is CorDebugReferenceValue && target.Type is not (CorElementType.Ptr or CorElementType.FnPtr or CorElementType.ByRef);
 
             if (targetIsReference)
             {
+                if (declaredType != null && declaredType != "System.Object" && !IsNull(source)
+                    && ResolveType(SyntaxFactory.ParseTypeName(ModuleMetadata.DisplayType(declaredType))) is { } expected
+                    && source is RemoteOperand && !IsInstanceOf(source, expected))
+                    throw new DebuggerException("The value cannot be converted to the type of the variable.");
+                if (declaredType is not (null or "System.Object" or "System.String") && source is HostOperand { Value: string })
+                    throw new DebuggerException("The value cannot be converted to the type of the variable.");
                 string? targetType = target.Type == CorElementType.String ? "System.String" : null;
+                if (source is HostOperand { Value: string } && target.Type != CorElementType.Object
+                    && _values.ClrTypeName(target.ExactType) is not ("System.String" or "System.Object"))
+                    throw new DebuggerException("The value cannot be converted to the type of the variable.");
                 Func<CorDebugValue?>? sourceGetter = source switch
                 {
                     HostOperand { Value: null } => null,
@@ -1534,13 +1620,29 @@ public sealed partial class DebugEngine
                 bool isNull = IsNull(source);
                 if (!isNull)
                     AssignCore(() => _values.GetFieldByName(location()!, "value"), source);
+                else if (_values.GetFieldByName(location()!, "value") is { } stored)
+                    ClearValue(stored);
                 ValueInspector.WriteBytes(_values.GetFieldByName(location()!, "hasValue")!, [(byte)(isNull ? 0 : 1)]);
+                return;
+            }
+            if (target.Type == CorElementType.ValueType && _values.GetFieldByName(target, "m_value") is { Type: not CorElementType.ValueType })
+            {
+                AssignCore(() => _values.GetFieldByName(location()!, "m_value"), source);
                 return;
             }
 
             if (target.Type == CorElementType.ValueType && source is RemoteOperand structSource && !TryToHost(source, out _, out _))
             {
                 CopyStruct(location()!, structSource.Getter() ?? throw new DebuggerException("The value is not available."));
+                return;
+            }
+
+            if (target.Type == CorElementType.ValueType && _values.GetTypeName(target) == "decimal")
+            {
+                if (ToHost(source) is not decimal number)
+                    throw new DebuggerException("The value cannot be converted to the type of the variable.");
+                Func<CorDebugValue?> converted = MaterializeDecimal(number);
+                CopyStruct(location()!, converted()!);
                 return;
             }
 
@@ -1577,12 +1679,13 @@ public sealed partial class DebugEngine
                 string fromType = value.GetType().FullName!, toType = typeof(T).FullName!;
                 bool constantConversion = source is HostOperand { IsConstant: true, Value: int }
                     && typeof(T) is var destination && (destination == typeof(sbyte) || destination == typeof(byte)
-                        || destination == typeof(short) || destination == typeof(ushort) || destination == typeof(uint) || destination == typeof(ulong));
+                        || destination == typeof(short) || destination == typeof(ushort) || destination == typeof(uint) || destination == typeof(ulong))
+                    || source is HostOperand { IsConstant: true, Value: long } && typeof(T) == typeof(ulong);
                 if (fromType != toType && !IsWidening(fromType, toType) && !constantConversion)
                     throw Mismatch();
                 try
                 {
-                    return (T)Convert.ChangeType(value, typeof(T), System.Globalization.CultureInfo.InvariantCulture);
+                    return (T)Convert.ChangeType(value is char character ? (int)character : value, typeof(T), System.Globalization.CultureInfo.InvariantCulture);
                 }
                 catch (Exception e) when (e is OverflowException or InvalidCastException or FormatException)
                 {
@@ -1618,6 +1721,23 @@ public sealed partial class DebugEngine
                 else
                     ValueInspector.WriteBytes(to, ValueInspector.ReadRawBytes(value));
             }
+        }
+
+        private void ClearValue(CorDebugValue value)
+        {
+            if (value is CorDebugReferenceValue reference)
+            {
+                reference.Value = new CORDB_ADDRESS(0);
+                return;
+            }
+            if (value.Type == CorElementType.ValueType)
+            {
+                foreach (var (_, field) in _values.EnumerateFields(value))
+                    if (field != null)
+                        ClearValue(field);
+                return;
+            }
+            ValueInspector.WriteBytes(value, new byte[value.Size]);
         }
     }
 }

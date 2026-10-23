@@ -112,6 +112,12 @@ public sealed partial class DebugEngine
                         Call(new RemoteOperand(thisGetter), null, "set_" + name, [value], isPropertyAccess: false);
                         return Eval(left);
                     }
+                    foreach (TypeOperand type in EnclosingTypes().Concat(ImportedTypes()))
+                        if (type.Metadata.GetProperties(type.Token).Any(p => p.Name == name && p.IsStatic && p.SetterToken != 0))
+                        {
+                            Call(null, type, "set_" + name, [value], isPropertyAccess: false);
+                            return Eval(left);
+                        }
                     break;
                 }
                 case MemberAccessExpressionSyntax member when member.Name is IdentifierNameSyntax:
@@ -255,6 +261,13 @@ public sealed partial class DebugEngine
         /// <summary>Resolves "List&lt;int&gt;", "System.Collections.Generic.Dictionary&lt;string, int&gt;" and friends.</summary>
         private TypeOperand? ResolveGenericType(TypeSyntax syntax)
         {
+            if (syntax is QualifiedNameSyntax { Left: GenericNameSyntax or QualifiedNameSyntax, Right: GenericNameSyntax nested }
+                && ResolveGenericType(((QualifiedNameSyntax)syntax).Left) is { } owner)
+            {
+                TypeOperand nestedType = ResolveQualifiedType(owner.Metadata.GetTypeName(owner.Token) + "." + nested.Identifier.ValueText
+                    + "`" + nested.TypeArgumentList.Arguments.Count) ?? throw new DebuggerException($"The type or namespace name '{syntax}' couldn't be found");
+                return nestedType with { TypeArguments = (owner.TypeArguments ?? []).Concat(nested.TypeArgumentList.Arguments.Select(ResolveType)).ToList() };
+            }
             (string prefix, GenericNameSyntax? generic) = syntax switch
             {
                 GenericNameSyntax g => ("", g),
@@ -298,6 +311,8 @@ public sealed partial class DebugEngine
 
         private Operand New(ObjectCreationExpressionSyntax node)
         {
+            if (node.Initializer != null)
+                throw new DebuggerException("Object/collection initializers are not implemented");
             if (!allowCalls)
                 throw new DebuggerException(SideEffectsNotAllowed);
             TypeOperand type = ResolveType(node.Type);
@@ -351,7 +366,7 @@ public sealed partial class DebugEngine
                     .OrderByDescending(c => c.Score)
                     .Select(c => c.Method)
                     .FirstOrDefault()
-                    ?? throw new DebuggerException($"'{type.Metadata.GetTypeName(type.Token)}' has no constructor taking {arguments.Count} argument(s) of these types.");
+                    ?? throw new DebuggerException($"'{type.Metadata.GetTypeName(type.Token)}' has no accessible constructor taking {arguments.Count} arguments");
 
                 ICorDebugValue[] values = MaterializeArguments(constructor, arguments).Select(v => v.Raw).ToArray();
                 CorDebugFunction function = type.Module.Module.GetFunctionFromToken(new mdMethodDef(constructor.Token));

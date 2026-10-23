@@ -9,6 +9,7 @@ namespace DncDbg.Engine.Symbols;
 internal sealed record MethodDescription(int Token, string Name, bool IsStatic, string[] ParameterTypes, int GenericParameterCount)
 {
     public string ReturnType { get; init; } = "";
+    public IReadOnlySet<int> ExactParameters { get; init; } = new HashSet<int>();
 }
 
 internal sealed record PropertyDescription(string Name, int GetterToken, int SetterToken, bool IsStatic, bool IsIndexer);
@@ -388,6 +389,19 @@ internal sealed partial class ModuleMetadata
                 awaits.Add((yieldOffset, resumeOffset));
             }
             return awaits.Count == 0 ? null : new AsyncSteppingInfo(awaits);
+        }
+        return null;
+    }
+
+    public int? GetAsyncBody(int kickoffToken)
+    {
+        if (_pdb == null)
+            return null;
+        foreach (MethodDebugInformationHandle handle in _pdb.MethodDebugInformation)
+        {
+            MethodDefinitionHandle kickoff = _pdb.GetMethodDebugInformation(handle).GetStateMachineKickoffMethod();
+            if (!kickoff.IsNil && MetadataTokens.GetToken(kickoff) == kickoffToken)
+                return MetadataTokens.GetToken(handle.ToDefinitionHandle());
         }
         return null;
     }

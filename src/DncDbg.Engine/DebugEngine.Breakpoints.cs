@@ -1,4 +1,5 @@
 using ClrDebug;
+using DncDbg.Engine.Symbols;
 using DncDbg.Engine.Values;
 
 namespace DncDbg.Engine;
@@ -280,6 +281,19 @@ public sealed partial class DebugEngine
         CorDebugFunction function = hit.Function;
         var location = new CodeLocation(KeyOf(function.Module), function.Token.Value, hit.Offset);
 
+        if (_initializationSites.TryGetValue(location, out int initializedType))
+        {
+            _completedInitializers.Add((location.Module, initializedType));
+            if (!AllBreakpoints.Any(b => b.Bound.Contains(location)))
+                return EventAction.Continue;
+        }
+        if (_asyncEntry == location)
+        {
+            ReleaseNativeBreakpoint(location);
+            _asyncEntry = null;
+            Post(() => Stopped?.Invoke(new StopInfo("step", threadId)));
+            return EventAction.Stop;
+        }
         if (OnAsyncStepBreakpoint(thread, location) is { } asyncAction)
             return asyncAction;
         if (OnStepInTargetBreakpoint(location))
@@ -299,6 +313,9 @@ public sealed partial class DebugEngine
         }
 
         List<UserBreakpoint> matches = AllBreakpoints.Where(b => b.Bound.Contains(location)).ToList();
+        if (_activeStepper != null && !_activeStepper.IsActive && _requestedStepKind == StepKind.In
+            && GetMetadata(function.Module)?.FirstVisibleOffset((int)function.Token.Value) == hit.Offset)
+            return EventAction.Continue;
         if (matches.Count == 0)
         {
             if (!isEntry)
@@ -319,7 +336,11 @@ public sealed partial class DebugEngine
         List<UserBreakpoint> stopping = matches.Where(b => PassesHitCondition(b, ++b.HitCount)).ToList();
         if (stopping.Count == 0)
             return EventAction.Continue;
-        StopInfo stop = BreakpointStop(threadId, stopping);
+        ModuleMetadata? metadata = GetMetadata(function.Module);
+        bool steppedIntoBreakpoint = _activeStepper != null && _requestedStepKind == StepKind.In
+            && metadata?.FirstVisibleOffset((int)function.Token.Value) == hit.Offset
+            && !(_stepFiltering && metadata?.IsPropertyOrOperator((int)function.Token.Value) == true);
+        StopInfo stop = steppedIntoBreakpoint ? new StopInfo("step", threadId) : BreakpointStop(threadId, stopping);
         Post(() => Stopped?.Invoke(stop));
         return EventAction.Stop;
     }
@@ -330,6 +351,8 @@ public sealed partial class DebugEngine
 
     private void ResolveConditionalBreakpoints(int threadId, List<UserBreakpoint> matches)
     {
+        try { _callbacksQuiet.Wait(_lifetime.Token); }
+        catch (OperationCanceledException) { return; }
         var events = new List<Action>();
         lock (_lock)
         {
@@ -380,6 +403,8 @@ public sealed partial class DebugEngine
                 {
                     DeactivateStepper();
                     ClearAsyncStep();
+                    ClearReturnSites();
+                    ClearStepInTarget();
                     StopInfo stop = stopping.Count > 0 ? BreakpointStop(threadId, stopping) : new StopInfo("pause", threadId);
                     events.Add(() => Stopped?.Invoke(stop));
                 }
@@ -460,13 +485,22 @@ public sealed partial class DebugEngine
                     break;
                 }
                 string expression = template[(i + 1)..close];
+                if (!quoteStrings && expression.Contains('{'))
+                {
+                    sb.Append(template, i, close - i + 1);
+                    i = close;
+                    continue;
+                }
                 try
                 {
                     sb.Append(evaluator.EvaluateToText(expression, quoteStrings));
                 }
                 catch (DebuggerException e)
                 {
-                    sb.Append("<error: ").Append(e.Message).Append('>');
+                    if (quoteStrings)
+                        sb.Append("<error: ").Append(e.Message).Append('>');
+                    else
+                        sb.Append("{error: ").Append(e.Message.TrimEnd('.')).Append('}');
                 }
                 i = close;
             }

@@ -2,6 +2,25 @@ using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 
+if (args is ["--fixture", "sleep"])
+{
+    Thread.Sleep(TimeSpan.FromSeconds(60));
+    return;
+}
+if (args is ["--fixture", "heartbeat"])
+{
+    while (true)
+    {
+        Console.WriteLine("heartbeat");
+        Thread.Sleep(50);
+    }
+}
+if (args is ["--safety", var debugger])
+{
+    Console.WriteLine($"Passed {await SafetyChecks.Run(Path.GetFullPath(debugger), typeof(Program).Assembly.Location)} safety checks.");
+    return;
+}
+
 if (args.Length != 1)
     throw new ArgumentException("Supply the path to the dncdbg apphost.");
 string executable = Path.GetFullPath(args[0]);
@@ -44,6 +63,7 @@ Check(!engineText.Contains("\"command\":\"initialize\""), "engine and protocol l
 await CheckProtocol(["--log=", "--logProtocol=", "--loglevel=ERROR"]);
 await CheckProtocol(["--logProtocol=" + Path.Combine(logDirectory, "missing", "protocol.log")]);
 await CheckProtocol([], deferStart: true);
+passed += await SafetyChecks.Run(executable, typeof(Program).Assembly.Location);
 Console.WriteLine($"Passed {passed} CLI/protocol smoke checks.");
 return;
 

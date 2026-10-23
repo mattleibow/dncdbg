@@ -37,6 +37,19 @@ dotnet run --project tests/DncDbg.SmokeTests -- bin/dncdbg
 These checks do not modify the existing Runner, ScriptContext, fixtures, or
 assertions. Their diagnostic logs are written under `build/validation/cli-smoke`.
 
+The smoke runner also exercises startup/unregistration barriers, rejection of
+late startup callbacks, cancellation of a delayed external launcher, a 1 MiB
+stdin write to a non-reading target followed by disconnect, detached-child
+survival beyond disposal timeouts, and pause during function evaluation followed
+by a heartbeat after exactly one continue. Run these safety checks alone with:
+
+```sh
+dotnet run --project tests/DncDbg.SmokeTests -- --safety bin/dncdbg
+```
+
+The self-hosted safety fixtures are separate from the unchanged acceptance
+suite. A surviving detached fixture is explicitly cleaned up by the smoke runner.
+
 # How to add a new test
 
 - move to the test-suite directory;

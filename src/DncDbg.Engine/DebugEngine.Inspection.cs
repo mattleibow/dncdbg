@@ -212,6 +212,10 @@ public sealed partial class DebugEngine
         int token = (int)function.Token.Value;
         ModuleMetadata? metadata = GetMetadata(function.Module);
         SourceLocation? location = metadata?.GetSourceLocation(token, frame.IP.pnOffset, out _);
+        if (_asyncReturnStop is { } asyncStop && asyncStop.Thread == frameRef.ThreadId
+            && asyncStop.Code.Module == KeyOf(function.Module) && asyncStop.Code.Token == function.Token.Value
+            && asyncStop.Code.Offset == frame.IP.pnOffset)
+            location = asyncStop.Source;
 
         if (_justMyCode && (location == null || !IsUserCode(function)))
         {
@@ -345,7 +349,7 @@ public sealed partial class DebugEngine
 
             StartImplicitEvalBudget();
             _requestOptions = hex ? new DisplayOptions(Hex: true) : null;
-            _explicitExpansion = container.IsLazy;
+            _explicitExpansion = true;
             try
             {
                 List<VariableInfo> children;
@@ -373,6 +377,8 @@ public sealed partial class DebugEngine
         try
         {
             int count = GetLocalRefs(frame).Count;
+            if (GetILFrame(frame) is { } il && GetMetadata(il.Function.Module) is { } metadata)
+                count += metadata.GetLocalConstants((int)il.Function.Token.Value, il.IP.pnOffset).Count;
             if (_returnValues.Count > 0 && frame == TopFrame(frame.ThreadId))
                 count += _returnValues.Count(r => r.ThreadId == frame.ThreadId);
             Func<CorDebugValue?> exception = () => RequireThread(frame.ThreadId).CurrentException;
@@ -418,6 +424,11 @@ public sealed partial class DebugEngine
         }
 
         result.AddRange(GetLocalRefs(frame).Select(l => _values.Describe(l.Name, l.Getter, l.Name, context, options)));
+        if (GetILFrame(frame) is { } il && GetMetadata(il.Function.Module) is { } metadata)
+            foreach (var constant in metadata.GetLocalConstants((int)il.Function.Token.Value, il.IP.pnOffset))
+                if (result.All(v => v.Name != constant.Name))
+                    result.Add(_values.DescribeHost(constant.Name, constant.Value, options: options)
+                        with { Type = ModuleMetadata.DisplayType(constant.Type), EvaluateName = constant.Name });
         return result;
     }
 
@@ -475,7 +486,7 @@ public sealed partial class DebugEngine
             {
                 // State machines and closures: show what the user wrote instead of the generated object.
                 if (compilerGeneratedType)
-                    AddHoistedVariables(hoisted, getter, 0);
+                    AddHoistedVariables(hoisted, getter, 0, frameRef);
                 else
                     plain.Add(("this", getter));
                 continue;
@@ -490,7 +501,7 @@ public sealed partial class DebugEngine
             {
                 Func<CorDebugValue?> getter = () => GetILFrame(frameRef)?.GetLocalVariable(index);
                 if (name.StartsWith("CS$<>8__locals", StringComparison.Ordinal))
-                    AddHoistedVariables(hoisted, getter, 0);
+                    AddHoistedVariables(hoisted, getter, 0, frameRef);
                 else if (!name.StartsWith('<') && !name.StartsWith("CS$", StringComparison.Ordinal))
                     plain.Add((name, getter));
             }
@@ -506,12 +517,29 @@ public sealed partial class DebugEngine
             hoisted.RemoveAt(thisIndex);
         }
         plain.AddRange(hoisted);
+        if (plain.FirstOrDefault(v => v.Name == "this") is { Getter: { } selfGetter }
+            && selfGetter() is { } self && ValueInspector.Unwrap(self, out _) is { } owner)
+        {
+            foreach (ValueInspector.TypeLevel level in _values.GetTypeLevels(owner))
+                foreach (FieldDescription field in level.Metadata.GetFields(level.Token))
+                {
+                    if (!field.Name.StartsWith('<') || !field.Name.EndsWith(">P", StringComparison.Ordinal))
+                        continue;
+                    string name = field.Name[1..^2];
+                    if (plain.Any(v => v.Name == name))
+                        continue;
+                    CorDebugClass cls = level.Type.Class;
+                    int fieldToken = field.Token;
+                    plain.Add((name, () => selfGetter() is { } value && ValueInspector.Unwrap(value, out _) is { } current
+                        ? current.As<CorDebugObjectValue>().GetFieldValue(cls.Raw, new mdFieldDef(fieldToken)) : null));
+                }
+        }
         return plain;
     }
 
     // Fields of compiler generated classes:  <>4__this -> this,  <x>5__1 -> x,  x -> x (captured),
     // <>8__1 -> nested closure to flatten, everything else (<>1__state, <>t__builder, ...) is noise.
-    private void AddHoistedVariables(List<(string Name, Func<CorDebugValue?> Getter)> result, Func<CorDebugValue?> containerGetter, int depth)
+    private void AddHoistedVariables(List<(string Name, Func<CorDebugValue?> Getter)> result, Func<CorDebugValue?> containerGetter, int depth, FrameRef? frameRef = null)
     {
         CorDebugValue? container;
         try
@@ -548,13 +576,19 @@ public sealed partial class DebugEngine
                 else if (fieldName.StartsWith("<>8__", StringComparison.Ordinal) || fieldName.StartsWith("CS$<>8__locals", StringComparison.Ordinal))
                 {
                     if (depth < 4)
-                        AddHoistedVariables(result, getter, depth + 1);
+                        AddHoistedVariables(result, getter, depth + 1, frameRef);
                 }
                 else if (fieldName.StartsWith('<'))
                 {
                     int close = fieldName.IndexOf('>');
                     if (close > 1 && fieldName.AsSpan(close + 1).StartsWith("5__"))
+                    {
+                        if (frameRef != null && int.TryParse(fieldName.AsSpan(close + 4), out int slot)
+                            && GetILFrame(frameRef) is { } il && GetMetadata(il.Function.Module)?.IsHoistedLocalInScope(
+                                (int)il.Function.Token.Value, il.IP.pnOffset, slot - 1) == false)
+                            continue;
                         result.Add((fieldName[1..close], getter));
+                    }
                 }
                 else
                 {
@@ -588,9 +622,7 @@ public sealed partial class DebugEngine
         {
             RequireStopped();
             StartImplicitEvalBudget();
-            if (frameId == null)
-                throw new DebuggerException("Expressions can only be evaluated in the context of a stack frame.");
-            FrameRef frame = ResolveFrame(frameId.Value);
+            FrameRef frame = frameId is > 0 ? ResolveFrame(frameId.Value) : TopFrame(_lastStoppedThreadId);
             var evaluator = new Evaluator(this, frame, allowCalls);
             return WithHandle(evaluator.EvaluateToVariable(expression, new DisplayOptions(Hex: hex, FullStrings: fullStrings)));
         }
@@ -604,7 +636,9 @@ public sealed partial class DebugEngine
             if (!_variableHandles.TryGetValue(containerHandle, out VariableContainer? container))
                 throw new DebuggerException($"Unknown variables reference {containerHandle}.");
 
-            VariableInfo variable = (container.LastChildren ?? container.Provider(0, 0)).FirstOrDefault(v => v.Name == name)
+            List<VariableInfo> children = container.LastChildren ?? container.Provider(0, 0);
+            VariableInfo variable = children.FirstOrDefault(v => v.Name == name)
+                ?? children.FirstOrDefault(v => v.Name == "Static members")?.ChildrenProvider?.Invoke(0, 0).FirstOrDefault(v => v.Name == name)
                 ?? throw new DebuggerException($"Variable '{name}' not found.");
             FrameRef frame = container.Context?.Frame ?? throw new DebuggerException("No frame to evaluate the new value in.");
             StartImplicitEvalBudget();
@@ -613,7 +647,7 @@ public sealed partial class DebugEngine
 
             if (variable.Location != null)
             {
-                evaluator.Assign(variable.Location, expression);
+                evaluator.Assign(variable.Location, expression, variable.Name);
                 return WithHandle(_values.Describe(name, variable.Location, variable.EvaluateName, container.Context));
             }
 

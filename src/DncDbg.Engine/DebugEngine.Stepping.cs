@@ -31,10 +31,16 @@ public sealed partial class DebugEngine
 
     private CorDebugStepper? _activeStepper;
     private StepKind _activeStepKind;
+    private StepKind _requestedStepKind;
     private bool _stepFiltering = true;
     private bool _leavingFilteredMethod;
     private string? _stepOriginMethod;
+    private SourceLocation? _stepOriginLocation;
+    private int _stepOriginOffset;
     private AsyncStep? _asyncStep;
+    private (int Thread, CodeLocation Code, SourceLocation Source)? _asyncReturnStop;
+    private CodeLocation? _asyncEntry;
+    private bool _steppingThrough;
 
     /// <param name="targetId">For a step in: which call of the current statement to enter (see <see cref="GetStepInTargets"/>).</param>
     public void Step(int threadId, StepKind kind, int? targetId = null, bool singleThread = false)
@@ -43,11 +49,16 @@ public sealed partial class DebugEngine
         {
             CorDebugProcess process = RequireStopped();
             CorDebugThread thread = RequireThread(threadId);
+            _requestedStepKind = kind;
             SetExecutionThread(process, threadId, singleThread);
             ClearAsyncStep();
             ClearStepInTarget();
             _leavingFilteredMethod = false;
+            _steppingThrough = false;
             _stepOriginMethod = GetMethodName(thread.ActiveFrame);
+            _stepOriginLocation = thread.ActiveFrame is CorDebugILFrame origin
+                ? GetMetadata(origin.Function.Module)?.GetSourceLocation((int)origin.Function.Token.Value, origin.IP.pnOffset, out _) : null;
+            _stepOriginOffset = thread.ActiveFrame is CorDebugILFrame originFrame ? originFrame.IP.pnOffset : -1;
             ClearReturnSites();
             if (targetId != null && kind == StepKind.In)
                 kind = ArmStepInTarget(thread, targetId.Value);
@@ -75,7 +86,7 @@ public sealed partial class DebugEngine
         CorDebugFrame? frame = thread.ActiveFrame;
         CorDebugStepper stepper = frame != null ? frame.CreateStepper() : thread.CreateStepper();
         stepper.SetUnmappedStopMask(CorDebugUnmappedStop.STOP_NONE);
-        stepper.SetJMC(_justMyCode);
+        stepper.SetJMC(true);
 
         (int Start, int End)? range = null;
         if (kind != StepKind.Out && frame is CorDebugILFrame ilFrame)
@@ -122,6 +133,8 @@ public sealed partial class DebugEngine
 
     private EventAction OnStepComplete(StepCompleteCorDebugManagedCallbackEventArgs e)
     {
+        if (_activeStepper == null || !_activeStepper.Equals(e.Stepper))
+            return EventAction.Continue;
         _activeStepper = null;
         CorDebugThread thread = e.Thread;
         int threadId = thread.Id;
@@ -130,6 +143,46 @@ public sealed partial class DebugEngine
         {
             CorDebugFunction function = frame.Function;
             ModuleMetadata? metadata = GetMetadata(function.Module);
+            if (_requestedStepKind != StepKind.Out
+                && (e.Reason == CorDebugStepReason.STEP_RETURN || frame.IP.pnOffset > _stepOriginOffset)
+                && _stepOriginLocation is { } originLocation && GetMethodName(frame) == _stepOriginMethod
+                && metadata?.GetSourceLocation((int)function.Token.Value, frame.IP.pnOffset, out _) == originLocation)
+            {
+                _leavingFilteredMethod = false;
+                _steppingThrough = false;
+                StartStep(thread, _requestedStepKind);
+                return EventAction.Continue;
+            }
+            if (_steppingThrough && e.Reason == CorDebugStepReason.STEP_RETURN
+                && metadata?.IsStepThroughMethod((int)function.Token.Value) == false
+                && metadata.GetSourceLocation((int)function.Token.Value, frame.IP.pnOffset, out _) != null)
+            {
+                _steppingThrough = false;
+                StartStep(thread, StepKind.In);
+                return EventAction.Continue;
+            }
+            if (metadata?.IsStepThroughMethod((int)function.Token.Value) == true)
+            {
+                bool stepIn = _activeStepKind == StepKind.In;
+                if (stepIn && !metadata.IsHiddenMethod((int)function.Token.Value))
+                {
+                    _steppingThrough = true;
+                    StartStep(thread, StepKind.In, wholeMethod: true);
+                    return EventAction.Continue;
+                }
+                StartStep(thread, StepKind.Out);
+                _leavingFilteredMethod = stepIn;
+                return EventAction.Continue;
+            }
+            if (_activeStepKind == StepKind.In && e.Reason == CorDebugStepReason.STEP_CALL
+                && metadata?.GetAsyncBody((int)function.Token.Value) is { } body
+                && metadata.FirstVisibleOffset(body) is { } first && (!_justMyCode || IsUserCode(function))
+                && _modules.TryGetValue(function.Module, out LoadedModule? module))
+            {
+                DeactivateStepper();
+                _asyncEntry = AcquireNativeBreakpoint(module, body, first);
+                return EventAction.Continue;
+            }
             Log?.Invoke($"Step complete ({e.Reason}) in {GetMethodName(frame)} at IL offset {frame.IP.pnOffset} ({frame.IP.pMappingResult})");
 
             bool hidden = false;
@@ -192,7 +245,7 @@ public sealed partial class DebugEngine
                 try
                 {
                     bool steppedIn = !hidden && _activeStepKind == StepKind.In && e.Reason == CorDebugStepReason.STEP_CALL;
-                    if (steppedIn && _justMyCode)
+                    if (steppedIn && metadata?.HasSymbols == true)
                     {
                         StartStep(thread, StepKind.In, wholeMethod: true);
                         return EventAction.Continue;
@@ -405,6 +458,11 @@ public sealed partial class DebugEngine
 
     private void ClearAsyncStep()
     {
+        if (_asyncEntry is { } entry)
+        {
+            ReleaseNativeBreakpoint(entry);
+            _asyncEntry = null;
+        }
         if (_asyncStep == null)
             return;
         foreach (CodeLocation location in _asyncStep.YieldToResumeOffset.Keys)
@@ -438,8 +496,16 @@ public sealed partial class DebugEngine
 
             // The method continues (possibly on another thread): finish the step from here to the next line. The
             // stepper of the method that has just ended may still be waiting for a return that is of no interest now.
+            bool returningToCaller = location.Module != step.Module.Key || location.Token != (uint)step.MethodToken;
             DeactivateStepper();
             ClearAsyncStep();
+            if ((_requestedStepKind == StepKind.Out || returningToCaller) && thread.ActiveFrame is CorDebugILFrame frame
+                && GetMetadata(frame.Function.Module)?.GetNearestSourceLocation((int)frame.Function.Token.Value, frame.IP.pnOffset) is { } source)
+            {
+                _asyncReturnStop = (thread.Id, location, source);
+                Post(() => Stopped?.Invoke(new StopInfo("step", thread.Id)));
+                return EventAction.Stop;
+            }
             StartStep(thread, StepKind.Over);
             return EventAction.Continue;
         }

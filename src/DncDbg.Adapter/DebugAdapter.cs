@@ -36,6 +36,9 @@ internal sealed class DebugAdapter : IDisposable
     private readonly BlockingCollection<DapMessage> _queue = [];
     private readonly HashSet<int> _cancelled = [];
     private int _runningRequest;
+    private System.Threading.Thread? _worker;
+    private volatile bool _stopping;
+    private bool _disposed;
 
     public DebugAdapter(DapConnection connection, Action<string> log)
     {
@@ -47,7 +50,12 @@ internal sealed class DebugAdapter : IDisposable
     private DebugEngine CreateEngine()
     {
         var engine = new DebugEngine { Log = _log };
-        engine.Stopped += stop => _connection.SendEvent("stopped", new StoppedEventBody
+        void SendCurrent(string name, object body)
+        {
+            if (!_disposed && ReferenceEquals(engine, _engine))
+                _connection.SendEvent(name, body);
+        }
+        engine.Stopped += stop => SendCurrent("stopped", new StoppedEventBody
         {
             Reason = stop.Reason,
             Description = stop.Description,
@@ -55,14 +63,14 @@ internal sealed class DebugAdapter : IDisposable
             ThreadId = stop.ThreadId,
             HitBreakpointIds = stop.BreakpointIds,
         });
-        engine.Continued += threadId => _connection.SendEvent("continued", new ContinuedEventBody { ThreadId = threadId });
-        engine.Output += (category, text) => _connection.SendEvent("output", new OutputEventBody { Category = category, Output = text });
+        engine.Continued += threadId => SendCurrent("continued", new ContinuedEventBody { ThreadId = threadId });
+        engine.Output += (category, text) => SendCurrent("output", new OutputEventBody { Category = category, Output = text });
         engine.ThreadChanged += (id, started) =>
-            _connection.SendEvent("thread", new ThreadEventBody { Reason = started ? "started" : "exited", ThreadId = id });
-        engine.ModuleLoaded += module => _connection.SendEvent("module", new ModuleEventBody { Module = ToModule(module) });
-        engine.ModuleChanged += module => _connection.SendEvent("module", new ModuleEventBody { Reason = "changed", Module = ToModule(module) });
-        engine.ModuleUnloaded += module => _connection.SendEvent("module", new ModuleEventBody { Reason = "removed", Module = ToModule(module) });
-        engine.BreakpointChanged += bp => _connection.SendEvent("breakpoint", new BreakpointEventBody { Breakpoint = ToBreakpoint(bp) });
+            SendCurrent("thread", new ThreadEventBody { Reason = started ? "started" : "exited", ThreadId = id });
+        engine.ModuleLoaded += module => SendCurrent("module", new ModuleEventBody { Module = ToModule(module) });
+        engine.ModuleChanged += module => SendCurrent("module", new ModuleEventBody { Reason = "changed", Module = ToModule(module) });
+        engine.ModuleUnloaded += module => SendCurrent("module", new ModuleEventBody { Reason = "removed", Module = ToModule(module) });
+        engine.BreakpointChanged += bp => SendCurrent("breakpoint", new BreakpointEventBody { Breakpoint = ToBreakpoint(bp) });
         engine.Exited += exitCode =>
         {
             // the process of an engine that was replaced by a restart is none of the client's business anymore
@@ -76,9 +84,10 @@ internal sealed class DebugAdapter : IDisposable
 
     public void Run()
     {
-        var worker = new System.Threading.Thread(ProcessQueue) { IsBackground = true, Name = "DAP requests" };
-        worker.Start();
-
+        _worker = new System.Threading.Thread(ProcessQueue) { IsBackground = true, Name = "DAP requests" };
+        _worker.Start();
+        try
+        {
         while (_connection.Read() is { } message)
         {
             if (message.Type == "response")
@@ -101,9 +110,8 @@ internal sealed class DebugAdapter : IDisposable
 
                 case "disconnect":
                     // whatever is running must not delay the end of the session
-                    _engine.CancelCurrentRequest(sessionEnds: true);
+                    StopWorker();
                     Handle(message);
-                    _queue.CompleteAdding();
                     return;
 
                 // Launching may have to wait for the client (runInTerminal) and may take long (build); breakpoints
@@ -113,13 +121,16 @@ internal sealed class DebugAdapter : IDisposable
                     break;
             }
         }
-        _queue.CompleteAdding();
+        }
+        finally { StopWorker(); }
     }
 
     private void ProcessQueue()
     {
         foreach (DapMessage message in _queue.GetConsumingEnumerable())
         {
+            if (_stopping)
+                continue;
             bool cancelled;
             lock (_cancelled)
             {
@@ -163,6 +174,8 @@ internal sealed class DebugAdapter : IDisposable
             object? body = Dispatch(message);
             Action? afterResponse = _afterResponse;
             _afterResponse = null;
+            if (_stopping && message.Command != "disconnect")
+                return;
             if (!_configurationDone && message.Command is "launch" or "attach")
             {
                 _pendingStartResponse = (message, body, afterResponse);
@@ -173,10 +186,13 @@ internal sealed class DebugAdapter : IDisposable
         }
         catch (OperationCanceledException)
         {
-            _connection.SendErrorResponse(message, "cancelled");
+            if (!_stopping)
+                _connection.SendErrorResponse(message, "cancelled");
         }
         catch (Exception e)
         {
+            if (_stopping)
+                return;
             if (e is not DebuggerException)
                 _log($"Request '{message.Command}' failed: {e}");
             // requests racing with the end of the process (or a restart) are normal; raw HRESULTs help nobody
@@ -187,6 +203,7 @@ internal sealed class DebugAdapter : IDisposable
                 && diagnostic is not ("Expression has malformed or incomplete syntax." or "Failed to parse character.")
                 && !diagnostic.StartsWith("Evaluation timed out.", StringComparison.Ordinal)
                 && diagnostic != "Implicit function evaluation is turned off by the user."
+                && !diagnostic.StartsWith("Object/collection initializers are not implemented", StringComparison.Ordinal)
                 && !diagnostic.StartsWith("error ", StringComparison.Ordinal))
                 diagnostic = "error: " + diagnostic;
             _connection.SendErrorResponse(message, diagnostic);
@@ -671,6 +688,21 @@ internal sealed class DebugAdapter : IDisposable
         void Note(string text) => _connection.SendEvent("output", new OutputEventBody { Category = "console", Output = text });
         ResolvedLaunch launch = LaunchResolver.Resolve(args, Note);
         launch = launch with { Program = DncDbg.Engine.Launch.MacCodeSigning.ResolveDebuggableProgram(launch.Program, Note) };
+        launch = launch with
+        {
+            Args = launch.Args.Where(argument =>
+            {
+                if (argument.Length == 0)
+                    return false;
+                // Preserve the native adapter's documented Unix dbgshim command-line restriction.
+                if (!OperatingSystem.IsWindows() && argument.EndsWith('\\') && argument.Contains(' '))
+                {
+                    _log("Arguments with spaces and a trailing backslash are not supported by dbgshim: " + argument);
+                    return false;
+                }
+                return true;
+            }).ToArray(),
+        };
 
         string? terminalKind = args.Console switch
         {
@@ -702,7 +734,7 @@ internal sealed class DebugAdapter : IDisposable
                 SearchMicrosoftSymbolServer = args.SymbolOptions.SearchMicrosoftSymbolServer,
                 SearchNuGetOrgSymbolServer = args.SymbolOptions.SearchNuGetOrgSymbolServer,
             },
-            ExternalLauncher = terminalKind == null ? null : () => TerminalLauncher.Launch(_connection, launch, terminalKind),
+            ExternalLauncher = terminalKind == null ? null : token => TerminalLauncher.Launch(_connection, launch, terminalKind, token),
         });
         SendProcessEvent(Path.GetFileName(launch.Program), "launch");
     }
@@ -733,12 +765,17 @@ internal sealed class DebugAdapter : IDisposable
         SymbolFilePath = module.SymbolFilePath,
     };
 
-    private void SendProcessEvent(string name, string startMethod) => _connection.SendEvent("process", new ProcessEventBody
+    private void SendProcessEvent(string name, string startMethod)
     {
-        Name = name,
-        SystemProcessId = _engine.ProcessId,
-        StartMethod = startMethod,
-    });
+        if (_stopping)
+            return;
+        _connection.SendEvent("process", new ProcessEventBody
+        {
+            Name = name,
+            SystemProcessId = _engine.ProcessId,
+            StartMethod = startMethod,
+        });
+    }
 
     private static ExceptionDetails ToExceptionDetails(ExceptionData data) => new()
     {
@@ -801,5 +838,20 @@ internal sealed class DebugAdapter : IDisposable
         };
     }
 
-    public void Dispose() => _engine.Dispose();
+    private void StopWorker()
+    {
+        _stopping = true;
+        _engine.CancelCurrentRequest(sessionEnds: true);
+        _connection.CancelPendingRequests();
+        if (!_queue.IsAddingCompleted)
+            _queue.CompleteAdding();
+        _worker?.Join();
+    }
+
+    public void Dispose()
+    {
+        StopWorker();
+        _engine.Dispose();
+        _disposed = true;
+    }
 }

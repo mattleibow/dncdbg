@@ -21,6 +21,30 @@ internal sealed partial class ModuleMetadata
         return FindAttribute(method.GetCustomAttributes(), "System.Diagnostics.DebuggerHiddenAttribute") != null
             || FindAttribute(_md.GetTypeDefinition(method.GetDeclaringType()).GetCustomAttributes(), "System.Diagnostics.DebuggerHiddenAttribute") != null;
     }
+
+    public bool IsStepThroughMethod(int methodToken)
+    {
+        MethodDefinition method = _md.GetMethodDefinition((MethodDefinitionHandle)MetadataTokens.Handle(methodToken));
+        string[] attributes = ["System.Diagnostics.DebuggerHiddenAttribute", "System.Diagnostics.DebuggerStepThroughAttribute"];
+        return FindAttribute(method.GetCustomAttributes(), attributes) != null
+            || FindAttribute(_md.GetTypeDefinition(method.GetDeclaringType()).GetCustomAttributes(), attributes) != null;
+    }
+
+    public bool IsThreadStaticField(int fieldToken) => FindAttribute(
+        _md.GetFieldDefinition((FieldDefinitionHandle)MetadataTokens.Handle(fieldToken)).GetCustomAttributes(), "System.ThreadStaticAttribute") != null;
+
+    public bool PropagateAsyncAttribute(int methodToken, bool includeNonUserCode)
+    {
+        // Roslyn adds DebuggerStepThrough to async stubs; it alone must not hide their MoveNext bodies.
+        MethodDefinition method = _md.GetMethodDefinition((MethodDefinitionHandle)MetadataTokens.Handle(methodToken));
+        string[] direct = includeNonUserCode
+            ? ["System.Diagnostics.DebuggerHiddenAttribute", "System.Diagnostics.DebuggerNonUserCodeAttribute"]
+            : ["System.Diagnostics.DebuggerHiddenAttribute"];
+        string[] typeAttributes = includeNonUserCode ? s_nonUserCodeAttributes
+            : ["System.Diagnostics.DebuggerHiddenAttribute", "System.Diagnostics.DebuggerStepThroughAttribute"];
+        return FindAttribute(method.GetCustomAttributes(), direct) != null
+            || FindAttribute(_md.GetTypeDefinition(method.GetDeclaringType()).GetCustomAttributes(), typeAttributes) != null;
+    }
     private const string DebuggerDisplayAttribute = "System.Diagnostics.DebuggerDisplayAttribute";
     private const string DebuggerBrowsableAttribute = "System.Diagnostics.DebuggerBrowsableAttribute";
     private const string CompilerGeneratedAttribute = "System.Runtime.CompilerServices.CompilerGeneratedAttribute";
@@ -191,16 +215,18 @@ internal sealed partial class ModuleMetadata
     }
 
     /// <summary>Methods marked [DebuggerHidden], [DebuggerStepThrough] or [DebuggerNonUserCode] (directly or through their type).</summary>
-    public List<int> GetNonUserCodeMethods()
+    public List<int> GetNonUserCodeMethods(bool includeNonUserCode = true)
     {
         var result = new List<int>();
+        string[] attributes = includeNonUserCode ? s_nonUserCodeAttributes
+            : ["System.Diagnostics.DebuggerHiddenAttribute", "System.Diagnostics.DebuggerStepThroughAttribute"];
         foreach (TypeDefinitionHandle typeHandle in _md.TypeDefinitions)
         {
             TypeDefinition type = _md.GetTypeDefinition(typeHandle);
-            bool wholeType = FindAttribute(type.GetCustomAttributes(), s_nonUserCodeAttributes) != null;
+            bool wholeType = FindAttribute(type.GetCustomAttributes(), attributes) != null;
             foreach (MethodDefinitionHandle methodHandle in type.GetMethods())
             {
-                if (wholeType || FindAttribute(_md.GetMethodDefinition(methodHandle).GetCustomAttributes(), s_nonUserCodeAttributes) != null)
+                if (wholeType || FindAttribute(_md.GetMethodDefinition(methodHandle).GetCustomAttributes(), attributes) != null)
                     result.Add(MetadataTokens.GetToken(methodHandle));
             }
         }

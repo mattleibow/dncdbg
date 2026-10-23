@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Text;
 using ClrDebug;
@@ -107,6 +108,9 @@ public sealed partial class DebugEngine : IDisposable
     public int ProcessId => _processId;
     public bool NoDebug { get; private set; }
     public bool ShowRawValues { get; set; }
+    private ConsoleRelay? _consoleRelay;
+    private readonly SessionLifetime _lifetime = new();
+    private bool _relinquished;
 
     public DebugEngine()
     {
@@ -119,6 +123,7 @@ public sealed partial class DebugEngine : IDisposable
 
     public void Launch(LaunchOptions options)
     {
+        using var operation = _lifetime.Enter();
         lock (_lock)
         {
             NoDebug = options.NoDebug;
@@ -141,6 +146,7 @@ public sealed partial class DebugEngine : IDisposable
         IReadOnlyDictionary<string, string?>? environment = options.Environment;
         try
         {
+            _lifetime.Token.ThrowIfCancellationRequested();
             if (FrameworkRuntime.IsFrameworkProgram(options.Program))
             {
                 // the debugging library of .NET Framework has to create the process itself, in a terminal too
@@ -149,18 +155,20 @@ public sealed partial class DebugEngine : IDisposable
             }
             if (options.ExternalLauncher != null)
             {
-                external = options.ExternalLauncher();
+                external = options.ExternalLauncher(_lifetime.Token);
                 if (framework != null)
                     (external, hosted) = StartInTerminal(framework, options, environment, external);
             }
             else
             {
                 launched = ProcessLauncher.Launch(_dbgShim, options.Program, options.Args,
-                    options.WorkingDirectory ?? Path.GetDirectoryName(Path.GetFullPath(options.Program)), environment, framework);
+                    options.WorkingDirectory ?? Path.GetDirectoryName(Path.GetFullPath(options.Program)), environment, framework, options.NoDebug);
             }
+            _lifetime.Token.ThrowIfCancellationRequested();
         }
         catch (Exception)
         {
+            CleanupUnpublished(launched, external, hosted);
             try
             {
                 framework?.Terminate();
@@ -175,6 +183,11 @@ public sealed partial class DebugEngine : IDisposable
 
         lock (_lock)
         {
+            if (_shuttingDown)
+            {
+                CleanupUnpublished(launched, external, hosted);
+                throw new OperationCanceledException(_lifetime.Token);
+            }
             _justMyCode = options.JustMyCode;
             _stepFiltering = options.StepFiltering;
             _symbolLocator = new SymbolLocator(options.SymbolOptions ?? new SymbolOptions(), Log);
@@ -187,6 +200,12 @@ public sealed partial class DebugEngine : IDisposable
 
             if (launched != null)
             {
+                string? console = options.Environment?.GetValueOrDefault("DNCDBG_CONSOLE") ?? Environment.GetEnvironmentVariable("DNCDBG_CONSOLE");
+                if (console == "remoteConsole")
+                {
+                    string? port = options.Environment?.GetValueOrDefault("DNCDBG_REMOTECONSOLEPORT") ?? Environment.GetEnvironmentVariable("DNCDBG_REMOTECONSOLEPORT");
+                    _consoleRelay = new ConsoleRelay(int.TryParse(port, out int number) ? number : 4711, launched.StdIn, Log);
+                }
                 StartOutputPump(launched.StdOut, "stdout");
                 StartOutputPump(launched.StdErr, "stderr");
             }
@@ -217,6 +236,7 @@ public sealed partial class DebugEngine : IDisposable
 
     public void Attach(int processId, bool justMyCode = true, IReadOnlyDictionary<string, string>? sourceFileMap = null, bool stopAtEntry = false)
     {
+        using var operation = _lifetime.Enter();
         TaskCompletionSource<Exception?> outcome;
         lock (_lock)
         {
@@ -252,6 +272,7 @@ public sealed partial class DebugEngine : IDisposable
         var resumeDeadline = DateTime.UtcNow.AddSeconds(5);
         do
         {
+            _lifetime.Token.ThrowIfCancellationRequested();
             try
             {
                 new Microsoft.Diagnostics.NETCore.Client.DiagnosticsClient(processId).ResumeRuntime();
@@ -269,9 +290,18 @@ public sealed partial class DebugEngine : IDisposable
         } while (true);
 
         // The runtime is there (checked), so the callback is due at once. Whether the attach worked is only known then.
-        Exception? failure = outcome.Task.Wait(AttachTimeout)
-            ? outcome.Task.Result
-            : new DebuggerException("the runtime did not answer");
+        Exception? failure;
+        try { failure = outcome.Task.WaitAsync(AttachTimeout, _lifetime.Token).GetAwaiter().GetResult(); }
+        catch (TimeoutException) { failure = new DebuggerException("the runtime did not answer"); }
+        try
+        {
+            if (failure != null)
+                RuntimeRegistration.Release(_lock, ref _unregisterToken, token => _dbgShim!.UnregisterForRuntimeStartup(token));
+        }
+        catch (Exception e)
+        {
+            Log?.Invoke("UnregisterForRuntimeStartup failed: " + e.Message);
+        }
         lock (_lock)
         {
             _attachOutcome = null;
@@ -280,16 +310,6 @@ public sealed partial class DebugEngine : IDisposable
                 StartProcessWatcher();
                 return;
             }
-            try
-            {
-                if (_unregisterToken != IntPtr.Zero)
-                    _dbgShim.UnregisterForRuntimeStartup(_unregisterToken);
-            }
-            catch (Exception e)
-            {
-                Log?.Invoke("UnregisterForRuntimeStartup failed: " + e.Message);
-            }
-            _unregisterToken = IntPtr.Zero;
             _processId = 0;
             _isAttach = false;
             _resumed = false;
@@ -407,6 +427,12 @@ public sealed partial class DebugEngine : IDisposable
 
     private void OnRuntimeStartup(CorDebug? corDebug, IntPtr parameter, HRESULT hr)
     {
+        if (_shuttingDown || _lifetime.Token.IsCancellationRequested)
+            return;
+        IDisposable operation;
+        try { operation = _lifetime.Enter(); }
+        catch (OperationCanceledException) { return; }
+        using (operation)
         try
         {
             if (corDebug == null || hr != HRESULT.S_OK)
@@ -418,12 +444,19 @@ public sealed partial class DebugEngine : IDisposable
                 ConsoleCodePage.SwitchToUtf8(_processId, Log);
             lock (_lock)
             {
+                if (_shuttingDown)
+                    return;
                 _corDebug = corDebug;
                 corDebug.Initialize();
                 corDebug.SetManagedHandler(_callback);
                 _process = corDebug.DebugActiveProcess(_processId, false);
             }
             _attachOutcome?.TrySetResult(null);
+            _ = Task.Run(() =>
+            {
+                try { RuntimeRegistration.Release(_lock, ref _unregisterToken, token => _dbgShim?.UnregisterForRuntimeStartup(token)); }
+                catch (Exception e) { Log?.Invoke("Unregister after startup: " + e.Message); }
+            });
         }
         catch (Exception e)
         {
@@ -451,12 +484,17 @@ public sealed partial class DebugEngine : IDisposable
                 int n;
                 while ((n = stream.Read(buffer, 0, buffer.Length)) > 0)
                 {
+                    if (_consoleRelay != null)
+                    {
+                        _consoleRelay.Write(buffer.AsSpan(0, n));
+                        continue;
+                    }
                     int count = decoder.GetChars(buffer, 0, n, chars, 0);
                     if (count > 0)
                         Output?.Invoke(category, new string(chars, 0, count));
                 }
             }
-            catch (Exception e) when (e is IOException or ObjectDisposedException)
+            catch (Exception e) when (e is IOException or ObjectDisposedException or OperationCanceledException or SocketException)
             {
             }
         }, TaskCreationOptions.LongRunning));
@@ -537,6 +575,8 @@ public sealed partial class DebugEngine : IDisposable
 
     private void RaiseExited(int? exitCode)
     {
+        if (_relinquished)
+            return;
         if (Interlocked.Exchange(ref _exitedRaised, 1) != 0)
             return;
         lock (_lock)
@@ -570,7 +610,7 @@ public sealed partial class DebugEngine : IDisposable
         bool viaCorDebug = false;
         lock (_lock)
         {
-            if (_processExited || _processId == 0)
+            if (_relinquished || _processExited || _processId == 0)
                 return;
             // "terminate" is followed by "disconnect", and that by Dispose: the process is on its way out already,
             // and a second ICorDebugProcess.Terminate only fails (the exit has not been reported yet)
@@ -607,8 +647,17 @@ public sealed partial class DebugEngine : IDisposable
     {
         lock (_lock)
         {
-            if (_processExited || _process == null)
+            if (_relinquished)
                 return;
+            _relinquished = true;
+            Log?.Invoke($"Relinquishing process {_processId}, noDebug={NoDebug}.");
+            _launched?.Abandon?.Invoke();
+            if (_processExited || _process == null)
+            {
+                _processExited = true;
+                ClearStopState();
+                return;
+            }
             try
             {
                 if (!_stopped)
@@ -663,6 +712,8 @@ public sealed partial class DebugEngine : IDisposable
 
     private void KillProcess()
     {
+        if (_relinquished)
+            return;
         try
         {
             using Process process = Process.GetProcessById(_processId);
@@ -676,43 +727,45 @@ public sealed partial class DebugEngine : IDisposable
 
     public void Dispose()
     {
+        CancelCurrentRequest(sessionEnds: true);
+        _lifetime.Wait();
+        _consoleRelay?.Dispose();
         if (_isAttach && !_terminating)
             Detach();
         else
             Terminate();
 
-        lock (_lock)
+        try
         {
-            try
-            {
-                if (_unregisterToken != IntPtr.Zero)
-                    _dbgShim?.UnregisterForRuntimeStartup(_unregisterToken);
-            }
-            catch (Exception)
-            {
-            }
-            _unregisterToken = IntPtr.Zero;
+            RuntimeRegistration.Release(_lock, ref _unregisterToken, token => _dbgShim?.UnregisterForRuntimeStartup(token));
+        }
+        catch (Exception)
+        {
         }
 
         // no debuggee is left behind, whatever became of the polite way
-        if ((!_isAttach || _terminating) && _processWatcherStarted && !_processWatcherDone.Wait(TimeSpan.FromSeconds(3)))
+        if (!_relinquished && (!_isAttach || _terminating) && _processWatcherStarted && !_processWatcherDone.Wait(TimeSpan.FromSeconds(3)))
         {
             KillProcess();
             _processWatcherDone.Wait(TimeSpan.FromSeconds(3));
         }
+        CorDebug? debugger;
         lock (_lock)
         {
-            try
-            {
-                // behind a Stop that never returned this would block as well: the process is being killed, which is enough
-                if (!_cannotSynchronize)
-                    _corDebug?.Terminate();
-            }
-            catch (Exception)
-            {
-                // fails if the process has not been fully cleaned up yet; nothing to do about it
-            }
+            debugger = _cannotSynchronize ? null : _corDebug;
             _corDebug = null;
+        }
+        try
+        {
+            // Termination waits for callbacks, which must remain free to acquire the engine lock.
+            debugger?.Terminate();
+        }
+        catch (Exception)
+        {
+            // The debugging interface can already have been torn down by process exit.
+        }
+        lock (_lock)
+        {
             _launched?.StdIn.Dispose();
             _launched?.Abandon?.Invoke();
             foreach (LoadedModule module in _modules.Values)
@@ -721,7 +774,34 @@ public sealed partial class DebugEngine : IDisposable
         }
     }
 
+    private static void CleanupUnpublished(LaunchedProcess? launched, ExternalLaunch? external, CorDebugProcess? hosted)
+    {
+        try
+        {
+            if (hosted != null)
+                hosted.Terminate(TerminatedExitCode);
+            int pid = launched?.ProcessId ?? (external?.Host == null ? external?.ProcessId ?? 0 : 0);
+            if (pid != 0)
+            {
+                using Process process = Process.GetProcessById(pid);
+                process.Kill();
+            }
+        }
+        catch (Exception)
+        {
+        }
+        launched?.Abandon?.Invoke();
+        launched?.StdIn.Dispose();
+        launched?.StdOut.Dispose();
+        launched?.StdErr.Dispose();
+    }
+
     // ---------------------------------------------------------------- callbacks
+    private List<Action>? _synchronizedStopEvents;
+    private CorDebugManagedCallbackKind _synchronizedStopKind;
+    private bool _deferredInternalStop;
+    private PendingEval? _deferredEvalCompletion;
+    private readonly ManualResetEventSlim _callbacksQuiet = new(true);
 
     private void OnManagedEvent(object? sender, CorDebugManagedCallbackEventArgs e)
     {
@@ -743,6 +823,65 @@ public sealed partial class DebugEngine : IDisposable
                 _pendingEvents = null;
             }
 
+            bool queued = false;
+            if (e.Kind == CorDebugManagedCallbackKind.ExitProcess)
+            {
+                _synchronizedStopEvents = null;
+                _deferredInternalStop = false;
+                _deferredEvalCompletion = null;
+            }
+            if (e.Kind != CorDebugManagedCallbackKind.ExitProcess)
+                try { queued = e.Controller.HasQueuedCallbacks(null!); }
+                catch (Exception) { }
+
+            if (queued && action == EventAction.InternalStop
+                && e.Kind is CorDebugManagedCallbackKind.EvalComplete or CorDebugManagedCallbackKind.EvalException
+                && _pendingEval is { Completed: true } completed)
+            {
+                completed.Completed = false;
+                _deferredEvalCompletion = completed;
+                action = EventAction.Continue;
+            }
+            if (action == EventAction.Stop)
+            {
+                bool preferStep = e.Kind == CorDebugManagedCallbackKind.StepComplete
+                    && _synchronizedStopKind == CorDebugManagedCallbackKind.Breakpoint && _requestedStepKind == StepKind.In;
+                if (_synchronizedStopEvents == null || preferStep)
+                {
+                    _synchronizedStopEvents = events;
+                    _synchronizedStopKind = e.Kind;
+                }
+                events = [];
+                action = EventAction.Continue;
+            }
+            if (queued && action == EventAction.InternalStop && _resolvingBreakpoint)
+            {
+                _deferredInternalStop = true;
+                action = EventAction.Continue;
+            }
+            if (queued)
+                _callbacksQuiet.Reset();
+            else
+            {
+                if (_deferredEvalCompletion is { } completedEvaluation)
+                {
+                    completedEvaluation.Completed = true;
+                    _deferredEvalCompletion = null;
+                    action = EventAction.InternalStop;
+                }
+                if (_deferredInternalStop)
+                {
+                    _deferredInternalStop = false;
+                    action = EventAction.InternalStop;
+                }
+                if (_synchronizedStopEvents != null)
+                {
+                    events.AddRange(_synchronizedStopEvents);
+                    _synchronizedStopEvents = null;
+                    action = EventAction.Stop;
+                }
+                _callbacksQuiet.Set();
+            }
             if (action != EventAction.Continue)
             {
                 _stopped = true;
@@ -836,6 +975,14 @@ public sealed partial class DebugEngine : IDisposable
             case EvalExceptionCorDebugManagedCallbackEventArgs eval:
                 return OnEvalFinished(eval.Eval, threwException: true) ? EventAction.InternalStop : EventAction.Continue;
 
+            case CustomNotificationCorDebugManagedCallbackEventArgs notification:
+                if (_pendingEval is { } pending && pending.ThreadId == notification.Thread.Id)
+                {
+                    pending.CrossThreadDependency = true;
+                    pending.Eval.Abort();
+                }
+                return EventAction.Continue;
+
             case BreakpointCorDebugManagedCallbackEventArgs bp:
                 return evaluating ? EventAction.Continue : OnBreakpointHit(bp);
 
@@ -926,6 +1073,7 @@ public sealed partial class DebugEngine : IDisposable
             }
         }
         ApplySymbols(loaded);
+        WatchInitializers(loaded);
 
         ModuleLoadInfo info = DescribeModule(loaded);
         Post(() => ModuleLoaded?.Invoke(info));
@@ -1049,8 +1197,12 @@ public sealed partial class DebugEngine : IDisposable
     {
         try
         {
-            foreach (int methodToken in metadata.GetNonUserCodeMethods())
+            foreach (int methodToken in metadata.GetNonUserCodeMethods(_justMyCode))
+            {
                 module.GetFunctionFromToken(new mdMethodDef(methodToken)).JMCStatus = false;
+                if (metadata.PropagateAsyncAttribute(methodToken, _justMyCode) && metadata.GetAsyncBody(methodToken) is { } body)
+                    module.GetFunctionFromToken(new mdMethodDef(body)).JMCStatus = false;
+            }
         }
         catch (Exception e)
         {
@@ -1110,6 +1262,7 @@ public sealed partial class DebugEngine : IDisposable
 
     private void ClearStopState()
     {
+        _asyncReturnStop = null;
         _stopped = false;
         _frames.Clear();
         _externalFrames.Clear();
@@ -1165,6 +1318,13 @@ public sealed partial class DebugEngine : IDisposable
         lock (_lock)
         {
             CorDebugProcess process = RequireProcess();
+            if (_pendingEval is { Completed: false } pending)
+            {
+                _pauseDuringEvaluation = true;
+                pending.Cancelled = true;
+                Monitor.PulseAll(_lock);
+                return;
+            }
             if (_stopped)
             {
                 _pauseRequested |= _resolvingBreakpoint;

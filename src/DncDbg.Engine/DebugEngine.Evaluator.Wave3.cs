@@ -110,6 +110,33 @@ public sealed partial class DebugEngine
 
         // ---------------------------------------------------------------- overload scoring
 
+        private MethodDescription CloseParameters(MethodDescription method, CorDebugType? instanceType, TypeOperand? staticType)
+        {
+            string[] classArguments = instanceType != null
+                ? ValueInspector.TypeArgumentsOf(instanceType).Select(t => ClosedSignature(t).ToString()).ToArray()
+                : (staticType?.TypeArguments ?? []).Select(t => ClosedSignature(ToCorDebugType(t)).ToString()).ToArray();
+            return method with
+            {
+                ExactParameters = method.ParameterTypes.Select((parameter, index) => (parameter, index))
+                    .Where(p => p.parameter.StartsWith('!')).Select(p => p.index).ToHashSet(),
+                ParameterTypes = method.ParameterTypes.Select(parameter =>
+                {
+                    parameter = System.Text.RegularExpressions.Regex.Replace(parameter, @"(?<!!)!([0-9]+)", match =>
+                    {
+                        int index = int.Parse(match.Groups[1].Value);
+                        return index < classArguments.Length ? classArguments[index] : match.Value;
+                    });
+                    if (_explicitTypeArguments != null)
+                        parameter = System.Text.RegularExpressions.Regex.Replace(parameter, @"!!([0-9]+)", match =>
+                        {
+                            int index = int.Parse(match.Groups[1].Value);
+                            return index < _explicitTypeArguments.Count ? ClosedSignature(_explicitTypeArguments[index]).ToString() : match.Value;
+                        });
+                    return parameter;
+                }).ToArray(),
+            };
+        }
+
         /// <summary>
         /// How well the arguments fit a method; -1 if they do not. <paramref name="bindings"/> receives what the
         /// method's type parameters have to be for the call to work.
@@ -137,8 +164,10 @@ public sealed partial class DebugEngine
                 {
                     total += 6;
                 }
-                else if (s_numericTypes.Contains(parameter) && s_numericTypes.Contains(argument) && arguments[i] is HostOperand)
+                else if ((s_numericTypes.Contains(parameter) || parameter == "System.Decimal") && s_numericTypes.Contains(argument))
                 {
+                    if (method.ExactParameters.Contains(i))
+                        return -1;
                     if (!IsWidening(argument, parameter))
                         return -1;
                     total += 3;

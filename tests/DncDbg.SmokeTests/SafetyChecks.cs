@@ -1,0 +1,260 @@
+using System.Diagnostics;
+using System.Reflection;
+using System.Text;
+using System.Text.Json;
+using ClrDebug;
+using DncDbg.Engine;
+
+internal static class SafetyChecks
+{
+    public static async Task<int> Run(string executable, string fixture)
+    {
+        int checks = 0;
+        void Check(bool condition, string name)
+        {
+            if (!condition)
+                throw new InvalidOperationException("Safety check failed: " + name);
+            checks++;
+        }
+
+        var gate = new object();
+        IntPtr token = new(1);
+        using var unregisterEntered = new ManualResetEventSlim();
+        using var callbackDone = new ManualResetEventSlim();
+        Task unregister = Task.Run(() => RuntimeRegistration.Release(gate, ref token, _ =>
+        {
+            unregisterEntered.Set();
+            if (!callbackDone.Wait(TimeSpan.FromSeconds(5)))
+                throw new TimeoutException("Unregister held the callback lock.");
+        }));
+        Check(unregisterEntered.Wait(TimeSpan.FromSeconds(5)), "unregister barrier entered");
+        Task callback = Task.Run(() =>
+        {
+            lock (gate)
+                callbackDone.Set();
+        });
+        await Task.WhenAll(unregister, callback).WaitAsync(TimeSpan.FromSeconds(6));
+        Check(token == IntPtr.Zero, "startup token removed before unregister");
+
+        using (var engine = new DebugEngine())
+        {
+            bool output = false;
+            engine.Output += (_, _) => output = true;
+            engine.Dispose();
+            typeof(DebugEngine).GetMethod("OnRuntimeStartup", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(engine, [null, IntPtr.Zero, HRESULT.S_OK]);
+            Check(!output && engine.ProcessId == 0, "late startup callback rejected");
+        }
+
+        using (Process target = StartFixture(fixture))
+        using (var engine = new DebugEngine())
+        using (var entered = new ManualResetEventSlim())
+        using (var release = new ManualResetEventSlim())
+        {
+            CancellationToken startupToken = default;
+            bool resumed = false;
+            Task launch = Task.Run(() => engine.Launch(new LaunchOptions
+            {
+                Program = fixture,
+                ExternalLauncher = cancellation =>
+                {
+                    startupToken = cancellation;
+                    entered.Set();
+                    release.Wait();
+                    return new ExternalLaunch(target.Id, () => resumed = true);
+                },
+            }));
+            Check(entered.Wait(TimeSpan.FromSeconds(5)), "external launcher barrier entered");
+            Task dispose = Task.Run(engine.Dispose);
+            var stopDeadline = Stopwatch.StartNew();
+            while (!startupToken.IsCancellationRequested && stopDeadline.Elapsed < TimeSpan.FromSeconds(5))
+                await Task.Delay(10);
+            Check(startupToken.IsCancellationRequested && !dispose.IsCompleted, "shutdown waits for admitted startup");
+            release.Set();
+            try { await launch; }
+            catch (OperationCanceledException) { }
+            await dispose.WaitAsync(TimeSpan.FromSeconds(6));
+            Check(!resumed && engine.ProcessId == 0, "cancelled launcher cannot publish or resume");
+            await target.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            Check(target.HasExited, "unpublished owned child cleaned up");
+        }
+
+        using (var session = new Session(executable))
+        {
+            await session.Initialize();
+            await session.Request("configurationDone", new { });
+            await session.Request("launch", new { program = fixture, args = new[] { "--fixture", "sleep" }, noDebug = true });
+            await session.Event("process", _ => true);
+            await session.Send("evaluate", new { expression = new string('x', 1024 * 1024), frameId = 0 });
+            var elapsed = Stopwatch.StartNew();
+            await session.Request("disconnect", new { terminateDebuggee = true });
+            await session.Exited();
+            Check(elapsed.Elapsed < TimeSpan.FromSeconds(8), "1 MiB stdin backpressure cannot block disconnect");
+        }
+
+        using (var session = new Session(executable))
+        {
+            await session.Initialize();
+            await session.Request("configurationDone", new { });
+            await session.Request("launch", new { program = fixture, args = new[] { "--fixture", "sleep" }, noDebug = true });
+            JsonElement processEvent = await session.Event("process", _ => true);
+            using Process target = Process.GetProcessById(processEvent.GetProperty("body").GetProperty("systemProcessId").GetInt32());
+            try
+            {
+                Check(!target.HasExited, "owned noDebug target is alive before detach");
+                Stopwatch detachTime = Stopwatch.StartNew();
+                await session.Request("disconnect", new { terminateDebuggee = false });
+                await session.Exited();
+                await Task.Delay(TimeSpan.FromSeconds(7));
+                Check(!target.HasExited, $"detached noDebug child survives disposal timeouts ({detachTime.Elapsed}, pid {target.Id})");
+            }
+            finally
+            {
+                if (!target.HasExited)
+                    target.Kill(entireProcessTree: true);
+                await target.WaitForExitAsync();
+            }
+        }
+
+        using (var session = new Session(executable))
+        {
+            await session.Initialize();
+            await session.Request("configurationDone", new { });
+            await session.Request("launch", new { program = fixture, args = new[] { "--fixture", "heartbeat" }, stopAtEntry = true });
+            JsonElement stopped = await session.Event("stopped", e => e.GetProperty("body").GetProperty("reason").GetString() == "entry");
+            int thread = stopped.GetProperty("body").GetProperty("threadId").GetInt32();
+            JsonElement stack = await session.Request("stackTrace", new { threadId = thread });
+            int frame = stack.GetProperty("body").GetProperty("stackFrames")[0].GetProperty("id").GetInt32();
+            int evaluation = await session.Send("evaluate", new { expression = "Program.WaitDuringEval()", frameId = frame });
+            await session.Event("output", e => e.GetProperty("body").GetProperty("output").GetString()!.Contains("evaluation-entered"));
+            await session.Request("pause", new { threadId = thread });
+            JsonElement cancelled = await session.Response(evaluation);
+            Check(!cancelled.GetProperty("success").GetBoolean(), "pause cancels active evaluation");
+            await session.Event("stopped", e => e.GetProperty("body").GetProperty("reason").GetString() == "pause");
+            await session.Request("continue", new { threadId = thread });
+            await session.Event("output", e => e.GetProperty("body").GetProperty("output").GetString()!.Contains("heartbeat"));
+            Check(true, "heartbeat resumes after exactly one continue");
+            await session.Request("disconnect", new { terminateDebuggee = true });
+            await session.Exited();
+        }
+
+        return checks;
+    }
+
+    private static Process StartFixture(string fixture)
+    {
+        var start = new ProcessStartInfo("dotnet") { UseShellExecute = false };
+        start.ArgumentList.Add(fixture);
+        start.ArgumentList.Add("--fixture");
+        start.ArgumentList.Add("sleep");
+        return Process.Start(start)!;
+    }
+
+    private sealed class Session : IDisposable
+    {
+        private readonly Process _process;
+        private readonly CancellationTokenSource _timeout = new(TimeSpan.FromSeconds(25));
+        private readonly Dictionary<int, JsonElement> _responses = [];
+        private readonly List<JsonElement> _events = [];
+        private readonly Task<string> _error;
+        private int _sequence;
+
+        public Session(string executable)
+        {
+            var start = new ProcessStartInfo(executable)
+            {
+                UseShellExecute = false, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true,
+            };
+            start.Environment.Remove("DNCDBG_LOG_DIR");
+            string logs = Path.GetFullPath("build/validation");
+            Directory.CreateDirectory(logs);
+            start.ArgumentList.Add("--log=" + Path.Combine(logs, $"safety-{Guid.NewGuid():N}.log"));
+            _process = Process.Start(start)!;
+            _error = _process.StandardError.ReadToEndAsync();
+        }
+
+        public async Task Initialize() => _ = await Request("initialize", new { });
+
+        public async Task<int> Send(string command, object arguments)
+        {
+            int sequence = ++_sequence;
+            byte[] body = JsonSerializer.SerializeToUtf8Bytes(new { seq = sequence, type = "request", command, arguments });
+            await _process.StandardInput.BaseStream.WriteAsync(Encoding.ASCII.GetBytes($"Content-Length: {body.Length}\r\n\r\n"), _timeout.Token);
+            await _process.StandardInput.BaseStream.WriteAsync(body, _timeout.Token);
+            await _process.StandardInput.BaseStream.FlushAsync(_timeout.Token);
+            return sequence;
+        }
+
+        public async Task<JsonElement> Request(string command, object arguments)
+        {
+            JsonElement response = await Response(await Send(command, arguments));
+            if (!response.GetProperty("success").GetBoolean())
+                throw new InvalidOperationException(command + ": " + response);
+            return response;
+        }
+
+        public async Task<JsonElement> Response(int sequence)
+        {
+            while (!_responses.ContainsKey(sequence))
+                await Receive();
+            JsonElement response = _responses[sequence];
+            _responses.Remove(sequence);
+            return response;
+        }
+
+        public async Task<JsonElement> Event(string name, Func<JsonElement, bool> predicate)
+        {
+            while (true)
+            {
+                int index = _events.FindIndex(e => e.GetProperty("event").GetString() == name && predicate(e));
+                if (index >= 0)
+                {
+                    JsonElement item = _events[index];
+                    _events.RemoveAt(index);
+                    return item;
+                }
+                await Receive();
+            }
+        }
+
+        private async Task Receive()
+        {
+            var header = new StringBuilder();
+            var single = new byte[1];
+            while (!header.ToString().EndsWith("\r\n\r\n", StringComparison.Ordinal))
+            {
+                await _process.StandardOutput.BaseStream.ReadExactlyAsync(single, _timeout.Token);
+                header.Append((char)single[0]);
+            }
+            int length = int.Parse(header.ToString().Split(':')[1].Trim(), System.Globalization.CultureInfo.InvariantCulture);
+            var body = new byte[length];
+            await _process.StandardOutput.BaseStream.ReadExactlyAsync(body, _timeout.Token);
+            using JsonDocument document = JsonDocument.Parse(body);
+            JsonElement message = document.RootElement.Clone();
+            if (message.GetProperty("type").GetString() == "response")
+                _responses[message.GetProperty("request_seq").GetInt32()] = message;
+            else if (message.GetProperty("type").GetString() == "event")
+                _events.Add(message);
+        }
+
+        public async Task Exited()
+        {
+            // A relinquished child can keep inherited stream handles open after the debugger exits.
+            while (!_process.HasExited)
+                await Task.Delay(25, _timeout.Token);
+            if (_process.ExitCode != 0 || _error.IsCompletedSuccessfully && _error.Result.Length != 0)
+                throw new InvalidOperationException("Debugger shutdown failed: " + (_error.IsCompletedSuccessfully ? _error.Result : _process.ExitCode));
+        }
+
+        public void Dispose()
+        {
+            if (!_process.HasExited)
+            {
+                _process.Kill(entireProcessTree: true);
+                _process.WaitForExit();
+            }
+            _process.Dispose();
+            _timeout.Dispose();
+        }
+    }
+}

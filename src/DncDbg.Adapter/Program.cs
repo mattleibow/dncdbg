@@ -113,6 +113,8 @@ internal static class StdioTransport
         int inFd = dup(0), outFd = dup(1);
         if (inFd < 0 || outFd < 0)
             return (Console.OpenStandardInput(), Console.OpenStandardOutput());
+        fcntl(inFd, 2, 1);
+        fcntl(outFd, 2, 1);
         return (
             new FileStream(new SafeFileHandle(inFd, ownsHandle: true), FileAccess.Read, 1, isAsync: false),
             new FileStream(new SafeFileHandle(outFd, ownsHandle: true), FileAccess.Write, 1, isAsync: false));
@@ -120,4 +122,6 @@ internal static class StdioTransport
 
     [DllImport("libc", SetLastError = true)]
     private static extern int dup(int fd);
+    [DllImport("libc", SetLastError = true)]
+    private static extern int fcntl(int fd, int command, int flags);
 }

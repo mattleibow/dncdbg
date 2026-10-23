@@ -32,7 +32,7 @@ public sealed class LaunchOptions
     /// The process must be created suspended, or not at all for .NET Framework (see <see cref="ExternalLaunch.Host"/>).
     /// Called without any engine lock held; may block.
     /// </summary>
-    public Func<ExternalLaunch>? ExternalLauncher { get; init; }
+    public Func<CancellationToken, ExternalLaunch>? ExternalLauncher { get; init; }
 }
 
 /// <param name="ExitCode">Completes with the exit code if whoever started the process gets to know it.</param>

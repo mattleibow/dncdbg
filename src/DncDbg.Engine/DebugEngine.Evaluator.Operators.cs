@@ -47,7 +47,7 @@ public sealed partial class DebugEngine
                     continue;
                 MethodDescription? method = type.Metadata.GetMethods(type.Token, "op_Implicit").FirstOrDefault(m =>
                     m.ReturnType == target && m.ParameterTypes.Length == 1
-                    && (m.ParameterTypes[0] == source || IsWidening(source, m.ParameterTypes[0])));
+                    && m.ParameterTypes[0] == source);
                 if (method != null)
                     return new Conversion(type, method);
             }

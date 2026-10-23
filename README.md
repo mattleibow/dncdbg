@@ -40,6 +40,16 @@ single-thread execution requests. `configurationDone` holds initial startup;
 source and variable references retain their appropriate session/stop lifetimes.
 See the test results for parity gaps; the presence of a feature is not a claim
 that every native edge case is already supported.
+Evaluator binding uses portable-PDB import/alias scopes and hoisted-local
+lifetimes, closed generic receiver arguments, and captured primary-constructor
+parameters. Static-initialization observation uses CLR breakpoints rather than
+runtime-private MethodTable layouts. When implicit function evaluation is
+disabled, unobserved initialization is not forced or assumed complete.
+
+Session shutdown cancels and drains admitted startup/evaluation work before
+disposal. Debugger input writes are bounded and cancellable outside the engine
+lock; detach relinquishes ownership and disarms the Unix launch watchdog.
+All adapter events are fenced to their originating engine generation.
 The comparison table below describes the original native implementation, not
 measurements or a parity guarantee for the managed debugger.
 
@@ -218,6 +228,8 @@ Protocol and engine logs are separate; engine logs append and log levels are
 case-insensitive. Unknown levels fall back to INFO with a warning in the engine
 log. `--server[=PORT]` additionally accepts one TCP connection on localhost.
 As in the original adapter, an unavailable log file does not prevent debugging.
+For Unix PAL compatibility, empty target arguments and arguments containing
+spaces that end in a backslash are omitted, matching the native launcher.
 
 - [VS Code IDE, Windows OS.](docs/usage_vscode_windows.md)
 - [VS Code IDE, Linux and macOS.](docs/usage_vscode_unix.md)

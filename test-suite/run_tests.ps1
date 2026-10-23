@@ -69,7 +69,7 @@ try {
         }
     }
 
-    $debuggerName = if ($isWindowsHost) { "dncdbg.exe" } else { "dncdbg" }
+    $debuggerName = if ($isWindowsHost) { "dncdbg-dap.exe" } else { "dncdbg-dap" }
     $debugger = if ([string]::IsNullOrWhiteSpace($env:DNCDBG)) {
         Join-Path $repoRoot "bin/$debuggerName"
     }

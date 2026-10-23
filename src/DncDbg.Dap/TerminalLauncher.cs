@@ -4,7 +4,7 @@ using System.Reflection;
 using DncDbg.Engine;
 using DncDbg.Protocol;
 
-namespace DncDbg.Adapter;
+namespace DncDbg.Dap;
 
 /// <summary>
 /// Starts the debuggee in the client's terminal: the client is asked (runInTerminal) to run this very executable in
@@ -105,7 +105,7 @@ internal static class TerminalLauncher
         });
     }
 
-    // How to start this program again: "dncdbg" as an executable, or "dotnet dncdbg.dll".
+    // How to start this program again: "dncdbg-dap" as an executable, or "dotnet dncdbg-dap.dll".
     private static string[] SelfCommand()
     {
         string processPath = Environment.ProcessPath ?? throw new DebuggerException("Cannot determine the path of the debugger.");

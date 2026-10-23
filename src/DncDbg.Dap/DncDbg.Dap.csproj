@@ -7,8 +7,8 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <AssemblyName>dncdbg</AssemblyName>
-    <RootNamespace>DncDbg.Adapter</RootNamespace>
+    <AssemblyName>dncdbg-dap</AssemblyName>
+    <RootNamespace>DncDbg.Dap</RootNamespace>
     <TargetFramework>$(DebuggerTargetFramework)</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
@@ -16,7 +16,7 @@
   </PropertyGroup>
 
   <PropertyGroup>
-    <Title>DNCDbg</Title>
+    <Title>DNCDbg DAP</Title>
     <Description>A .NET debugger speaking the Debug Adapter Protocol (DAP): use it from VS Code, Neovim (nvim-dap), Emacs, Helix and any other DAP client. Breakpoints, stepping (async aware), expression evaluation, symbol servers, single-file and ReadyToRun applications.</Description>
   </PropertyGroup>
 

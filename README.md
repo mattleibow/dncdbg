@@ -6,9 +6,12 @@ for .NET applications. Use it from VS Code or another DAP client.
 The implementation is **C# 14 on .NET 10**, with nullable reference types and
 warnings as errors. It consists of three SDK-style projects:
 
-- `src/DncDbg.Adapter`: executable host, DAP requests, configuration and process lifecycle.
+- `src/DncDbg.Dap`: `dncdbg-dap` executable host, DAP requests, configuration and process lifecycle.
 - `src/DncDbg.Engine`: CLR debugging, symbols, stepping, evaluation and inspection.
 - `src/DncDbg.Protocol`: DAP framing and protocol types.
+
+The `dncdbg` command name is reserved for a future human-oriented debugger CLI.
+IDEs and other DAP clients launch `dncdbg-dap`.
 
 The engine uses ClrDebug and the public CLR debugging APIs directly. It does not
 wrap another debugger executable. Native CLR debugging libraries and the Windows
@@ -21,17 +24,17 @@ Install the stable SDK selected by [`global.json`](global.json), then run:
 
 ```sh
 dotnet build
-dotnet publish src/DncDbg.Adapter -c Release -o bin
-./bin/dncdbg --buildinfo
+dotnet publish src/DncDbg.Dap -c Release -o bin
+./bin/dncdbg-dap --buildinfo
 ```
 
-Publishing produces the `dncdbg` apphost (`dncdbg.exe` on Windows). Keep its
+Publishing produces the `dncdbg-dap` apphost (`dncdbg-dap.exe` on Windows). Keep its
 assemblies, native runtime assets, and license files together. This
 framework-dependent publish requires the .NET 10 runtime. For a self-contained
 deployment, specify a matching RID, for example:
 
 ```sh
-dotnet publish src/DncDbg.Adapter -c Release -r linux-x64 --self-contained true -o bin/linux-x64
+dotnet publish src/DncDbg.Dap -c Release -r linux-x64 --self-contained true -o bin/linux-x64
 ```
 
 Debugger and target process architectures must match. See platform-specific notes:
@@ -46,7 +49,7 @@ The original test projects, Runner, ScriptContext, fixtures and assertions are
 the compatibility contract. From the repository root after publishing:
 
 ```sh
-dotnet run --project tests/DncDbg.SmokeTests -- bin/dncdbg
+dotnet run --project tests/DncDbg.SmokeTests -- bin/dncdbg-dap
 pwsh ./test-suite/run_tests.ps1
 ```
 
@@ -59,7 +62,7 @@ See [local testing](test-suite/README.md) for focused cases and lifecycle regres
 
 ## Usage
 
-With no arguments, `dncdbg` serves DAP on stdin/stdout. Compatibility options:
+With no arguments, `dncdbg-dap` serves DAP on stdin/stdout. Options:
 `--help`, `--version`, `--buildinfo`, `--interpreter=vscode`,
 `--logProtocol=<file>`, `--log=<file>`, and
 `--loglevel=<0..3|DEBUG|INFO|WARNING|ERROR>`.

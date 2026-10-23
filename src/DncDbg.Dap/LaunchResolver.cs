@@ -4,7 +4,7 @@ using System.Text.Json;
 using DncDbg.Engine;
 using DncDbg.Protocol;
 
-namespace DncDbg.Adapter;
+namespace DncDbg.Dap;
 
 /// <summary>What to start, after "project", "build" and launchSettings.json have been taken into account.</summary>
 internal sealed record ResolvedLaunch(string Program, string[] Args, string WorkingDirectory, Dictionary<string, string?> Environment);

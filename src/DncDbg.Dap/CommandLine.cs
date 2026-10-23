@@ -2,7 +2,7 @@ using System.Globalization;
 using System.Reflection;
 using System.Runtime.InteropServices;
 
-namespace DncDbg.Adapter;
+namespace DncDbg.Dap;
 
 internal enum LogLevel { Debug, Info, Warning, Error }
 
@@ -100,7 +100,7 @@ internal sealed record CommandLineOptions
     }
 
     private const string Help = """
-        Usage: dncdbg [options]
+        Usage: dncdbg-dap [options]
 
         Options:
         --buildinfo                              Print build info.

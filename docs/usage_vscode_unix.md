@@ -46,7 +46,7 @@
                 "pipeCwd": "${workspaceFolder}",
                 "pipeProgram": "/bin/bash",
                 "pipeArgs": ["-c"],
-                "debuggerPath": "/path/to/dncdbg/bin/dncdbg"
+                "debuggerPath": "/path/to/dncdbg/bin/dncdbg-dap"
             }
         }
 ```

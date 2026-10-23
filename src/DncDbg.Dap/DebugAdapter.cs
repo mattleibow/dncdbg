@@ -4,7 +4,7 @@ using DncDbg.Engine.Values;
 using DncDbg.Protocol;
 using ExceptionDetails = DncDbg.Protocol.ExceptionDetails;
 
-namespace DncDbg.Adapter;
+namespace DncDbg.Dap;
 
 /// <summary>Translates DAP requests into <see cref="DebugEngine"/> calls and engine events into DAP events.</summary>
 internal sealed class DebugAdapter : IDisposable

@@ -8,9 +8,9 @@ From the repository root:
 
 ```sh
 dotnet build
-dotnet publish src/DncDbg.Adapter -c Release -o bin
-./bin/dncdbg --buildinfo
-dotnet run --project tests/DncDbg.SmokeTests -- bin/dncdbg
+dotnet publish src/DncDbg.Dap -c Release -o bin
+./bin/dncdbg-dap --buildinfo
+dotnet run --project tests/DncDbg.SmokeTests -- bin/dncdbg-dap
 pwsh ./test-suite/run_tests.ps1
 ```
 
@@ -18,7 +18,7 @@ The framework-dependent apphost requires .NET 10. For a self-contained Apple
 Silicon publish:
 
 ```sh
-dotnet publish src/DncDbg.Adapter -c Release -r osx-arm64 --self-contained true -o bin/osx-arm64
+dotnet publish src/DncDbg.Dap -c Release -r osx-arm64 --self-contained true -o bin/osx-arm64
 ```
 
 Use `osx-x64` for Intel. Keep all published assemblies, native runtime assets

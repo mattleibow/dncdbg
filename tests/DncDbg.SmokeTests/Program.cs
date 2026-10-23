@@ -29,7 +29,7 @@ if (args is ["--safety", var debugger])
 }
 
 if (args.Length != 1)
-    throw new ArgumentException("Supply the path to the dncdbg apphost.");
+    throw new ArgumentException("Supply the path to the dncdbg-dap apphost.");
 string executable = Path.GetFullPath(args[0]);
 string logDirectory = Path.GetFullPath("build/validation/cli-smoke");
 Directory.CreateDirectory(logDirectory);
@@ -39,7 +39,7 @@ foreach (string option in new[] { "--help", "-h", "--version", "--buildinfo" })
 {
     var result = await Run(option);
     Check(result.ExitCode == 0 && result.Error.Length == 0, option);
-    Check(result.Output.StartsWith(option is "--help" or "-h" ? "Usage: dncdbg" : "DNCDbg version 1.3.0", StringComparison.Ordinal), option + " output");
+    Check(result.Output.StartsWith(option is "--help" or "-h" ? "Usage: dncdbg-dap" : "DNCDbg version 1.3.0", StringComparison.Ordinal), option + " output");
     if (option == "--buildinfo")
         Check(new[] { "Build type:", "Build date:", "Target OS:", "Target arch:", "DNCDbg VCS info:", "MIT License" }
             .All(result.Output.Contains), "build metadata");
@@ -93,7 +93,7 @@ Process Start(string[] arguments)
     foreach (string argument in arguments)
         start.ArgumentList.Add(argument);
     start.Environment.Remove("DNCDBG_LOG_DIR");
-    return Process.Start(start) ?? throw new InvalidOperationException("Cannot start dncdbg.");
+    return Process.Start(start) ?? throw new InvalidOperationException("Cannot start dncdbg-dap.");
 }
 
 async Task<(int ExitCode, string Output, string Error)> Run(params string[] arguments)

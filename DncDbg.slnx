@@ -1,6 +1,6 @@
 <Solution>
   <Folder Name="/src/">
-    <Project Path="src/DncDbg.Adapter/DncDbg.Adapter.csproj" />
+    <Project Path="src/DncDbg.Dap/DncDbg.Dap.csproj" />
     <Project Path="src/DncDbg.Engine/DncDbg.Engine.csproj" />
     <Project Path="src/DncDbg.Protocol/DncDbg.Protocol.csproj" />
   </Folder>

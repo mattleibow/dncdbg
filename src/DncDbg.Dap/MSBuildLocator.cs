@@ -2,7 +2,7 @@ using System.Diagnostics;
 using System.Xml;
 using System.Xml.Linq;
 
-namespace DncDbg.Adapter;
+namespace DncDbg.Dap;
 
 /// <summary>
 /// Non-SDK-style ("legacy") projects, the format of Visual Studio before 2017 that most .NET Framework applications

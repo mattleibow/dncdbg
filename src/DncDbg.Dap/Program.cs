@@ -1,7 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
-using DncDbg.Adapter;
+using DncDbg.Dap;
 using DncDbg.Protocol;
 using Microsoft.Win32.SafeHandles;
 
@@ -14,7 +14,7 @@ if (args.Length >= 5 && args[0] == TerminalLauncher.HelperOption && args[3] == "
     }
     catch (Exception e)
     {
-        Console.Error.WriteLine("dncdbg: " + e.Message);
+        Console.Error.WriteLine("dncdbg-dap: " + e.Message);
         return 127;
     }
 }

@@ -8,9 +8,9 @@ From the repository root in PowerShell:
 
 ```powershell
 dotnet build
-dotnet publish src/DncDbg.Adapter -c Release -o bin
-.\bin\dncdbg.exe --buildinfo
-dotnet run --project tests/DncDbg.SmokeTests -- bin/dncdbg.exe
+dotnet publish src/DncDbg.Dap -c Release -o bin
+.\bin\dncdbg-dap.exe --buildinfo
+dotnet run --project tests/DncDbg.SmokeTests -- bin/dncdbg-dap.exe
 pwsh .\test-suite\run_tests.ps1
 ```
 
@@ -18,7 +18,7 @@ The framework-dependent apphost requires .NET 10. For a self-contained x64
 publish:
 
 ```powershell
-dotnet publish src/DncDbg.Adapter -c Release -r win-x64 --self-contained true -o bin/win-x64
+dotnet publish src/DncDbg.Dap -c Release -r win-x64 --self-contained true -o bin/win-x64
 ```
 
 Use `win-arm64` for ARM64. Keep all published assemblies, native runtime assets

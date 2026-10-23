@@ -23,7 +23,7 @@ The target framework can be overridden with the `DNCDBG_TARGET_FRAMEWORK` enviro
 For the managed debugger, build or publish from the repository root first:
 
 ```sh
-dotnet publish src/DncDbg.Adapter -c Release -o bin
+dotnet publish src/DncDbg.Dap -c Release -o bin
 pwsh ./test-suite/run_tests.ps1 TestBreakpoint TestEvaluate TestStackTrace TestMemoryReferences TestReadWriteMemory
 ```
 
@@ -39,7 +39,7 @@ configuration; the existing scripts continue to select the appropriate fixture.
 Run the additional cross-platform CLI/protocol smoke checks from the repository root:
 
 ```sh
-dotnet run --project tests/DncDbg.SmokeTests -- bin/dncdbg
+dotnet run --project tests/DncDbg.SmokeTests -- bin/dncdbg-dap
 ```
 
 These checks do not modify the existing Runner, ScriptContext, fixtures, or
@@ -55,7 +55,7 @@ debugger, and let the detached target complete its watched initializer.
 Run these safety checks alone with:
 
 ```sh
-dotnet run --project tests/DncDbg.SmokeTests -- --safety bin/dncdbg
+dotnet run --project tests/DncDbg.SmokeTests -- --safety bin/dncdbg-dap
 ```
 
 The self-hosted safety fixtures are separate from the unchanged acceptance

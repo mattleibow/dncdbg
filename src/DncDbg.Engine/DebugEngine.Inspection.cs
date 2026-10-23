@@ -212,10 +212,10 @@ public sealed partial class DebugEngine
         int token = (int)function.Token.Value;
         ModuleMetadata? metadata = GetMetadata(function.Module);
         SourceLocation? location = metadata?.GetSourceLocation(token, frame.IP.pnOffset, out _);
-        if (_asyncReturnStop is { } asyncStop && asyncStop.Thread == frameRef.ThreadId
-            && asyncStop.Code.Module == KeyOf(function.Module) && asyncStop.Code.Token == function.Token.Value
-            && asyncStop.Code.Offset == frame.IP.pnOffset)
-            location = asyncStop.Source;
+        if (_stepReturnStop is { } returnStop && returnStop.Thread == frameRef.ThreadId
+            && returnStop.Code.Module == KeyOf(function.Module) && returnStop.Code.Token == function.Token.Value
+            && returnStop.Code.Offset == frame.IP.pnOffset)
+            location = returnStop.Source;
 
         if (_justMyCode && (location == null || !IsUserCode(function)))
         {

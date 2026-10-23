@@ -1,4 +1,9 @@
-# DNCDbg vs NetCoreDbg (with VsDbg for reference)
+# Historical native DNCDbg comparison
+
+This table describes the C++ implementation before the C#/.NET migration.
+Its implementation-language and memory measurements do not describe the current
+managed debugger, and the feature comparisons have not been re-benchmarked.
+See the [current architecture and build instructions](../README.md).
 
 <details open>
 <summary><b>Legend</b></summary>

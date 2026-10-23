@@ -38,7 +38,7 @@ public sealed partial class DebugEngine
     private SourceLocation? _stepOriginLocation;
     private int _stepOriginOffset;
     private AsyncStep? _asyncStep;
-    private (int Thread, CodeLocation Code, SourceLocation Source)? _asyncReturnStop;
+    private (int Thread, CodeLocation Code, SourceLocation Source)? _stepReturnStop;
     private CodeLocation? _asyncEntry;
     private bool _steppingThrough;
 
@@ -57,7 +57,7 @@ public sealed partial class DebugEngine
             _steppingThrough = false;
             _stepOriginMethod = GetMethodName(thread.ActiveFrame);
             _stepOriginLocation = thread.ActiveFrame is CorDebugILFrame origin
-                ? GetMetadata(origin.Function.Module)?.GetSourceLocation((int)origin.Function.Token.Value, origin.IP.pnOffset, out _) : null;
+                ? GetMetadata(origin.Function.Module)?.GetNearestSourceLocation((int)origin.Function.Token.Value, origin.IP.pnOffset) : null;
             _stepOriginOffset = thread.ActiveFrame is CorDebugILFrame originFrame ? originFrame.IP.pnOffset : -1;
             ClearReturnSites();
             if (targetId != null && kind == StepKind.In)
@@ -143,8 +143,10 @@ public sealed partial class DebugEngine
         {
             CorDebugFunction function = frame.Function;
             ModuleMetadata? metadata = GetMetadata(function.Module);
+            Log?.Invoke($"Step callback ({e.Reason}, requested {_requestedStepKind}, active {_activeStepKind}, through {_steppingThrough}, filtered {_leavingFilteredMethod}) in {GetMethodName(frame)} at IL {frame.IP.pnOffset}");
             if (_requestedStepKind != StepKind.Out
-                && (e.Reason == CorDebugStepReason.STEP_RETURN || frame.IP.pnOffset > _stepOriginOffset)
+                && e.Reason == CorDebugStepReason.STEP_NORMAL
+                && frame.IP.pnOffset > _stepOriginOffset
                 && _stepOriginLocation is { } originLocation && GetMethodName(frame) == _stepOriginMethod
                 && metadata?.GetSourceLocation((int)function.Token.Value, frame.IP.pnOffset, out _) == originLocation)
             {
@@ -187,6 +189,15 @@ public sealed partial class DebugEngine
 
             bool hidden = false;
             SourceLocation? location = metadata?.GetSourceLocation((int)function.Token.Value, frame.IP.pnOffset, out hidden);
+            // A return into compiler-generated cleanup still belongs to its caller's source statement.
+            // Normal steps through that same hidden region must keep running to the next sequence point.
+            if (hidden && e.Reason == CorDebugStepReason.STEP_RETURN
+                && metadata?.NextVisibleOffset((int)function.Token.Value, frame.IP.pnOffset) != null
+                && metadata.GetNearestSourceLocation((int)function.Token.Value, frame.IP.pnOffset) is { } returnSource)
+            {
+                location = returnSource;
+                _stepReturnStop = (threadId, new CodeLocation(KeyOf(function.Module), function.Token.Value, frame.IP.pnOffset), returnSource);
+            }
             bool arrivedAtTarget = false;
             try
             {
@@ -248,6 +259,7 @@ public sealed partial class DebugEngine
                     if (steppedIn && metadata?.HasSymbols == true)
                     {
                         StartStep(thread, StepKind.In, wholeMethod: true);
+                        _leavingFilteredMethod = true;
                         return EventAction.Continue;
                     }
                     StepKind next = !hidden ? StepKind.Out : _activeStepKind == StepKind.Out ? StepKind.Over : _activeStepKind;
@@ -502,7 +514,7 @@ public sealed partial class DebugEngine
             if ((_requestedStepKind == StepKind.Out || returningToCaller) && thread.ActiveFrame is CorDebugILFrame frame
                 && GetMetadata(frame.Function.Module)?.GetNearestSourceLocation((int)frame.Function.Token.Value, frame.IP.pnOffset) is { } source)
             {
-                _asyncReturnStop = (thread.Id, location, source);
+                _stepReturnStop = (thread.Id, location, source);
                 Post(() => Stopped?.Invoke(new StopInfo("step", thread.Id)));
                 return EventAction.Stop;
             }

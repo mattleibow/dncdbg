@@ -1,16 +1,21 @@
-## Debugger configuration environment variables
+# Configuration environment variables
 
-These environment variables can be set in the DNCDbg process environment before the debugger is launched, or passed as part of the `env` option of the `launch`, `attach`, or `restart` request for a particular debug session configuration.
+These settings are read by the managed debugger:
 
 | Variable | Description |
 | --- | --- |
-| `DNCDBG_STACKTRACE_LIMIT` | maximum number of frames in a stack trace (range 0 - 4294967295); defaults to 250 |
-| `DNCDBG_DAP_REQUEST_TIMEOUT` | timeout for executing a single DAP request, in milliseconds (range 0 - 4294967295); defaults to 15000 ms (15 seconds) |
-| `DNCDBG_NORMAL_EVAL_TIMEOUT` | timeout for executing an evaluation, in milliseconds (range 0 - 4294967295); defaults to 5000 ms (5 seconds) |
-| `DNCDBG_ABORT_EVAL_TIMEOUT` | timeout for aborting an evaluation that exceeds the evaluation timeout, in milliseconds (range 0 - 4294967295); defaults to 5000 ms (5 seconds) |
-| `DNCDBG_HTTP_REQUEST_TIMEOUT` | timeout for executing an HTTP/HTTPS request, in milliseconds (range 0 - 4294967295); defaults to 60000 ms (60 seconds) |
-| `DNCDBG_MEMBERS_PER_PAGE_LIMIT` | maximum number of members per page before a "[More]" entry is added (range 0 - 4294967295); defaults to 25 |
-| `DNCDBG_STARTUP_TIMEOUT` | timeout for executing a process launch or attach, in milliseconds (range 0 - 4294967295); defaults to 5000 ms (5 seconds) |
-| `DNCDBG_TERMINATION_TIMEOUT` | timeout for terminating a process, in milliseconds (range 0 - 4294967295); defaults to 3000 ms (3 seconds) |
-| `DNCDBG_ROOTHIDDEN_WALK_LIMIT` | maximum number of members marked with DebuggerBrowsableState.RootHidden that are unwrapped in a single walk (range 0 - 4294967295); zero disables unwrapping; defaults to 32 |
-| `DNCDBG_PDB_MMAP_POLICY` | policy for flushing memory-mapped PDB data after module symbol initialization (range 0 - 1); zero disables flushing; defaults to 1 |
+| `DNCDBG_LOG_DIR` | Debugger-process setting: creates a separate DAP trace and engine log per adapter process in this directory. Explicit CLI log paths take precedence. |
+| `DNCDBG_CONSOLE` | Set to `remoteConsole` in the debugger environment or the launch configuration's `env` to enable the session-owned loopback console relay. |
+| `DNCDBG_REMOTECONSOLEPORT` | Console-relay TCP port; defaults to 4711. Used with `DNCDBG_CONSOLE=remoteConsole`. |
+
+Target environment variables supplied in a DAP launch configuration's `env`
+are forwarded to the target process. Console-relay settings are additionally
+interpreted by the debugger before completing the launch response.
+
+The former native implementation's timeout, pagination, RootHidden-walk, and
+PDB-mmap environment knobs are not interpreted by the managed implementation.
+Do not rely on them to configure a managed session.
+
+For the acceptance-test scripts only, `DNCDBG` selects the debugger executable
+and `DNCDBG_TARGET_FRAMEWORK` overrides the fixture target framework (default
+`net10.0`). Neither changes the debugger's own .NET 10 build target.

@@ -1,8 +1,7 @@
 # Third-Party Notices
 
-This project includes source code from the third-party projects listed below. The versions and revisions correspond to the copies included in [`third-party`](third-party/) or the managed source directories identified below.
-
-The licenses below apply only to the corresponding third-party components. The project itself is licensed under [`LICENSE`](LICENSE).
+The licenses below apply to the corresponding incorporated sources and runtime
+dependencies. DNCDbg itself is licensed under [`LICENSE`](LICENSE).
 
 ## dotnet-debugger
 
@@ -13,7 +12,7 @@ The licenses below apply only to the corresponding third-party components. The p
 - **Copyright:** Copyright (c) 2026 dvislobokov and dotnet-debugger contributors
 - **License text:** [`src/DncDbg.LICENSE`](src/DncDbg.LICENSE)
 
-### Managed NuGet dependencies
+## NuGet dependencies
 
 The managed build/publish includes the following packages and their native
 runtime assets. Licenses are retained under [`src/licenses`](src/licenses/) and
@@ -29,84 +28,11 @@ copied to `licenses/` beside the published executable.
 | [Microsoft.DiaSymReader](https://github.com/dotnet/symreader) | 2.0.0 | MIT; Microsoft Corporation. [`Microsoft.MIT.LICENSE`](src/licenses/Microsoft.MIT.LICENSE) |
 | Microsoft.DiaSymReader.Native | 17.0.0-beta1.21524.1 | Microsoft .NET Library license terms, preserved verbatim from the package: [`Microsoft.DiaSymReader.Native.LICENSE`](src/licenses/Microsoft.DiaSymReader.Native.LICENSE) |
 
-The managed implementation does not change the licensing of these components.
-The native third-party components listed below belong to the retained C++
-reference implementation.
+The full authoritative license and notice texts are shipped at the paths above
+and must remain with redistributed components. Native runtime dependencies are
+still required; their implementation is supplied by these packages rather than
+built from vendored C/C++ sources.
 
-## .NET Diagnostics
-
-- **Project:** [.NET Diagnostics](https://github.com/dotnet/diagnostics)
-- **Included version:** `v10.0.750501`
-- **Included in:** [`third-party/diagnostics`](third-party/diagnostics/)
-- **License:** MIT License
-- **Copyright:** .NET Foundation and Contributors
-- **License text:** [`third-party/diagnostics/LICENSE.TXT`](third-party/diagnostics/LICENSE.TXT)
-
-## base64
-
-- **Project:** [base64](https://github.com/tobiaslocker/base64)
-- **Included version:** `8d96a2a`
-- **Included in:** [`third-party/base64`](third-party/base64/)
-- **License:** MIT License
-- **Copyright:** © 2019 Tobias Locker
-- **License text:** [`third-party/base64/LICENSE`](third-party/base64/LICENSE)
-
-## DNMD
-
-- **Project:** [DNMD](https://github.com/AaronRobinsonMSFT/DNMD)
-- **Included revision:** `51ebc20`
-- **Included in:** [`third-party/dnmd`](third-party/dnmd/)
-- **License:** MIT License
-- **Copyright:** © 2023 Aaron Robinson
-- **License text:** [`third-party/dnmd/LICENSE.md`](third-party/dnmd/LICENSE.md)
-
-## Guidelines Support Library (GSL)
-
-- **Project:** [Microsoft Guidelines Support Library](https://github.com/microsoft/GSL)
-- **Included version:** `5.0.0`
-- **Included in:** [`third-party/gsl`](third-party/gsl/)
-- **License:** MIT License
-- **Copyright:** © 2015 Microsoft Corporation
-- **License text:** [`third-party/gsl/LICENSE`](third-party/gsl/LICENSE)
-
-## nlohmann/json
-
-- **Project:** [JSON for Modern C++](https://github.com/nlohmann/json)
-- **Included version:** `3.12.0`
-- **Included in:** [`third-party/json`](third-party/json/)
-- **License:** MIT License
-- **Copyright:** © 2013–2026 Niels Lohmann
-- **License text:** [`third-party/json/LICENSE.MIT`](third-party/json/LICENSE.MIT)
-
-## miniz
-
-- **Project:** [miniz](https://github.com/richgel999/miniz)
-- **Included version:** `3.1.2`
-- **Included in:** [`third-party/miniz`](third-party/miniz/)
-- **License:** MIT License
-- **Copyright:** 2010–2014 Rich Geldreich and Tenacious Software LLC; 2013–2014 RAD Game Tools and Valve Software
-- **License text:** [`third-party/miniz/LICENSE`](third-party/miniz/LICENSE)
-
-## tree-sitter
-
-- **Project:** [tree-sitter](https://github.com/tree-sitter/tree-sitter)
-- **Included version:** `0.27.1`
-- **Included in:** [`third-party/tree-sitter`](third-party/tree-sitter/)
-- **License:** MIT License
-- **Copyright:** © 2018 Max Brunsfeld
-- **License text:** [`third-party/tree-sitter/LICENSE`](third-party/tree-sitter/LICENSE)
-
-The tree-sitter source also includes Unicode data and software notices in [`third-party/tree-sitter/lib/src/unicode/LICENSE`](third-party/tree-sitter/lib/src/unicode/LICENSE). Those notices include the ICU license and notices for bundled word-break dictionary data, the Time Zone Database, and Google double-conversion.
-
-## tree-sitter-c-sharp
-
-- **Project:** [tree-sitter-c-sharp](https://github.com/tree-sitter/tree-sitter-c-sharp)
-- **Included version:** `0.23.5`
-- **Included in:** [`third-party/tree-sitter-c-sharp`](third-party/tree-sitter-c-sharp/)
-- **License:** MIT License
-- **Copyright:** © 2014–2023 Max Brunsfeld, Damien Guard, Amaan Qureshi, and contributors
-- **License text:** [`third-party/tree-sitter-c-sharp/LICENSE`](third-party/tree-sitter-c-sharp/LICENSE)
-
-## License texts
-
-For the complete and authoritative license text, including all copyright notices and disclaimers, refer to the license files shipped with each component at the paths linked above. The copies in this repository are part of the distributed third-party source and must be retained with those sources.
+The former C++ implementation and its vendored dependency sources are no longer
+distributed in this tree. Their original sources and notices remain in Git
+history, including [checkpoint f19fe33a](https://github.com/mattleibow/dncdbg/tree/f19fe33a/THIRD-PARTY-NOTICES.md).

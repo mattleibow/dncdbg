@@ -8,6 +8,22 @@ Bug reports, feature proposals, and general feedback are all welcome. Please fee
 
 ## How to Contribute Code Changes
 
+Use the stable .NET 10 SDK selected by `global.json`; the implementation uses
+C# 14, nullable reference types, and warnings as errors. No C++ toolchain or
+CMake build is needed.
+
+```sh
+dotnet build
+dotnet run --project tests/DncDbg.SmokeTests -- src/DncDbg.Adapter/bin/Debug/net10.0/dncdbg
+```
+
+Run the relevant unchanged acceptance tests using the commands in
+[test-suite/README.md](test-suite/README.md). Preserve existing Runner,
+ScriptContext, fixture and assertion behavior. Keep CLR interop in the engine,
+using ClrDebug/public debugging APIs rather than runtime-private object layouts.
+
+### Submitting changes
+
 Direct Pull Requests are disabled for this repository. To propose changes, please follow these steps:
 
 1. **Fork the repository** to your own GitHub account.

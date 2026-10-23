@@ -7,14 +7,6 @@
 # Visual Studio (directories)
 .vs
 
-# Qt Creator files
-CMakeLists.txt.user
-*.config
-*.creator
-*.files
-*.includes
-*.autosave
-
 # Build artifacts
 *.o
 *.so
@@ -23,12 +15,6 @@ CMakeLists.txt.user
 *.pdb
 bin/
 obj/
-
-# cross-build related files
-/.tools/
-
-# GDB-related
-.gdb_history
 
 # Vim swap files
 .*.sw?

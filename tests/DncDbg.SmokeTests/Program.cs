@@ -15,6 +15,13 @@ if (args is ["--fixture", "heartbeat"])
         Thread.Sleep(50);
     }
 }
+if (args is ["--fixture", "detach-initializer", var releasePath, var resultPath])
+{
+    while (!File.Exists(releasePath))
+        Thread.Sleep(20);
+    File.WriteAllText(resultPath, DeferredInitializer.Read().ToString(System.Globalization.CultureInfo.InvariantCulture));
+    return;
+}
 if (args is ["--safety", var debugger])
 {
     Console.WriteLine($"Passed {await SafetyChecks.Run(Path.GetFullPath(debugger), typeof(Program).Assembly.Location)} safety checks.");

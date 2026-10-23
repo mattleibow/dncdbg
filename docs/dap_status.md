@@ -2,10 +2,10 @@
 
 This document shows, message by message and field by field, which parts of the [Debug Adapter Protocol](https://microsoft.github.io/debug-adapter-protocol/) are supported by DNCDbg.
 
-> During the C# migration, the detailed matrix below remains the native
-> implementation's compatibility contract, not a declaration of complete managed
-> parity. The managed adapter advertises its currently implemented capabilities
-> in the `initialize` response. Existing acceptance assertions remain unchanged.
+> The detailed matrix below is retained as the original native implementation's
+> compatibility contract. Passing the existing acceptance suite does not certify
+> every field in this matrix or every platform. The managed adapter advertises its
+> currently implemented capabilities in the `initialize` response.
 
 How to read the blocks below:
 

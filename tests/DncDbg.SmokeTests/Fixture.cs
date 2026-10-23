@@ -7,4 +7,16 @@ partial class Program
             Thread.Sleep(100);
         return 1;
     }
+
+    internal static class DeferredInitializer
+    {
+        private static readonly int Value;
+
+        static DeferredInitializer()
+        {
+            Value = 42;
+        }
+
+        public static int Read() => Value;
+    }
 }

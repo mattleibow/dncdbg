@@ -1,91 +1,38 @@
-# Building from Source Code on macOS
+# Building on macOS
 
-## Managed debugger (.NET 10 / C# 14)
+Install the stable .NET 10 SDK selected by [`global.json`](../global.json).
+Apple Silicon uses arm64; Intel uses x64. Debugger and target architectures
+must match. No C++ compiler, Xcode build, or CMake is required.
 
-Install the stable .NET SDK selected by `global.json`, then run from the repository root:
+From the repository root:
 
 ```sh
 dotnet build
 dotnet publish src/DncDbg.Adapter -c Release -o bin
 ./bin/dncdbg --buildinfo
+dotnet run --project tests/DncDbg.SmokeTests -- bin/dncdbg
 cd test-suite
 DNCDBG=../bin/dncdbg bash run_tests.sh
 ```
 
-Apple Silicon uses the arm64 SDK/runtime; Intel uses x64. The debugger and target
-process must have matching architecture. CLR debugging assets are restored from
-NuGet. Xcode and CMake are not prerequisites for the managed build.
+The framework-dependent apphost requires .NET 10. For a self-contained Apple
+Silicon publish:
 
-## Legacy native reference build
-
-The instructions below apply only to the retained C++ reference implementation
-while managed compatibility work is in progress.
-
-## Prerequisites
-
-Before you begin, ensure you have the necessary tools installed.
-
-#### Install Xcode Command Line Tools
-macOS does not come with a compiler by default. Clang is provided via the Command Line Tools. Open your Terminal and run:
-```
-xcode-select --install
-```
-Verify by running: `clang --version`
-
-#### Install CMake
-The most efficient way to manage packages on macOS is via [Homebrew](https://brew.sh/). If you have it installed, run:
-```
-brew install cmake
-```
-Alternatively, download the binary from the [CMake official website](https://cmake.org/download/).
-
-## Compiling
-
-Configure the build with the following commands:
-
-```
-user@dncdbg$ mkdir build
-user@dncdbg$ cd build
-user@build$ cmake ..
-```
-The build system requires **Clang** (AppleClang). You can ensure it is used by prefixing the `cmake` command with compiler variables:
-```
-user@build$ CC=clang CXX=clang++ cmake ..
-```
-**Note:** If you have multiple versions of LLVM/Clang installed (e.g., via Homebrew), CMake will use the system-default AppleClang unless you provide a specific path.
-
-In order to run tests after a successful build, you need to add the option
-`-DCMAKE_INSTALL_PREFIX=$PWD/../bin`
-
-Add your build type (`Release` or `Debug`), for example:
-`-DCMAKE_BUILD_TYPE=Release`
-
-Optionally, you can specify the target architecture manually using `arm64` or `x86_64`. If not provided, the build system will automatically use your host architecture. Note that universal binaries are not recommended because the debugger requires a matching .NET SDK for the specific architecture. Example: `-DCMAKE_OSX_ARCHITECTURES=arm64`
-
-To build with Address Sanitizer, add the option
-`-DASAN=1`
-
-To build with Undefined Behavior Sanitizer, add the option
-`-DUBSAN=1`
-
-To build with case-sensitive file name collision, add the option
-`-DCASE_SENSITIVE_FILENAME_COLLISION=1`
-
-In case you have long hang related to VBCSCompiler process don't exit at the end of the build after all binaries are installed, disable shared compilation:
-`UseSharedCompilation=false UseRearNodes=false`
-
-After configuration has finished, you can then build debugger:
-
-```
-cmake --build . --target install --parallel $(sysctl -n hw.ncpu)
+```sh
+dotnet publish src/DncDbg.Adapter -c Release -r osx-arm64 --self-contained true -o bin/osx-arm64
 ```
 
-As an example, the complete build sequence for an Apple Silicon Mac might look like:
+Use `osx-x64` for Intel. Keep all published assemblies, native runtime assets
+and licenses together. CLR debugging libraries come from NuGet.
 
-```
-user@dncdbg$ mkdir build && cd build
-user@build$ CC=clang CXX=clang++ cmake .. \
-    -DCMAKE_INSTALL_PREFIX=$PWD/../bin \
-    -DCMAKE_BUILD_TYPE=Release
-user@build$ cmake --build . --target install --parallel $(sysctl -n hw.ncpu) -- UseSharedCompilation=false UseRearNodes=false
-```
+## Debuggee signing
+
+macOS restricts debugging executables without the
+`com.apple.security.get-task-allow` entitlement. When possible, the debugger
+launches an application's DLL with the signed `dotnet` host instead of its
+apphost. Self-contained/single-file targets may need to be signed for debugging
+with `/usr/bin/codesign`; the launch diagnostic describes the required
+entitlement. Attaching is also subject to macOS debugging permissions.
+
+The test suite defaults to `net10.0` and preserves `DNCDBG_TARGET_FRAMEWORK`.
+See [local testing](../test-suite/README.md).

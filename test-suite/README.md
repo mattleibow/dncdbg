@@ -28,6 +28,15 @@ cd test-suite
 DNCDBG=../bin/dncdbg bash run_tests.sh TestBreakpoint TestEvaluate TestStackTrace TestMemoryReferences TestReadWriteMemory
 ```
 
+For the focused stepping parity set against the published Release host:
+
+```sh
+DNCDBG=../bin/dncdbg bash run_tests.sh TestStepping TestStepping_NoJMCNoFilter TestAsyncStepping TestAsyncStepping_NoJMC
+```
+
+The debugger's build configuration is independent of each test fixture's
+configuration; the existing scripts continue to select the appropriate fixture.
+
 Run the additional cross-platform CLI/protocol smoke checks from the repository root:
 
 ```sh
@@ -41,7 +50,10 @@ The smoke runner also exercises startup/unregistration barriers, rejection of
 late startup callbacks, cancellation of a delayed external launcher, a 1 MiB
 stdin write to a non-reading target followed by disconnect, detached-child
 survival beyond disposal timeouts, and pause during function evaluation followed
-by a heartbeat after exactly one continue. Run these safety checks alone with:
+by a heartbeat after exactly one continue. They also arm static-initializer and
+user breakpoints, detach, verify internal breakpoint cleanup, dispose the
+debugger, and let the detached target complete its watched initializer.
+Run these safety checks alone with:
 
 ```sh
 dotnet run --project tests/DncDbg.SmokeTests -- --safety bin/dncdbg

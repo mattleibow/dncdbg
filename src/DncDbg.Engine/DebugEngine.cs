@@ -666,6 +666,16 @@ public sealed partial class DebugEngine : IDisposable
                     Unbind(bp);
                 DeactivateStepper();
                 ClearAsyncStep();
+                ClearStepInTarget();
+                ClearReturnSites();
+                foreach (NativeBreakpoint breakpoint in _nativeBreakpoints.Values)
+                {
+                    try { breakpoint.Breakpoint.Activate(false); }
+                    catch (Exception e) { Log?.Invoke("Cannot deactivate breakpoint before detach: " + e.Message); }
+                }
+                _nativeBreakpoints.Clear();
+                _initializationSites.Clear();
+                _entryBreakpoint = null;
                 _process.Detach();
             }
             catch (Exception e)
@@ -1150,7 +1160,7 @@ public sealed partial class DebugEngine : IDisposable
                 BindBreakpoints(loaded);
             return;
         }
-        if (userCode)
+        if (userCode && _justMyCode)
             MarkNonUserCode(loaded.Module, metadata!);
         BindBreakpoints(loaded);
         if (userCode && _stopAtEntry && _entryBreakpoint == null)
@@ -1262,7 +1272,7 @@ public sealed partial class DebugEngine : IDisposable
 
     private void ClearStopState()
     {
-        _asyncReturnStop = null;
+        _stepReturnStop = null;
         _stopped = false;
         _frames.Clear();
         _externalFrames.Clear();

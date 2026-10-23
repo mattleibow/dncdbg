@@ -138,8 +138,59 @@ internal static class SafetyChecks
             await session.Exited();
         }
 
+        string releasePath = Path.GetFullPath($"build/validation/detach-{Guid.NewGuid():N}.release");
+        string resultPath = Path.ChangeExtension(releasePath, ".result");
+        using (var engine = new DebugEngine())
+        {
+            var stopped = new TaskCompletionSource<StopInfo>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var diagnostics = new System.Collections.Concurrent.ConcurrentQueue<string>();
+            engine.Stopped += stop => stopped.TrySetResult(stop);
+            engine.Log = diagnostics.Enqueue;
+            engine.ConfigurationDone();
+            engine.Launch(new LaunchOptions
+            {
+                Program = fixture,
+                Args = ["--fixture", "detach-initializer", releasePath, resultPath],
+                StopAtEntry = true,
+            });
+            using Process target = Process.GetProcessById(engine.ProcessId);
+            try
+            {
+                await stopped.Task.WaitAsync(TimeSpan.FromSeconds(10));
+                Check(PrivateCount(engine, "_initializationSites") > 0 && PrivateCount(engine, "_nativeBreakpoints") > 0,
+                    "static initializer watchpoints are armed before detach");
+                Check(engine.SetFunctionBreakpoints([new FunctionBreakpointRequest("DeferredInitializer.Read")]).Single().Verified,
+                    "future user breakpoint is armed before detach");
+                engine.Detach();
+                Check(PrivateCount(engine, "_nativeBreakpoints") == 0 && PrivateCount(engine, "_initializationSites") == 0
+                    && PrivateCount(engine, "_returnSites") == 0 && PrivateValue(engine, "_entryBreakpoint") == null
+                    && PrivateValue(engine, "_stepInTargetBreakpoint") == null && PrivateValue(engine, "_activeStepper") == null
+                    && !diagnostics.Any(message => message.StartsWith("Detach failed:", StringComparison.Ordinal)),
+                    "detach removes all user and internal breakpoints before releasing the process");
+                engine.Dispose();
+                File.WriteAllText(releasePath, "go");
+                await target.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+                Check(target.HasExited && File.Exists(resultPath) && File.ReadAllText(resultPath) == "42",
+                    "detached target completes its previously watched static initializer after debugger disposal");
+            }
+            finally
+            {
+                if (!target.HasExited)
+                    target.Kill(entireProcessTree: true);
+                await target.WaitForExitAsync();
+                File.Delete(releasePath);
+                File.Delete(resultPath);
+            }
+        }
+
         return checks;
     }
+
+    private static object? PrivateValue(DebugEngine engine, string name) =>
+        typeof(DebugEngine).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(engine);
+
+    private static int PrivateCount(DebugEngine engine, string name) =>
+        ((System.Collections.ICollection)PrivateValue(engine, name)!).Count;
 
     private static Process StartFixture(string fixture)
     {

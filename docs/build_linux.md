@@ -1,85 +1,29 @@
-# Building from Source Code on Linux OS
+# Building on Linux
 
-## Managed debugger (.NET 10 / C# 14)
-
-Install the stable .NET SDK selected by `global.json` and its distribution's
-runtime prerequisites, then run from the repository root:
+Install the stable .NET 10 SDK selected by [`global.json`](../global.json)
+and your distribution's .NET runtime prerequisites. A C++ compiler and CMake
+are not required. Run from the repository root:
 
 ```sh
 dotnet build
 dotnet publish src/DncDbg.Adapter -c Release -o bin
 ./bin/dncdbg --buildinfo
+dotnet run --project tests/DncDbg.SmokeTests -- bin/dncdbg
 cd test-suite
 DNCDBG=../bin/dncdbg bash run_tests.sh
 ```
 
-Use matching debugger/target architectures. Native CLR debugging assets come
-from NuGet; a C++ compiler and CMake are not required for the managed build.
-For self-contained deployments, specify the platform RID (for example,
-`-r linux-x64 --self-contained true`).
+The apphost requires .NET 10 unless published self-contained. Keep all published
+assemblies, native runtime assets and licenses together. For example:
 
-## Legacy native reference build
-
-The instructions below apply only to the retained C++ reference implementation
-while managed compatibility work is in progress.
-
-## Prerequisites
-
-1. You need to install `cmake` and `make`;
-2. You need the clang C++ compiler installed (the debugger cannot be built with gcc).
-3. You may also need to install some common developer tools not mentioned here, such as [Git](https://www.git-scm.com/downloads), etc.
-
-***Debian/Ubuntu prerequisites installation:***
-```
-sudo apt install cmake clang llvm build-essential libcurl4-openssl-dev
-```
-***Alpine Linux prerequisites installation:***
-```
-apk add cmake make clang llvm build-base icu-libs bash curl-dev
+```sh
+dotnet publish src/DncDbg.Adapter -c Release -r linux-x64 --self-contained true -o bin/linux-x64
 ```
 
-## Compiling
+Use matching debugger/target architectures and an RID supported by the CLR
+debugging packages. CLR assets are restored from NuGet, not built locally.
+Attaching to an existing process is subject to the OS ptrace/security policy.
 
-Configure the build with the following commands:
-
-```
-user@dncdbg$ mkdir build
-user@dncdbg$ cd build
-user@build$ CC=clang CXX=clang++ cmake ..
-```
-
-In order to run tests after a successful build, you need to add the option
-`-DCMAKE_INSTALL_PREFIX=$PWD/../bin`
-
-Add your build type (`Release` or `Debug`), for example:
-`-DCMAKE_BUILD_TYPE=Release`
-
-To build with Address Sanitizer, add the option
-`-DASAN=1`
-
-To build with Undefined Behavior Sanitizer, add the option
-`-DUBSAN=1`
-
-To build with clang-tidy (note, the `clang-tidy` package must be installed), add the option `-DCLANG_TIDY=1`
-
-To build with cppcheck (note, the `cppcheck` package must be installed), add the option
-`-DCPPCHECK=1`
-
-To build with case-sensitive file name collision, add the option
-`-DCASE_SENSITIVE_FILENAME_COLLISION=1`
-
-After configuration has finished, you can then build debugger:
-
-```
-cmake --build . --target install --parallel $(nproc --all)
-```
-
-As an example, the complete build sequence might look like:
-
-```
-user@dncdbg$ mkdir build && cd build
-user@build$ CC=clang CXX=clang++ cmake .. \
-    -DCMAKE_INSTALL_PREFIX=$PWD/../bin \
-    -DCMAKE_BUILD_TYPE=Release
-user@build$ cmake --build . --target install --parallel $(nproc --all)
-```
+The test suite defaults to `net10.0`; `DNCDBG_TARGET_FRAMEWORK` overrides the
+fixture target when the corresponding SDK/runtime is installed.
+See [local testing](../test-suite/README.md) for focused test selection.

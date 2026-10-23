@@ -24,6 +24,8 @@ Upcoming changes compared to the previous version.
 #### Fixed
 - Fixed startup failure on systems with no locales generated at all (e.g. a minimal Ubuntu chroot): fall back to the "C.UTF-8" or "C" locale when the environment locale is unavailable instead of exiting.
 - Fixed incorrect uppercase conversion of non-ASCII input when the environment locale is not UTF-8 capable (e.g. a Docker container with `LANG` unset): verify the applied locale and fall back to the "C.UTF-8" or "C" locale otherwise.
+- Fixed a resume handle leak when `ResumeProcess()` fails during the debuggee launch (the handle ownership is transferred to the caller by `CreateProcessForLaunch()`, so it is closed even if the resume fails).
+- Fixed missing debug session cleanup on detach/terminate when the process is marked as attached but its `ICorDebug` process object is already missing.
 
 <br>
 <br>

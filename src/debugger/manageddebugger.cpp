@@ -95,7 +95,7 @@ HRESULT GetSystemEnvironmentAsMap(std::map<std::string, std::string> &outMap)
     while (pEnv[counter] != nullptr)
     {
         const std::string env = pEnv[counter];
-        const size_t pos = env.find_first_of('=');
+        const size_t pos = env.find('=');
         if (pos != std::string::npos && pos != 0)
         {
             outMap.emplace(env.substr(0, pos), env.substr(pos + 1));
@@ -201,7 +201,8 @@ void PrepareSystemEnvironmentArg(const std::map<std::string, std::string> &env, 
     // We need to append the environment values while keeping the current process environment block.
     // It works equally for all platforms in coreclr CreateProcessW(), but is not critical for Linux.
     std::map<std::string, std::string> envMap;
-    if (SUCCEEDED(GetSystemEnvironmentAsMap(envMap)))
+    const bool systemEnvAvailable = SUCCEEDED(GetSystemEnvironmentAsMap(envMap));
+    if (systemEnvAvailable)
     {
         // Override the system value (PATHs appending needs a complex implementation)
         for (const auto &pair : env)
@@ -216,68 +217,55 @@ void PrepareSystemEnvironmentArg(const std::map<std::string, std::string> &env, 
                 envMap.emplace(pair);
             }
         }
-        for (const auto &pair : envMap)
+    }
+    else
+    {
+        envMap = env;
+    }
+
+    for (const auto &pair : envMap)
+    {
+        if (pair.first == diagnosticPortSuspendEnv)
         {
-            if (pair.first == diagnosticPortSuspendEnv)
+            if (systemEnvAvailable)
             {
 #ifdef _WIN32
                 _putenv_s(diagnosticPortSuspendEnv.c_str(), "");
 #else
                 unsetenv(diagnosticPortSuspendEnv.c_str());
 #endif
-                DAP::EmitOutputEvent(OutputEvent(OutputCategory::StdOut,
-                    "Environment variable " + diagnosticPortSuspendEnv + " skipped."));
-                continue;
             }
 
-            if (pair.first == diagnosticPortsEnv)
+            DAP::EmitOutputEvent(OutputEvent(OutputCategory::StdOut,
+                "Environment variable " + diagnosticPortSuspendEnv + " skipped."));
+            continue;
+        }
+
+        if (pair.first == diagnosticPortsEnv)
+        {
+            const std::string adjustedValue{AdjustDiagnosticPortsValue(pair.second)};
+            if (adjustedValue != pair.second)
             {
-                const std::string adjustedValue{AdjustDiagnosticPortsValue(pair.second)};
-                if (adjustedValue != pair.second)
-                {
-                    DAP::EmitOutputEvent(OutputEvent(OutputCategory::StdOut,
-                        "Environment variable DOTNET_DiagnosticPorts value adjusted to '" + adjustedValue + "'."));
-                }
+                DAP::EmitOutputEvent(OutputEvent(OutputCategory::StdOut,
+                    "Environment variable DOTNET_DiagnosticPorts value adjusted to '" + adjustedValue + "'."));
+            }
+
+            if (systemEnvAvailable)
+            {
 #ifdef _WIN32
                 _putenv_s(diagnosticPortsEnv.c_str(), adjustedValue.c_str());
 #else
                 setenv(diagnosticPortsEnv.c_str(), adjustedValue.c_str(), 1);
 #endif
-                appendEnvVariable(pair.first, adjustedValue);
-                continue;
             }
 
-            appendEnvVariable(pair.first, pair.second);
+            appendEnvVariable(pair.first, adjustedValue);
+            continue;
         }
-        outEnv.push_back('\0');
-    }
-    else
-    {
-        for (const auto &pair : env)
-        {
-            if (pair.first == diagnosticPortSuspendEnv)
-            {
-                DAP::EmitOutputEvent(OutputEvent(OutputCategory::StdOut,
-                    "Environment variable " + diagnosticPortSuspendEnv + " skipped."));
-                continue;
-            }
 
-            if (pair.first == diagnosticPortsEnv)
-            {
-                const std::string adjustedValue{AdjustDiagnosticPortsValue(pair.second)};
-                if (adjustedValue != pair.second)
-                {
-                    DAP::EmitOutputEvent(OutputEvent(OutputCategory::StdOut,
-                        "Environment variable DOTNET_DiagnosticPorts value adjusted to '" + adjustedValue + "'."));
-                }
-                appendEnvVariable(pair.first, adjustedValue);
-                continue;
-            }
-
-            appendEnvVariable(pair.first, pair.second);
-        }
-        outEnv.push_back('\0');
+        appendEnvVariable(pair.first, pair.second);
     }
+    outEnv.push_back('\0');
 }
 
 void ResumeRuntime(uint32_t processId)
@@ -606,6 +594,15 @@ HRESULT CheckNoProcess()
     return S_OK;
 }
 
+// Resume the debuggee process and close the resume handle. The resume handle ownership is
+// transferred to the caller by CreateProcessForLaunch(), so it is closed even if the resume fails.
+HRESULT ResumeProcessAndCloseHandle(HANDLE resumeHandle)
+{
+    const HRESULT Status = GetDbgshim().GetResumeProcess()(resumeHandle);
+    GetDbgshim().GetCloseResumeHandle()(resumeHandle);
+    return Status;
+}
+
 HRESULT LaunchProcess(const std::string &fileExec, const std::vector<std::string> &execArgs)
 {
     HRESULT Status = S_OK;
@@ -691,8 +688,7 @@ HRESULT LaunchProcess(const std::string &fileExec, const std::vector<std::string
         // creation is notified above.
         SetupProcessExitWatcher(GetProcessId(), exitProcess);
 
-        IfFailRet(GetDbgshim().GetResumeProcess()(resumeHandle));
-        GetDbgshim().GetCloseResumeHandle()(resumeHandle);
+        IfFailRet(ResumeProcessAndCloseHandle(resumeHandle));
 
         DAP::EmitProcessEvent(GetProcessId(), fileExec, GetStartMethod());
 
@@ -708,8 +704,7 @@ HRESULT LaunchProcess(const std::string &fileExec, const std::vector<std::string
     IfFailRet(GetDbgshim().GetRegisterForRuntimeStartup()(GetProcessId(), StartupCallback, nullptr, &GetUnregisterToken()));
 
     // Resume the process so that StartupCallback can run.
-    IfFailRet(GetDbgshim().GetResumeProcess()(resumeHandle));
-    GetDbgshim().GetCloseResumeHandle()(resumeHandle);
+    IfFailRet(ResumeProcessAndCloseHandle(resumeHandle));
 
     std::unique_lock<std::mutex> lockAttachedMutex(GetProcessAttachedMutex());
     if (!GetProcessAttachedCV().wait_for(lockAttachedMutex, std::chrono::milliseconds(Config::GetStartupTimeoutMs()),
@@ -749,8 +744,26 @@ HRESULT AttachToProcess()
     return S_OK;
 }
 
+// Stop the execution of the debuggee process, if it is running, and disable steppers and
+// breakpoints, so no callback can interfere with the pending Detach() or Terminate() call.
+// The caller must hold the debug process RWLock and the process attached mutex; the ICorDebug
+// process object must be valid.
+void StopProcessActivity()
+{
+    BOOL procRunning = FALSE;
+    if (SUCCEEDED(GetTrProcess()->IsRunning(&procRunning)) && procRunning == TRUE)
+    {
+        GetTrProcess()->Stop(0);
+    }
+
+    Steppers::DisableAll(GetTrProcess()); // Disable steppers first: an async stepper could have breakpoints active.
+    Breakpoints::DisableAll(GetTrProcess()); // Disable breakpoints last, on all domains, even the ones we don't hold.
+}
+
 HRESULT DetachFromProcess()
 {
+    HRESULT Status = S_OK;
+
     do
     {
         const ReadLock r_lock(GetDebugProcessRWLock());
@@ -762,20 +775,17 @@ HRESULT DetachFromProcess()
 
         if (GetTrProcess() == nullptr)
         {
-            return E_FAIL;
+            // The process object is missing, while the process is still marked as attached:
+            // an inconsistent state. Report the error, but clean up the debug session anyway,
+            // so the debugger internal state cannot get stuck.
+            Status = E_FAIL;
+            break;
         }
 
-        BOOL procRunning = FALSE;
-        if (SUCCEEDED(GetTrProcess()->IsRunning(&procRunning)) && procRunning == TRUE)
-        {
-            GetTrProcess()->Stop(0);
-        }
+        StopProcessActivity();
 
-        Steppers::DisableAll(GetTrProcess()); // Disable steppers first: an async stepper could have breakpoints active.
-        Breakpoints::DisableAll(GetTrProcess()); // Disable breakpoints last, on all domains, even the ones we don't hold.
-
-        HRESULT Status = S_OK;
-        if (FAILED(Status = GetTrProcess()->Detach()))
+        Status = GetTrProcess()->Detach();
+        if (FAILED(Status))
         {
             LOGE(log << "Process detach failed: 0x" << std::setw(hexErrWidth) << std::setfill('0') << std::hex << Status);
         }
@@ -785,11 +795,13 @@ HRESULT DetachFromProcess()
     while (false);
 
     CleanupDebugSession();
-    return S_OK;
+    return Status;
 }
 
 HRESULT TerminateProcess()
 {
+    HRESULT Status = S_OK;
+
     do
     {
         const ReadLock r_lock(GetDebugProcessRWLock());
@@ -801,45 +813,55 @@ HRESULT TerminateProcess()
 
         if (GetTrProcess() == nullptr)
         {
-            return E_FAIL;
-        }
-
-        BOOL procRunning = FALSE;
-        if (SUCCEEDED(GetTrProcess()->IsRunning(&procRunning)) && procRunning == TRUE)
-        {
-            GetTrProcess()->Stop(0);
-        }
-
-        Steppers::DisableAll(GetTrProcess()); // Disable steppers first: an async stepper could have breakpoints active.
-        Breakpoints::DisableAll(GetTrProcess()); // Disable breakpoints last, on all domains, even the ones we don't hold.
-
-        HRESULT Status = S_OK;
-        if (SUCCEEDED(Status = GetTrProcess()->Terminate(0)))
-        {
-            // https://learn.microsoft.com/en-us/dotnet/core/unmanaged-api/debugging/icordebug/icordebugcontroller-terminate-method
-            // If the process is stopped when Terminate is called, the process should be continued by using the
-            // ICorDebugController::Continue method so that the debugger receives confirmation of the termination
-            // through the ICorDebugManagedCallback::ExitProcess or ICorDebugManagedCallback::ExitAppDomain callback.
-            GetTrProcess()->Continue(0);
-
-            if (!GetProcessAttachedCV().wait_for(lockAttachedMutex, std::chrono::milliseconds(Config::GetTerminationTimeoutMs()),
-                                                 [] { return GetProcessAttachedState() == ProcessAttachedState::Unattached; }))
-            {
-                // The ICorDebugManagedCallback::ExitProcess callback did not arrive in time; since we
-                // free the process object anyway, reset the process attached state (see the session
-                // cleanup below).
-                GetProcessAttachedState() = ProcessAttachedState::Unattached;
-            }
+            // The process object is missing, while the process is still marked as attached:
+            // an inconsistent state. Report the error, but clean up the debug session anyway,
+            // so the debugger internal state cannot get stuck.
+            Status = E_FAIL;
             break;
         }
 
-        LOGE(log << "Process terminate failed: 0x" << std::setw(hexErrWidth) << std::setfill('0') << std::hex << Status);
-        GetProcessAttachedState() = ProcessAttachedState::Unattached; // Since we free process object anyway, reset process attached state.
+        StopProcessActivity();
+
+        if (FAILED(Status = GetTrProcess()->Terminate(0)))
+        {
+            // The debuggee may exit on its own concurrently with the terminate request (e.g. it
+            // crashes on an unhandled exception). In this case Terminate() fails with
+            // CORDBG_E_PROCESS_TERMINATED, while the ICorDebugManagedCallback::ExitProcess callback
+            // still reports the exit, so the `exited` and `terminated` events are emitted anyway.
+            // Since the process is already terminated, treat the request as succeeded.
+            if (Status == CORDBG_E_PROCESS_TERMINATED)
+            {
+                LOGW(log << "Process already terminated: 0x" << std::setw(hexErrWidth) << std::setfill('0') << std::hex << Status);
+                Status = S_OK;
+            }
+            else
+            {
+                LOGE(log << "Process terminate failed: 0x" << std::setw(hexErrWidth) << std::setfill('0') << std::hex << Status);
+            }
+
+            GetProcessAttachedState() = ProcessAttachedState::Unattached; // Since we free process object anyway, reset process attached state.
+            break;
+        }
+
+        // https://learn.microsoft.com/en-us/dotnet/core/unmanaged-api/debugging/icordebug/icordebugcontroller-terminate-method
+        // If the process is stopped when Terminate is called, the process should be continued by using the
+        // ICorDebugController::Continue method so that the debugger receives confirmation of the termination
+        // through the ICorDebugManagedCallback::ExitProcess or ICorDebugManagedCallback::ExitAppDomain callback.
+        GetTrProcess()->Continue(0);
+
+        if (!GetProcessAttachedCV().wait_for(lockAttachedMutex, std::chrono::milliseconds(Config::GetTerminationTimeoutMs()),
+                                             [] { return GetProcessAttachedState() == ProcessAttachedState::Unattached; }))
+        {
+            // The ICorDebugManagedCallback::ExitProcess callback did not arrive in time; since we
+            // free the process object anyway, reset the process attached state (see the session
+            // cleanup below).
+            GetProcessAttachedState() = ProcessAttachedState::Unattached;
+        }
     }
     while (false);
 
     CleanupDebugSession();
-    return S_OK;
+    return Status;
 }
 
 void ReleaseICorDebug()
@@ -858,6 +880,14 @@ void ReleaseICorDebug()
 
     GetTrDebug()->Terminate();
     GetTrDebug().Free();
+}
+
+// Clear the state cached during the break and notify the DAP client that the execution has been resumed.
+void NotifyExecutionResumed(ThreadId threadId, bool singleThread)
+{
+    Variables::Cleanup();
+    FrameId::Cleanup();                              // Clear all frames created during the break.
+    DAP::EmitContinuedEvent(threadId, singleThread); // DAP needs thread ID.
 }
 
 } // unnamed namespace
@@ -1116,9 +1146,7 @@ HRESULT StepCommand(ThreadId threadId, StepType stepType, bool singleThread)
     }
     else
     {
-        Variables::Cleanup();
-        FrameId::Cleanup();                              // Clear all frames created during the break.
-        DAP::EmitContinuedEvent(threadId, singleThread); // DAP needs thread ID.
+        NotifyExecutionResumed(threadId, singleThread);
     }
 
     return Status;
@@ -1151,9 +1179,7 @@ HRESULT Continue(ThreadId threadId, bool singleThread)
     }
     else
     {
-        Variables::Cleanup();
-        FrameId::Cleanup();                              // Clear all frames created during the break.
-        DAP::EmitContinuedEvent(threadId, singleThread); // DAP needs thread ID.
+        NotifyExecutionResumed(threadId, singleThread);
     }
 
     return Status;
@@ -1244,12 +1270,9 @@ HRESULT GetStackTrace(ThreadId threadId, FrameLevel startFrame, unsigned maxFram
     IfFailRet(CheckDebugProcess());
 
     ToRelease<ICorDebugThread> trThread;
-    if (SUCCEEDED(Status = GetTrProcess()->GetThread(static_cast<int>(threadId), &trThread)))
-    {
-        return GetStackFrames(trThread, threadId, startFrame, maxFrames, stackFrames);
-    }
+    IfFailRet(GetTrProcess()->GetThread(static_cast<int>(threadId), &trThread));
 
-    return Status;
+    return GetStackFrames(trThread, threadId, startFrame, maxFrames, stackFrames);
 }
 
 HRESULT GetVariables(uint32_t variablesReference, std::vector<Variable> &variables)
@@ -1330,11 +1353,10 @@ void GetModules(int startModule, int moduleCount, std::vector<Module> &modules, 
 
 HRESULT GetGotoTarget(const Source &source, int32_t line, int32_t column, std::vector<GotoTarget> &targets, std::string &output)
 {
-    HRESULT Status = S_OK;
-
     std::vector<GotoTarget> publicTargets;
     GetIntTargets().clear();
 
+    HRESULT Status = S_OK;
     IfFailRet(Goto::GetTarget(source, line, column, publicTargets, GetIntTargets(), output));
 
     targets = std::move(publicTargets);
@@ -1344,26 +1366,13 @@ HRESULT GetGotoTarget(const Source &source, int32_t line, int32_t column, std::v
 
 HRESULT Goto(ThreadId threadId, uint32_t targetId, std::string &output)
 {
-    if (GetIntTargets().empty())
-    {
-        return E_INVALIDARG;
-    }
-
-    bool targetFound = false;
-    uint32_t targetIndex = 0;
-    for (const auto &target : GetIntTargets())
-    {
-        if (targetId != target.id)
-        {
-            targetIndex++;
-            continue;
-        }
-
-        targetFound = true;
-        break;
-    }
-
-    if (!targetFound)
+    const std::vector<Goto::TargetInternal> &intTargets{GetIntTargets()};
+    const auto targetIt{std::find_if(intTargets.cbegin(), intTargets.cend(),
+                                     [targetId](const Goto::TargetInternal &target)
+                                     {
+                                         return target.id == targetId;
+                                     })};
+    if (targetIt == intTargets.cend())
     {
         return E_INVALIDARG;
     }
@@ -1403,7 +1412,7 @@ HRESULT Goto(ThreadId threadId, uint32_t targetId, std::string &output)
     CORDB_ADDRESS modAddress = 0;
     IfFailRet(trModule->GetBaseAddress(&modAddress));
 
-    const Goto::TargetInternal &target = GetIntTargets().at(targetIndex);
+    const Goto::TargetInternal &target = *targetIt;
 
     if (target.modAddress != modAddress ||
         target.methodToken != methodToken)

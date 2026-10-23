@@ -5,8 +5,12 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <Version>4.0.0</Version>
+    <Version>1.3.0</Version>
     <Authors>DncDbg contributors</Authors>
+    <Product>DNCDbg</Product>
+    <RepositoryUrl>https://github.com/mattleibow/dncdbg</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageProjectUrl>https://github.com/mattleibow/dncdbg</PackageProjectUrl>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <IsPackable>false</IsPackable>
   </PropertyGroup>

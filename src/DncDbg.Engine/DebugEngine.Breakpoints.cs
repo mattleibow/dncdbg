@@ -33,8 +33,8 @@ public sealed partial class DebugEngine
         // function breakpoint
         public string? FunctionName { get; init; }
 
-        public string? Condition { get; init; }
-        public string? HitCondition { get; init; }
+        public string? Condition { get; set; }
+        public string? HitCondition { get; set; }
         public string? LogMessage { get; init; }
         public int HitCount { get; set; }
 
@@ -51,7 +51,7 @@ public sealed partial class DebugEngine
         public HashSet<string> ExternalModules { get; } = [];
 
         public bool Verified => Bound.Count > 0;
-        public bool NeedsEvaluation => Condition != null || LogMessage != null;
+        public bool NeedsEvaluation => Condition != null || HitCondition != null || LogMessage != null;
 
         public BreakpointInfo ToInfo() => new(Id, Path, Verified, Resolved?.Line ?? RequestedLine,
             Resolved?.Column ?? RequestedColumn, Resolved?.EndLine, Resolved?.EndColumn,
@@ -86,11 +86,16 @@ public sealed partial class DebugEngine
                 if (_breakpoints.Remove(sourcePath, out List<UserBreakpoint>? old))
                     old.ForEach(Unbind);
 
-                var created = requests.Select(r => new UserBreakpoint
+                var created = requests.Select(r =>
                 {
-                    Id = ++_nextBreakpointId, Path = sourcePath, RequestedLine = r.Line, RequestedColumn = r.Column,
-                    Condition = NullIfBlank(r.Condition), HitCondition = NullIfBlank(r.HitCondition), LogMessage = NullIfBlank(r.LogMessage),
-                    Invalid = r.Line <= 0 ? "Not a valid line number: lines start at 1." : ValidateHitCondition(r.HitCondition),
+                    UserBreakpoint? previous = old?.FirstOrDefault(b => b.RequestedLine == r.Line && b.RequestedColumn == r.Column);
+                    return new UserBreakpoint
+                    {
+                        Id = previous?.Id ?? ++_nextBreakpointId, Path = sourcePath, RequestedLine = r.Line, RequestedColumn = r.Column,
+                        Condition = NullIfBlank(r.Condition), HitCondition = NullIfBlank(r.HitCondition), LogMessage = NullIfBlank(r.LogMessage),
+                        HitCount = previous?.HitCount ?? 0,
+                        Invalid = r.Line <= 0 ? "Not a valid line number: lines start at 1." : null,
+                    };
                 }).ToList();
                 return Install(created, c => _breakpoints[sourcePath] = c);
             });
@@ -108,9 +113,8 @@ public sealed partial class DebugEngine
                 _functionBreakpoints.Clear();
                 var created = requests.Select(r => new UserBreakpoint
                 {
-                    Id = ++_nextBreakpointId, FunctionName = r.Name.Trim().TrimEnd('(', ')'),
+                    Id = ++_nextBreakpointId, FunctionName = r.Name.Trim(),
                     Condition = NullIfBlank(r.Condition), HitCondition = NullIfBlank(r.HitCondition),
-                    Invalid = ValidateHitCondition(r.HitCondition),
                 }).ToList();
                 return Install(created, _functionBreakpoints.AddRange);
             });
@@ -181,7 +185,8 @@ public sealed partial class DebugEngine
                     return false;
                 }
                 foreach ((int token, int offset) in methods)
-                    bp.Bound.Add(AcquireNativeBreakpoint(module, token, offset));
+                    if (!metadata.IsHiddenMethod(token) && (!_justMyCode || IsUserCode(module.Module.GetFunctionFromToken(new mdMethodDef(token)))))
+                        bp.Bound.Add(AcquireNativeBreakpoint(module, token, offset));
                 return true;
             }
             if (!metadata.HasSymbols)
@@ -189,6 +194,9 @@ public sealed partial class DebugEngine
 
             string pdbPath = ToPdbPath(bp.Path!);
             if (metadata.ResolveBreakpoint(pdbPath, bp.RequestedLine, bp.RequestedColumn) is not { } resolved)
+                return false;
+            if (metadata.IsHiddenMethod(resolved.MethodToken)
+                || (_justMyCode && !IsUserCode(module.Module.GetFunctionFromToken(new mdMethodDef(resolved.MethodToken)))))
                 return false;
             if (File.Exists(bp.Path) && metadata.MatchesChecksum(pdbPath, bp.Path!) == false)
                 bp.Warning = "The source file differs from the one the module was built with; the breakpoint may be on a different line.";
@@ -312,7 +320,7 @@ public sealed partial class DebugEngine
     }
 
     private static StopInfo BreakpointStop(int threadId, List<UserBreakpoint> breakpoints) =>
-        new(breakpoints.All(b => b.FunctionName != null) ? "function breakpoint" : "breakpoint", threadId,
+        new("breakpoint", threadId,
             BreakpointIds: breakpoints.Select(b => b.Id).ToArray());
 
     private void ResolveConditionalBreakpoints(int threadId, List<UserBreakpoint> matches)
@@ -340,7 +348,8 @@ public sealed partial class DebugEngine
                             if (outcome is false)
                                 continue;
                         }
-                        if (!PassesHitCondition(bp, ++bp.HitCount))
+                        ++bp.HitCount;
+                        if (bp.HitCondition != null && evaluator.EvaluateToHost($"{bp.HitCount}>({bp.HitCondition})") is not true)
                             continue;
                         if (bp.LogMessage != null)
                         {
@@ -354,6 +363,8 @@ public sealed partial class DebugEngine
                         // A broken condition must not silently disable the breakpoint.
                         string error = $"Breakpoint condition '{bp.Condition ?? bp.LogMessage}' failed: {e.Message}{Environment.NewLine}";
                         events.Add(() => Output?.Invoke("console", error));
+                        bp.Condition = null;
+                        bp.HitCondition = null;
                     }
                     stopping.Add(bp);
                 }

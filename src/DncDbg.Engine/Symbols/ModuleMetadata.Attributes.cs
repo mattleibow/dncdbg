@@ -15,6 +15,12 @@ internal enum BrowsableState
 // Debugger-related custom attributes, IL call sites and source documents.
 internal sealed partial class ModuleMetadata
 {
+    public bool IsHiddenMethod(int methodToken)
+    {
+        MethodDefinition method = _md.GetMethodDefinition((MethodDefinitionHandle)MetadataTokens.Handle(methodToken));
+        return FindAttribute(method.GetCustomAttributes(), "System.Diagnostics.DebuggerHiddenAttribute") != null
+            || FindAttribute(_md.GetTypeDefinition(method.GetDeclaringType()).GetCustomAttributes(), "System.Diagnostics.DebuggerHiddenAttribute") != null;
+    }
     private const string DebuggerDisplayAttribute = "System.Diagnostics.DebuggerDisplayAttribute";
     private const string DebuggerBrowsableAttribute = "System.Diagnostics.DebuggerBrowsableAttribute";
     private const string CompilerGeneratedAttribute = "System.Runtime.CompilerServices.CompilerGeneratedAttribute";

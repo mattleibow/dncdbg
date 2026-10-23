@@ -30,6 +30,9 @@ public sealed partial class DebugEngine
 
     // ---------------------------------------------------------------- helpers for the value inspector
 
+    VariableInfo IEvalHost.EvaluateStatic(string expression, InspectionContext context, DisplayOptions options) =>
+        new Evaluator(this, context.Frame!, allowCalls: true).EvaluateToVariable(expression, options);
+
     Func<CorDebugValue?>? IEvalHost.CreateTypeProxy(string proxyTypeName, Func<CorDebugValue?> target, InspectionContext context)
     {
         if (FindType(proxyTypeName, AppDomainOf(context)) is not { } found)

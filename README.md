@@ -8,6 +8,34 @@ Initially, DNCDbg was based on version 3.1.3 of the [NetCoreDbg](https://github.
 
 See the current [Debug Adapter Protocol support status](docs/dap_status.md).
 
+## C# migration
+
+The managed debugger is built with **.NET 10 and C# 14**. The SDK is pinned in
+`global.json`; no preview SDK, C++ compiler, or CMake is needed for this build.
+It consists of the DAP host (`src/DncDbg.Adapter`), CLR debugging engine
+(`src/DncDbg.Engine`), and protocol transport/types (`src/DncDbg.Protocol`).
+The managed foundation is adapted from the MIT-licensed dotnet-debugger project;
+see [Third-Party Notices](THIRD-PARTY-NOTICES.md).
+
+```sh
+dotnet build
+dotnet publish src/DncDbg.Adapter -c Release -o bin
+./bin/dncdbg --buildinfo
+cd test-suite
+DNCDBG=../bin/dncdbg bash run_tests.sh
+```
+
+Publishing produces the `dncdbg` apphost (`dncdbg.exe` on Windows). Keep its
+managed assemblies and native runtime assets together. This framework-dependent
+publish requires the .NET 10 runtime; add `-r <rid> --self-contained true` to
+include a runtime. The native CLR debugging libraries are supplied through NuGet,
+not a separate debugger executable.
+
+Migration is in progress. The original test suite and native sources remain as
+the compatibility contract/reference until replacement behavior is validated.
+The comparison table below describes the original native implementation, not
+measurements or a parity guarantee for the managed debugger.
+
 <div align="center">
 
 <table>
@@ -166,12 +194,23 @@ Contributions are welcome! Please read our [Contributing Guidelines](CONTRIBUTIN
 
 ## Building from Source Code
 
+Use `dotnet build` for the managed solution. Platform-specific notes below also
+retain the legacy native build instructions for behavior comparisons.
+
 - [Windows OS build.](docs/build_windows.md)
 - [Linux OS build.](docs/build_linux.md)
 - [macOS build.](docs/build_macos.md)
 - [Local testing.](test-suite/README.md)
 
 ## Usage
+
+With no arguments, `dncdbg` serves DAP on stdin/stdout. Compatibility options:
+`--help`, `--version`, `--buildinfo`, `--interpreter=vscode`,
+`--logProtocol=<file>`, `--log=<file>`, and `--loglevel=<0..3|DEBUG|INFO|WARNING|ERROR>`.
+Protocol and engine logs are separate; engine logs append and log levels are
+case-insensitive. Unknown levels fall back to INFO with a warning in the engine
+log. `--server[=PORT]` additionally accepts one TCP connection on localhost.
+As in the original adapter, an unavailable log file does not prevent debugging.
 
 - [VS Code IDE, Windows OS.](docs/usage_vscode_windows.md)
 - [VS Code IDE, Linux and macOS.](docs/usage_vscode_unix.md)

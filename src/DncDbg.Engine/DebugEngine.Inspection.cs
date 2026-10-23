@@ -27,6 +27,7 @@ public sealed partial class DebugEngine
     private readonly Dictionary<int, FrameRef> _externalFrames = [];
     private readonly Dictionary<int, VariableContainer> _variableHandles = [];
     private int _nextHandle;
+    private readonly HashSet<string> _initializedTypes = [];
 
     /// <summary>What the method the user just stepped out of returned; valid until the debuggee runs again.</summary>
     private sealed record ReturnedValue(int ThreadId, string Method, Func<CorDebugValue?>? Getter, object? HostValue, CorDebugClass? EnumClass);
@@ -56,6 +57,7 @@ public sealed partial class DebugEngine
                 return cached;
 
             var result = new List<FrameInfo>();
+            AddForeignExceptionFrames(threadId, result);
             List<CorDebugILFrame> frames = EnumerateILFrames(threadId).ToList();
             for (int i = 0; i < frames.Count; i++)
                 AddFrame(result, frames[i], new FrameRef(threadId, frames.Count - 1 - i));
@@ -63,11 +65,53 @@ public sealed partial class DebugEngine
             {
                 AppendAsyncCallStack(threadId, frames, result);
             }
+
             catch (Exception e)
             {
                 Log?.Invoke("Async call stack not available: " + e.Message);
             }
             return _threadFrames[threadId] = result;
+        }
+    }
+
+    private void AddForeignExceptionFrames(int threadId, List<FrameInfo> result)
+    {
+        if (_exceptionStops.GetValueOrDefault(threadId) != "unhandled")
+            return;
+        try
+        {
+            CorDebugValue? value = RequireThread(threadId).CurrentException;
+            if (value == null || ValueInspector.Unwrap(value, out _) is not { } target)
+                return;
+            CorDebugExceptionObjectStackFrame[] frames = new CorDebugExceptionObjectValue(
+                (ICorDebugExceptionObjectValue)target.Raw).ExceptionCallStacks;
+            int lastForeign = Array.FindLastIndex(frames, f => f.isLastForeignExceptionFrame);
+            foreach (CorDebugExceptionObjectStackFrame frame in frames.Take(lastForeign + 1))
+            {
+                var module = new CorDebugModule(frame.pModule);
+                ModuleMetadata? metadata = GetMetadata(module);
+                if (metadata == null)
+                    continue;
+                CorDebugFunction function = module.GetFunctionFromToken(frame.methodDef);
+                CorDebugCode code = function.NativeCode;
+                ulong offset = (ulong)frame.ip - code.Address.Value;
+                COR_DEBUG_IL_TO_NATIVE_MAP? mapping = code.ILToNativeMapping
+                    .Where(m => m.ilOffset >= 0 && offset >= (ulong)m.nativeStartOffset && offset < (ulong)m.nativeEndOffset)
+                    .Select(m => (COR_DEBUG_IL_TO_NATIVE_MAP?)m).FirstOrDefault();
+                if (mapping == null || metadata.GetSourceLocation((int)frame.methodDef.Value, mapping.Value.ilOffset, out _) is not { } location)
+                    continue;
+                int id = ++_nextHandle;
+                _frames[id] = null;
+                _modules.TryGetValue(module, out LoadedModule? loaded);
+                (string path, int sourceReference) = DescribeSource(loaded, location.Path);
+                result.Add(new FrameInfo(id, "[Exception] " + metadata.GetMethodName((int)frame.methodDef.Value)
+                    + metadata.GetParameterDisplay((int)frame.methodDef.Value), path, location.Line, location.Column,
+                    location.EndLine, location.EndColumn, sourceReference));
+            }
+        }
+        catch (Exception e)
+        {
+            Log?.Invoke("Exception call stack not available: " + e.Message);
         }
     }
 

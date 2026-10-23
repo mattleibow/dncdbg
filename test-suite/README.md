@@ -7,7 +7,7 @@
     or
     $ ./run_tests.sh <test-name> [<test-name>]
     or
-    $ DNCDBG=<path-to-netcoredbg> ./run_tests.sh <test-name> [<test-name>]
+    $ DNCDBG=<path-to-dncdbg> ./run_tests.sh <test-name> [<test-name>]
 ```
 
 - On Windows:
@@ -19,6 +19,23 @@
 ```
 
 The target framework can be overridden with the `DNCDBG_TARGET_FRAMEWORK` environment variable (for example, `net8.0`); by default, the tests target `net10.0`.
+
+For the managed debugger, build or publish from the repository root first:
+
+```sh
+dotnet publish src/DncDbg.Adapter -c Release -o bin
+cd test-suite
+DNCDBG=../bin/dncdbg bash run_tests.sh TestBreakpoint TestEvaluate TestStackTrace TestMemoryReferences TestReadWriteMemory
+```
+
+Run the additional cross-platform CLI/protocol smoke checks from the repository root:
+
+```sh
+dotnet run --project tests/DncDbg.SmokeTests -- bin/dncdbg
+```
+
+These checks do not modify the existing Runner, ScriptContext, fixtures, or
+assertions. Their diagnostic logs are written under `build/validation/cli-smoke`.
 
 # How to add a new test
 

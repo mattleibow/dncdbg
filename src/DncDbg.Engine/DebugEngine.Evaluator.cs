@@ -45,9 +45,10 @@ public sealed partial class DebugEngine
     private sealed partial class Evaluator(DebugEngine engine, FrameRef frame, bool allowCalls, Func<CorDebugValue?>? self = null)
     {
         private abstract record Operand;
+        private sealed record VoidOperand : Operand;
 
         /// <param name="EnumClass">Set when <paramref name="Value"/> is the underlying value of an enum.</param>
-        private sealed record HostOperand(object? Value, CorDebugClass? EnumClass = null) : Operand;
+        private sealed record HostOperand(object? Value, CorDebugClass? EnumClass = null, string? DeclaredType = null) : Operand;
 
         /// <param name="IsLocation">The getter returns a storage location (variable, field, element) that can be assigned to.</param>
         /// <param name="TupleNames">Names the source gives to the elements of a tuple-typed local (Item1, Item2, ... in the type).</param>
@@ -65,6 +66,8 @@ public sealed partial class DebugEngine
 
         private const string ExceptionVariable = "__debugger_exception";
         private const string ReturnValueVariable = "__debugger_returnvalue";
+        private const string ProcessIdVariable = "__debugger_pid";
+        private const string ThreadIdVariable = "__debugger_tid";
 
         private readonly ValueInspector _values = engine._values;
         private readonly InspectionContext _context = new(frame.ThreadId, frame);
@@ -165,11 +168,10 @@ public sealed partial class DebugEngine
         private Operand Run(string expression)
         {
             // "$exception" is a debugger pseudo variable, not C#
-            ExpressionSyntax syntax = SyntaxFactory.ParseExpression(
-                expression.Replace("$exception", ExceptionVariable).Replace("$ReturnValue", ReturnValueVariable));
+            ExpressionSyntax syntax = SyntaxFactory.ParseExpression(RewritePseudoVariables(expression));
             Diagnostic? error = syntax.GetDiagnostics().FirstOrDefault(d => d.Severity == DiagnosticSeverity.Error);
             if (error != null)
-                throw new DebuggerException("Invalid expression: " + error.GetMessage());
+                throw new DebuggerException(error.Id == "CS1012" ? "Failed to parse character." : "Expression has malformed or incomplete syntax.");
             try
             {
                 return Eval(syntax);
@@ -192,17 +194,24 @@ public sealed partial class DebugEngine
         {
             switch (operand)
             {
+                case VoidOperand:
+                    return new VariableInfo { Name = name, Value = "Expression has been evaluated and has no value", Type = "void" };
                 case HostOperand { EnumClass: { } enumClass } host when options?.Hex != true:
-                    return _values.DescribeHost(name, host.Value, _values.FormatEnum(enumClass, ToBits(host.Value!)));
+                    return _values.DescribeHost(name, host.Value, _values.FormatEnum(enumClass, ToBits(host.Value!)))
+                        with
+                    { Type = EnumTypeName(enumClass) };
                 case HostOperand host:
-                    return _values.DescribeHost(name, host.Value, null, options);
+                    {
+                        VariableInfo result = _values.DescribeHost(name, host.Value, null, options);
+                        return host.DeclaredType is { } declared ? result with { Type = ModuleMetadata.DisplayType(declared) } : result;
+                    }
                 case RemoteOperand remote:
-                {
-                    VariableInfo result = _values.Describe(name, remote.Getter, name, _context, options);
-                    if (!remote.IsLocation)
-                        result.MemoryReference = "0x0000000000000000";
-                    return result;
-                }
+                    {
+                        VariableInfo result = _values.Describe(name, remote.Getter, name, _context, options);
+                        if (!remote.IsLocation)
+                            result.MemoryReference = "0x0000000000000000";
+                        return result;
+                    }
                 case TypeOperand type:
                     throw new DebuggerException($"'{type.Metadata.GetTypeName(type.Token)}' is a type, which is not valid in the given context.");
                 case LambdaOperand lambda:
@@ -229,17 +238,17 @@ public sealed partial class DebugEngine
                 case PredefinedTypeSyntax predefined:
                     return ResolveType(predefined.ToString()) ?? throw new DebuggerException($"Type '{predefined}' not found.");
                 case MemberAccessExpressionSyntax { RawKind: (int)SyntaxKind.SimpleMemberAccessExpression, Name: GenericNameSyntax genericMember } genericAccess:
-                {
-                    string prefix = Eval(genericAccess.Expression) switch
                     {
-                        NamespaceOperand ns => ns.Name + ".",
-                        TypeOperand outer => outer.Metadata.GetTypeName(outer.Token) + ".",
-                        _ => throw new DebuggerException("Generic members are not supported in expressions."),
-                    };
-                    string name = prefix + genericMember.Identifier.ValueText + "`" + genericMember.TypeArgumentList.Arguments.Count;
-                    TypeOperand definition = ResolveQualifiedType(name) ?? throw new DebuggerException($"Type '{genericAccess}' not found.");
-                    return definition with { TypeArguments = genericMember.TypeArgumentList.Arguments.Select(ResolveType).ToList() };
-                }
+                        string prefix = Eval(genericAccess.Expression) switch
+                        {
+                            NamespaceOperand ns => ns.Name + ".",
+                            TypeOperand outer => outer.Metadata.GetTypeName(outer.Token) + ".",
+                            _ => throw new DebuggerException("Generic members are not supported in expressions."),
+                        };
+                        string name = prefix + genericMember.Identifier.ValueText + "`" + genericMember.TypeArgumentList.Arguments.Count;
+                        TypeOperand definition = ResolveQualifiedType(name) ?? throw new DebuggerException($"Type '{genericAccess}' not found.");
+                        return definition with { TypeArguments = genericMember.TypeArgumentList.Arguments.Select(ResolveType).ToList() };
+                    }
                 case MemberAccessExpressionSyntax { RawKind: (int)SyntaxKind.SimpleMemberAccessExpression } member:
                     return Member(Eval(member.Expression), SimpleName(member.Name));
                 case MemberBindingExpressionSyntax binding:
@@ -279,6 +288,14 @@ public sealed partial class DebugEngine
                 if (localName == name)
                     return new RemoteOperand(getter, IsLocation: true, TupleNames.GetValueOrDefault(name));
 
+            if (self == null && engine.GetILFrame(frame) is { } ilFrame
+                && engine.GetMetadata(ilFrame.Function.Module)?.GetLocalConstants((int)ilFrame.Function.Token.Value, ilFrame.IP.pnOffset)
+                    .FirstOrDefault(c => c.Name == name) is { Name: not null } constant)
+                return new HostOperand(constant.Value, DeclaredType: constant.Type);
+            if (name == ProcessIdVariable)
+                return new HostOperand((uint)engine._processId);
+            if (name == ThreadIdVariable)
+                return new HostOperand((uint)frame.ThreadId);
             if (name == "this")
                 throw new DebuggerException("Keyword 'this' is not available in the current context.");
             if (name == ExceptionVariable)
@@ -302,8 +319,9 @@ public sealed partial class DebugEngine
             {
                 return instanceMember;
             }
-            if (EnclosingType() is { } enclosing && TryMember(enclosing, name) is { } staticMember)
-                return staticMember;
+            foreach (TypeOperand enclosing in EnclosingTypes())
+                if (TryMember(enclosing, name) is { } staticMember)
+                    return staticMember;
 
             return (Operand?)ResolveType(name) ?? new NamespaceOperand(name);
         }
@@ -330,19 +348,31 @@ public sealed partial class DebugEngine
         {
             string? keyword = name switch
             {
-                "bool" => "System.Boolean", "byte" => "System.Byte", "sbyte" => "System.SByte", "char" => "System.Char",
-                "short" => "System.Int16", "ushort" => "System.UInt16", "int" => "System.Int32", "uint" => "System.UInt32",
-                "long" => "System.Int64", "ulong" => "System.UInt64", "float" => "System.Single", "double" => "System.Double",
-                "decimal" => "System.Decimal", "string" => "System.String", "object" => "System.Object",
-                "nint" => "System.IntPtr", "nuint" => "System.UIntPtr",
+                "bool" => "System.Boolean",
+                "byte" => "System.Byte",
+                "sbyte" => "System.SByte",
+                "char" => "System.Char",
+                "short" => "System.Int16",
+                "ushort" => "System.UInt16",
+                "int" => "System.Int32",
+                "uint" => "System.UInt32",
+                "long" => "System.Int64",
+                "ulong" => "System.UInt64",
+                "float" => "System.Single",
+                "double" => "System.Double",
+                "decimal" => "System.Decimal",
+                "string" => "System.String",
+                "object" => "System.Object",
+                "nint" => "System.IntPtr",
+                "nuint" => "System.UIntPtr",
                 _ => null,
             };
 
             var candidates = new List<string> { keyword ?? name };
             if (keyword == null && EnclosingType() is { } enclosing)
             {
-                string typeName = enclosing.Metadata.GetTypeName(enclosing.Token);
-                candidates.Add(typeName + "." + name); // nested type
+                foreach (TypeOperand scope in EnclosingTypes())
+                    candidates.Add(scope.Metadata.GetTypeName(scope.Token) + "." + name);
                 string ns = enclosing.Metadata.GetTypeNamespace(enclosing.Token);
                 while (ns.Length > 0)
                 {
@@ -357,6 +387,16 @@ public sealed partial class DebugEngine
                 if (FindType(candidate) is { } found)
                     return new TypeOperand(found.Module, found.Token);
             return keyword == null && self == null ? ResolveTypeParameter(name) : null;
+        }
+
+        private IEnumerable<TypeOperand> EnclosingTypes()
+        {
+            for (TypeOperand? scope = EnclosingType(); scope != null;)
+            {
+                yield return scope;
+                scope = scope.Metadata.GetParentType(scope.Token) is { } parent
+                    ? new TypeOperand(scope.Module, parent) : null;
+            }
         }
 
         /// <summary>"T" inside generic code: the type argument of the instantiation the frame is running.</summary>
@@ -448,11 +488,11 @@ public sealed partial class DebugEngine
                     throw new DebuggerException("NullReferenceException: the value is null.");
 
                 case HostOperand host:
-                {
-                    // properties of strings and primitives are pure, so they can be read in the debugger itself
-                    System.Reflection.PropertyInfo? property = host.Value!.GetType().GetProperty(name, Type.EmptyTypes);
-                    return property == null ? null : new HostOperand(property.GetValue(host.Value));
-                }
+                    {
+                        // properties of strings and primitives are pure, so they can be read in the debugger itself
+                        System.Reflection.PropertyInfo? property = host.Value!.GetType().GetProperty(name, Type.EmptyTypes);
+                        return property == null ? null : new HostOperand(property.GetValue(host.Value));
+                    }
 
                 default:
                     return InstanceMember((RemoteOperand)target, name);
@@ -472,9 +512,10 @@ public sealed partial class DebugEngine
                 if (field.IsLiteral)
                 {
                     object? constant = metadata.GetConstant(field.Token, out _);
-                    return new HostOperand(constant, metadata.IsEnum(type.Token) ? type.Class : null);
+                    return new HostOperand(constant, metadata.IsEnum(type.Token) ? type.Class : null, metadata.GetFieldType(field.Token));
                 }
                 int token = field.Token;
+                EnsureTypeInitialized(type);
                 CorDebugClass cls = type.Class;
                 return new RemoteOperand(() => StaticFieldValue(cls, token), IsLocation: true);
             }
@@ -483,7 +524,10 @@ public sealed partial class DebugEngine
                 return Call(null, type, "get_" + name, [], isPropertyAccess: true);
 
             // nested type
-            return ResolveQualifiedType(metadata.GetTypeName(type.Token) + "." + name);
+            if (ResolveQualifiedType(metadata.GetTypeName(type.Token) + "." + name) is { } nested)
+                return nested;
+            return metadata.GetBaseTypeName(type.Token) is { } baseName && ResolveQualifiedType(baseName) is { } baseType
+                ? StaticMember(baseType, name) : null;
         }
 
         private CorDebugValue StaticFieldValue(CorDebugClass cls, int fieldToken)
@@ -510,6 +554,22 @@ public sealed partial class DebugEngine
                 }
             }
             throw new DebuggerException("The static field is not available: " + first!.Message);
+        }
+
+        private void EnsureTypeInitialized(TypeOperand type)
+        {
+            string key = $"{type.Module.Key}:{AssemblyQualifiedName(type)}";
+            if (!allowCalls || engine._initializedTypes.Contains(key) || type.Metadata.GetMethods(type.Token, ".cctor").Count == 0)
+                return;
+            CorDebugType[] arguments = type.TypeArguments?.Select(ToCorDebugType).ToArray() ?? [];
+            CorDebugValue? instance = engine.RunEval(frame.ThreadId, eval => eval.NewParameterizedObjectNoConstructor(
+                type.Class.Raw, arguments.Length, arguments.Select(t => t.Raw).ToArray()));
+            engine._initializedTypes.Add(key);
+            if (!type.Metadata.IsValueType(type.Token) && instance != null && ResolveQualifiedType("System.GC") is { } gc)
+            {
+                Func<CorDebugValue?> stable = engine.Stabilize(() => instance);
+                Call(null, gc, "SuppressFinalize", [new RemoteOperand(stable)], isPropertyAccess: true);
+            }
         }
 
         private Operand? InstanceMember(RemoteOperand target, string name)
@@ -594,7 +654,7 @@ public sealed partial class DebugEngine
         {
             Operand receiver = Eval(node.Expression);
             if (IsNull(receiver))
-                return new HostOperand(null);
+                return receiver;
 
             Operand? saved = _conditionalReceiver;
             _conditionalReceiver = receiver;
@@ -615,16 +675,16 @@ public sealed partial class DebugEngine
                 case HostOperand host:
                     return host.Value == null;
                 case RemoteOperand remote:
-                {
-                    CorDebugValue? value = remote.Getter();
-                    if (value == null)
-                        return true;
-                    ValueInspector.Unwrap(value, out bool isNull);
-                    if (isNull)
-                        return true;
-                    // Nullable<T> without a value
-                    return _values.TryReadHostValue(value, out object? host) && host == null;
-                }
+                    {
+                        CorDebugValue? value = remote.Getter();
+                        if (value == null)
+                            return true;
+                        ValueInspector.Unwrap(value, out bool isNull);
+                        if (isNull)
+                            return true;
+                        // Nullable<T> without a value
+                        return _values.TryReadHostValue(value, out object? host) && host == null;
+                    }
                 default:
                     return false;
             }
@@ -713,20 +773,20 @@ public sealed partial class DebugEngine
             switch (node.Expression)
             {
                 case IdentifierNameSyntax id:
-                {
-                    string name = id.Identifier.ValueText;
-                    if (Locals.FirstOrDefault(l => l.Name == "this") is { Getter: { } thisGetter }
-                        && TryCall(new RemoteOperand(thisGetter), null, name, arguments, false) is { } viaThis)
                     {
-                        return viaThis;
+                        string name = id.Identifier.ValueText;
+                        if (Locals.FirstOrDefault(l => l.Name == "this") is { Getter: { } thisGetter }
+                            && TryCall(new RemoteOperand(thisGetter), null, name, arguments, false) is { } viaThis)
+                        {
+                            return viaThis;
+                        }
+                        if (EnclosingType() is { } enclosing && TryCall(null, enclosing, name, arguments, false) is { } viaType)
+                            return viaType;
+                        // not a method: a delegate in a local, a field or a property
+                        if (Identifier(name) is RemoteOperand callable)
+                            return CallOn(callable, "Invoke", arguments);
+                        throw new DebuggerException($"The name '{name}' does not exist in the current context.");
                     }
-                    if (EnclosingType() is { } enclosing && TryCall(null, enclosing, name, arguments, false) is { } viaType)
-                        return viaType;
-                    // not a method: a delegate in a local, a field or a property
-                    if (Identifier(name) is RemoteOperand callable)
-                        return CallOn(callable, "Invoke", arguments);
-                    throw new DebuggerException($"The name '{name}' does not exist in the current context.");
-                }
                 case MemberAccessExpressionSyntax member:
                     return CallOn(Eval(member.Expression), SimpleName(member.Name), arguments);
                 case MemberBindingExpressionSyntax binding:
@@ -824,12 +884,12 @@ public sealed partial class DebugEngine
         /// those through the interface, so they come last: after instance and extension methods.
         /// </param>
         private Operand? TryCall(RemoteOperand? target, TypeOperand? type, string name, List<Operand> arguments, bool isPropertyAccess,
-            bool explicitImplementations = false)
+            bool explicitImplementations = false, int? onlyToken = null)
         {
             List<MethodLevel> levels;
             if (target != null)
             {
-                CorDebugValue? self = target.Getter() is { } v ? ValueInspector.Unwrap(v, out _) : null;
+                CorDebugValue? self = target.Getter() is { } v ? ValueInspector.Unwrap(v, out _) ?? v : null;
                 if (self == null)
                     throw new DebuggerException("NullReferenceException: the value is null.");
                 levels = MethodLevels(self);
@@ -850,6 +910,8 @@ public sealed partial class DebugEngine
                     : level.Metadata.GetMethods(level.Token, name);
                 foreach (MethodDescription method in candidates)
                 {
+                    if (onlyToken != null && method.Token != onlyToken)
+                        continue;
                     if (method.IsStatic != (target == null) || method.ParameterTypes.Length < arguments.Count)
                         continue;
                     // parameters left out are filled in with their default values, where they have one
@@ -872,6 +934,8 @@ public sealed partial class DebugEngine
                 return null;
 
             (MethodLevel chosenLevel, MethodDescription chosen, Dictionary<int, TypeSignature> inferred, arguments) = best.Value;
+            arguments = arguments.Select((argument, i) => FindImplicitConversion(argument, chosen.ParameterTypes[i]) is { } conversion
+                ? ApplyConversion(argument, conversion) : argument).ToList();
 
             // Anything that runs code (string creation) comes first: it invalidates plain ICorDebug values.
             // A method of System.Enum, System.ValueType or System.Object wants a boxed "this".
@@ -888,6 +952,7 @@ public sealed partial class DebugEngine
             {
                 argumentGetters[i] = arguments[i] switch
                 {
+                    HostOperand { Value: decimal value } => MaterializeDecimal(value),
                     HostOperand { Value: string } host => Materialize(host),
                     HostOperand { EnumClass: not null, Value: not null } host => BoxEnum(host),
                     // A primitive for an "object" parameter has to be boxed by the caller. (For a generic "T value" it must
@@ -905,7 +970,7 @@ public sealed partial class DebugEngine
             if (target != null)
             {
                 CorDebugValue raw = target.Getter()!;
-                CorDebugValue unwrappedSelf = ValueInspector.Unwrap(raw, out _)!;
+                CorDebugValue unwrappedSelf = ValueInspector.Unwrap(raw, out _) ?? raw;
                 bool isValueType = unwrappedSelf.Type is not (CorElementType.Class or CorElementType.Object or CorElementType.String
                     or CorElementType.SZArray or CorElementType.Array);
                 thisValue = boxedThis?.Invoke() ?? (isValueType ? unwrappedSelf : raw);
@@ -929,7 +994,8 @@ public sealed partial class DebugEngine
             var typeArguments = new List<CorDebugType>();
             if (target != null)
             {
-                MethodLevel current = MethodLevels(ValueInspector.Unwrap(target.Getter()!, out _)!)
+                CorDebugValue currentValue = target.Getter()!;
+                MethodLevel current = MethodLevels(ValueInspector.Unwrap(currentValue, out _) ?? currentValue)
                     .First(l => l.Token == chosenLevel.Token && ReferenceEquals(l.Metadata, chosenLevel.Metadata));
                 if (current.Type != null)
                     typeArguments.AddRange(ValueInspector.TypeArgumentsOf(current.Type));
@@ -961,7 +1027,7 @@ public sealed partial class DebugEngine
         private Operand FromResult(CorDebugValue? result)
         {
             if (result == null)
-                return new HostOperand(null);
+                return new VoidOperand();
             if (_values.TryReadHostValue(result, out object? host))
             {
                 return host is ValueInspector.EnumBits bits
@@ -992,6 +1058,7 @@ public sealed partial class DebugEngine
 
         private string? ClrTypeOf(Operand operand) => operand switch
         {
+            VoidOperand => "System.Void",
             HostOperand { EnumClass: { } enumClass, Value: not null } => EnumTypeName(enumClass),
             HostOperand host => host.Value?.GetType().FullName,
             RemoteOperand remote => remote.Getter() is { } v ? _values.GetClrTypeName(v) : null,
@@ -1039,9 +1106,19 @@ public sealed partial class DebugEngine
 
         private static bool IsWidening(string from, string to)
         {
-            string[] order = ["System.SByte", "System.Byte", "System.Int16", "System.UInt16", "System.Char", "System.Int32",
-                "System.UInt32", "System.Int64", "System.UInt64", "System.Single", "System.Double"];
-            return Array.IndexOf(order, from) <= Array.IndexOf(order, to);
+            string[] targets = from switch
+            {
+                "System.SByte" => ["System.Int16", "System.Int32", "System.Int64", "System.Single", "System.Double", "System.Decimal"],
+                "System.Byte" => ["System.Int16", "System.UInt16", "System.Int32", "System.UInt32", "System.Int64", "System.UInt64", "System.Single", "System.Double", "System.Decimal"],
+                "System.Int16" => ["System.Int32", "System.Int64", "System.Single", "System.Double", "System.Decimal"],
+                "System.UInt16" or "System.Char" => ["System.Int32", "System.UInt32", "System.Int64", "System.UInt64", "System.Single", "System.Double", "System.Decimal"],
+                "System.Int32" => ["System.Int64", "System.Single", "System.Double", "System.Decimal"],
+                "System.UInt32" => ["System.Int64", "System.UInt64", "System.Single", "System.Double", "System.Decimal"],
+                "System.Int64" or "System.UInt64" => ["System.Single", "System.Double", "System.Decimal"],
+                "System.Single" => ["System.Double"],
+                _ => [],
+            };
+            return targets.Contains(to);
         }
 
         private static object? ConvertForParameter(object? value, string parameterType)
@@ -1063,6 +1140,26 @@ public sealed partial class DebugEngine
             }
             object? value = host.Value;
             return () => CreatePrimitive(value);
+        }
+
+        private Func<CorDebugValue?> MaterializeDecimal(decimal value)
+        {
+            TypeOperand type = ResolveQualifiedType("System.Decimal") ?? throw new DebuggerException("System.Decimal is not loaded.");
+            CorDebugValue? box = engine.RunEval(frame.ThreadId, eval => eval.NewParameterizedObjectNoConstructor(type.Class.Raw, 0, []));
+            Func<CorDebugValue?> stable = engine.Stabilize(() => box);
+            int[] bits = decimal.GetBits(value);
+            if (_values.GetFieldByName(stable()!, "_flags") != null)
+            {
+                AssignCore(() => _values.GetFieldByName(stable()!, "_flags"), new HostOperand(bits[3]));
+                AssignCore(() => _values.GetFieldByName(stable()!, "_hi32"), new HostOperand((uint)bits[2]));
+                AssignCore(() => _values.GetFieldByName(stable()!, "_lo64"), new HostOperand((uint)bits[0] | ((ulong)(uint)bits[1] << 32)));
+            }
+            else
+            {
+                foreach (var (field, part) in new[] { ("lo", bits[0]), ("mid", bits[1]), ("hi", bits[2]), ("flags", bits[3]) })
+                    AssignCore(() => _values.GetFieldByName(stable()!, field), new HostOperand(part));
+            }
+            return () => ValueInspector.Unwrap(stable()!, out _);
         }
 
         /// <summary>An enum value of the debugger's making, as a boxed object in the debuggee.</summary>
@@ -1134,24 +1231,26 @@ public sealed partial class DebugEngine
             enumClass = null;
             switch (operand)
             {
+                case VoidOperand:
+                    return false;
                 case HostOperand host:
                     value = host.Value;
                     enumClass = host.EnumClass;
                     return true;
                 case RemoteOperand remote:
-                {
-                    CorDebugValue? raw = remote.Getter();
-                    if (raw == null)
-                        throw new DebuggerException("The value is not available.");
-                    if (!_values.TryReadHostValue(raw, out value))
-                        return false;
-                    if (value is ValueInspector.EnumBits bits)
                     {
-                        value = bits.Underlying;
-                        enumClass = bits.Class;
+                        CorDebugValue? raw = remote.Getter();
+                        if (raw == null)
+                            throw new DebuggerException("The value is not available.");
+                        if (!_values.TryReadHostValue(raw, out value))
+                            return false;
+                        if (value is ValueInspector.EnumBits bits)
+                        {
+                            value = bits.Underlying;
+                            enumClass = bits.Class;
+                        }
+                        return true;
                     }
-                    return true;
-                }
                 default:
                     ToVariable("", operand); // throws the "is a type/namespace" error
                     return false;
@@ -1175,15 +1274,28 @@ public sealed partial class DebugEngine
                 return new RemoteOperand(() => ((CorDebugReferenceValue)pointer.Getter()!).Dereference(), IsLocation: true);
             }
 
-            dynamic? operand = ToHost(Eval(node.Operand));
-            return new HostOperand(node.Kind() switch
+            Operand value = Eval(node.Operand);
+            if (TryUserOperator(node.Kind(), [value]) is { } overloaded)
+                return overloaded;
+            if (!TryToHost(value, out object? host, out CorDebugClass? enumClass)
+                || enumClass != null && node.Kind() != SyntaxKind.BitwiseNotExpression)
+                throw UnaryOperatorError(node.OperatorToken.Text, value);
+            dynamic? operand = host;
+            try
             {
-                SyntaxKind.UnaryMinusExpression => _checked ? checked(-operand) : -operand,
-                SyntaxKind.UnaryPlusExpression => +operand,
-                SyntaxKind.LogicalNotExpression => !operand,
-                SyntaxKind.BitwiseNotExpression => ~operand,
-                _ => throw new DebuggerException($"Operator '{node.OperatorToken.Text}' is not supported."),
-            });
+                return new HostOperand(node.Kind() switch
+                {
+                    SyntaxKind.UnaryMinusExpression => _checked ? checked(-operand) : -operand,
+                    SyntaxKind.UnaryPlusExpression => +operand,
+                    SyntaxKind.LogicalNotExpression => !operand,
+                    SyntaxKind.BitwiseNotExpression => ~operand,
+                    _ => throw new DebuggerException($"Operator '{node.OperatorToken.Text}' is not supported."),
+                }, enumClass);
+            }
+            catch (Microsoft.CSharp.RuntimeBinder.RuntimeBinderException)
+            {
+                throw UnaryOperatorError(node.OperatorToken.Text, value);
+            }
         }
 
         private Operand Binary(BinaryExpressionSyntax node)
@@ -1191,21 +1303,31 @@ public sealed partial class DebugEngine
             switch (node.Kind())
             {
                 case SyntaxKind.LogicalAndExpression:
-                    return new HostOperand(ToHost(Eval(node.Left)) is true && ToHost(Eval(node.Right)) is true);
                 case SyntaxKind.LogicalOrExpression:
-                    return new HostOperand(ToHost(Eval(node.Left)) is true || ToHost(Eval(node.Right)) is true);
+                    {
+                        Operand left = Eval(node.Left);
+                        Operand right = Eval(node.Right);
+                        if (ToHost(left) is not bool condition)
+                            throw BinaryOperatorError(node.OperatorToken.Text, left, right);
+                        return ToHost(right) is bool result ? new HostOperand(node.Kind() == SyntaxKind.LogicalAndExpression
+                            ? condition && result : condition || result)
+                            : throw BinaryOperatorError(node.OperatorToken.Text, left, right);
+                    }
                 case SyntaxKind.CoalesceExpression:
-                {
-                    Operand left = Eval(node.Left);
-                    return IsNull(left) ? Eval(node.Right) : left;
-                }
+                    {
+                        Operand left = Eval(node.Left);
+                        Operand right = Eval(node.Right);
+                        if (!CanCoalesce(left, right))
+                            throw new DebuggerException("error CS0019: " + BinaryOperatorError("??", left, right).Message);
+                        return IsNull(left) ? right : left;
+                    }
                 case SyntaxKind.IsExpression:
                     return new HostOperand(IsInstanceOf(Eval(node.Left), ResolveType((TypeSyntax)node.Right)));
                 case SyntaxKind.AsExpression:
-                {
-                    Operand left = Eval(node.Left);
-                    return IsInstanceOf(left, ResolveType((TypeSyntax)node.Right)) ? left : new HostOperand(null);
-                }
+                    {
+                        Operand left = Eval(node.Left);
+                        return IsInstanceOf(left, ResolveType((TypeSyntax)node.Right)) ? left : new HostOperand(null);
+                    }
             }
 
             return BinaryOperation(node.Kind(), Eval(node.Left), Eval(node.Right), node.OperatorToken.Text);
@@ -1213,38 +1335,55 @@ public sealed partial class DebugEngine
 
         private Operand BinaryOperation(SyntaxKind kind, Operand leftOperand, Operand rightOperand, string operatorText)
         {
+            if (TryUserOperator(kind, [leftOperand, rightOperand]) is { } overloaded)
+                return overloaded;
+            if (kind == SyntaxKind.AddExpression && (IsStringOperand(leftOperand) || IsStringOperand(rightOperand)))
+                return new HostOperand(ConcatenationText(leftOperand) + ConcatenationText(rightOperand));
+            if (leftOperand is VoidOperand || rightOperand is VoidOperand)
+                throw BinaryOperatorError(operatorText, leftOperand, rightOperand);
             bool leftIsHost = TryToHost(leftOperand, out object? l, out _);
             bool rightIsHost = TryToHost(rightOperand, out object? r, out _);
+            if (!leftIsHost && TryImplicitHost(leftOperand, ClrTypeOf(rightOperand)) is { } leftConverted)
+                leftIsHost = TryToHost(leftConverted, out l, out _);
+            if (!rightIsHost && TryImplicitHost(rightOperand, ClrTypeOf(leftOperand)) is { } rightConverted)
+                rightIsHost = TryToHost(rightConverted, out r, out _);
             if (!leftIsHost || !rightIsHost)
             {
                 // objects only support reference comparison
                 if (kind is not (SyntaxKind.EqualsExpression or SyntaxKind.NotEqualsExpression))
-                    throw new DebuggerException($"Operator '{operatorText}' cannot be applied to these operands.");
+                    throw BinaryOperatorError(operatorText, leftOperand, rightOperand);
                 bool same = AddressOf(leftOperand, leftIsHost, l) == AddressOf(rightOperand, rightIsHost, r);
                 return new HostOperand(kind == SyntaxKind.EqualsExpression ? same : !same);
             }
 
             dynamic? a = l, b = r;
-            return new HostOperand(kind switch
+            try
             {
-                SyntaxKind.AddExpression => _checked ? checked(a + b) : a + b,
-                SyntaxKind.SubtractExpression => _checked ? checked(a - b) : a - b,
-                SyntaxKind.MultiplyExpression => _checked ? checked(a * b) : a * b,
-                SyntaxKind.DivideExpression => a / b,
-                SyntaxKind.ModuloExpression => a % b,
-                SyntaxKind.EqualsExpression => a == b,
-                SyntaxKind.NotEqualsExpression => a != b,
-                SyntaxKind.LessThanExpression => a < b,
-                SyntaxKind.LessThanOrEqualExpression => a <= b,
-                SyntaxKind.GreaterThanExpression => a > b,
-                SyntaxKind.GreaterThanOrEqualExpression => a >= b,
-                SyntaxKind.BitwiseAndExpression => a & b,
-                SyntaxKind.BitwiseOrExpression => a | b,
-                SyntaxKind.ExclusiveOrExpression => a ^ b,
-                SyntaxKind.LeftShiftExpression => a << b,
-                SyntaxKind.RightShiftExpression => a >> b,
-                _ => throw new DebuggerException($"Operator '{operatorText}' is not supported."),
-            });
+                return new HostOperand(kind switch
+                {
+                    SyntaxKind.AddExpression => _checked ? checked(a + b) : a + b,
+                    SyntaxKind.SubtractExpression => _checked ? checked(a - b) : a - b,
+                    SyntaxKind.MultiplyExpression => _checked ? checked(a * b) : a * b,
+                    SyntaxKind.DivideExpression => a / b,
+                    SyntaxKind.ModuloExpression => a % b,
+                    SyntaxKind.EqualsExpression => a == b,
+                    SyntaxKind.NotEqualsExpression => a != b,
+                    SyntaxKind.LessThanExpression => a < b,
+                    SyntaxKind.LessThanOrEqualExpression => a <= b,
+                    SyntaxKind.GreaterThanExpression => a > b,
+                    SyntaxKind.GreaterThanOrEqualExpression => a >= b,
+                    SyntaxKind.BitwiseAndExpression => a & b,
+                    SyntaxKind.BitwiseOrExpression => a | b,
+                    SyntaxKind.ExclusiveOrExpression => a ^ b,
+                    SyntaxKind.LeftShiftExpression => a << b,
+                    SyntaxKind.RightShiftExpression => a >> b,
+                    _ => throw new DebuggerException($"Operator '{operatorText}' is not supported."),
+                });
+            }
+            catch (Microsoft.CSharp.RuntimeBinder.RuntimeBinderException)
+            {
+                throw BinaryOperatorError(operatorText, leftOperand, rightOperand);
+            }
         }
 
         private static ulong AddressOf(Operand operand, bool isHost, object? hostValue)

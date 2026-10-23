@@ -1,5 +1,28 @@
 # Building from Source Code on Windows OS
 
+## Managed debugger (.NET 10 / C# 14)
+
+Install the stable .NET SDK selected by `global.json`. From the repository root
+in PowerShell:
+
+```powershell
+dotnet build
+dotnet publish src/DncDbg.Adapter -c Release -o bin
+.\bin\dncdbg.exe --buildinfo
+$env:DNCDBG = (Resolve-Path .\bin\dncdbg.exe).Path
+cd test-suite
+.\run_tests.ps1
+```
+
+Use matching debugger/target architectures. NuGet supplies the CLR debugging and
+native Windows PDB assets. The managed build does not require the Visual C++
+toolchain or CMake.
+
+## Legacy native reference build
+
+The instructions below apply only to the retained C++ reference implementation
+while managed compatibility work is in progress.
+
 ## Prerequisites
 
 Download and install the latest **Microsoft Visual Studio** from here: https://visualstudio.microsoft.com/downloads

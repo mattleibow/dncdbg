@@ -6,7 +6,10 @@ using System.Reflection.Metadata.Ecma335;
 namespace DncDbg.Engine.Symbols;
 
 /// <param name="ParameterTypes">CLR-style type names ("System.Int32", "!0" for type and "!!0" for method type variables).</param>
-internal sealed record MethodDescription(int Token, string Name, bool IsStatic, string[] ParameterTypes, int GenericParameterCount);
+internal sealed record MethodDescription(int Token, string Name, bool IsStatic, string[] ParameterTypes, int GenericParameterCount)
+{
+    public string ReturnType { get; init; } = "";
+}
 
 internal sealed record PropertyDescription(string Name, int GetterToken, int SetterToken, bool IsStatic, bool IsIndexer);
 
@@ -37,7 +40,7 @@ internal sealed partial class ModuleMetadata
             DisplayType(type) + (names.TryGetValue(i + 1, out string? name) ? " " + name : ""))) + ")";
     }
 
-    private static string DisplayType(string type)
+    public static string DisplayType(string type)
     {
         foreach (var (name, alias) in new (string, string)[]
         {
@@ -46,9 +49,60 @@ internal sealed partial class ModuleMetadata
             ("System.UInt32", "uint"), ("System.Int64", "long"), ("System.UInt64", "ulong"),
             ("System.Single", "float"), ("System.Double", "double"), ("System.Decimal", "decimal"),
             ("System.String", "string"), ("System.Object", "object"), ("System.Char", "char"),
+            ("System.IntPtr", "nint"), ("System.UIntPtr", "nuint"),
         })
             type = type.Replace(name, alias, StringComparison.Ordinal);
         return type;
+    }
+
+    public string GetFieldType(int fieldToken) => _md.GetFieldDefinition((FieldDefinitionHandle)MetadataTokens.Handle(fieldToken))
+        .DecodeSignature(SignatureNames.Instance, this);
+
+    public IReadOnlyList<(string Name, object? Value, string Type)> GetLocalConstants(int methodToken, int offset)
+    {
+        var result = new List<(string, object?, string)>();
+        if (_pdb == null)
+            return result;
+        foreach (LocalScopeHandle handle in _pdb.GetLocalScopes((MethodDefinitionHandle)MetadataTokens.Handle(methodToken)))
+        {
+            LocalScope scope = _pdb.GetLocalScope(handle);
+            if (offset < scope.StartOffset || offset >= scope.EndOffset)
+                continue;
+            foreach (LocalConstantHandle constantHandle in scope.GetLocalConstants())
+            {
+                LocalConstant constant = _pdb.GetLocalConstant(constantHandle);
+                BlobReader reader = _pdb.GetBlobReader(constant.Signature);
+                var decoder = new SignatureDecoder<string, ModuleMetadata>(SignatureNames.Instance, _md, this);
+                string type = decoder.DecodeType(ref reader, true);
+                object? value = type switch
+                {
+                    "System.Boolean" => reader.ReadBoolean(),
+                    "System.Char" => reader.ReadChar(),
+                    "System.SByte" => reader.ReadSByte(),
+                    "System.Byte" => reader.ReadByte(),
+                    "System.Int16" => reader.ReadInt16(),
+                    "System.UInt16" => reader.ReadUInt16(),
+                    "System.Int32" => reader.ReadInt32(),
+                    "System.UInt32" => reader.ReadUInt32(),
+                    "System.Int64" => reader.ReadInt64(),
+                    "System.UInt64" => reader.ReadUInt64(),
+                    "System.Single" => reader.ReadSingle(),
+                    "System.Double" => reader.ReadDouble(),
+                    "System.String" when reader.RemainingBytes != 1 => reader.ReadUTF16(reader.RemainingBytes),
+                    "System.Decimal" => ReadDecimalConstant(ref reader),
+                    _ => null,
+                };
+                result.Add((_pdb.GetString(constant.Name), value, type));
+            }
+        }
+        return result;
+    }
+
+    private static decimal ReadDecimalConstant(ref BlobReader reader)
+    {
+        byte scaleAndSign = reader.ReadByte();
+        int low = reader.ReadInt32(), middle = reader.ReadInt32(), high = reader.ReadInt32();
+        return new decimal(low, middle, high, (scaleAndSign & 0x80) != 0, (byte)(scaleAndSign & 0x7f));
     }
 
     /// <summary>Token of the type with the given full name (nested types use '.', generic arity stays: "List`1").</summary>
@@ -80,6 +134,12 @@ internal sealed partial class ModuleMetadata
 
     public int GetDeclaringType(int methodToken) =>
         MetadataTokens.GetToken(_md.GetMethodDefinition((MethodDefinitionHandle)MetadataTokens.Handle(methodToken)).GetDeclaringType());
+
+    public int? GetParentType(int typeToken)
+    {
+        TypeDefinitionHandle parent = _md.GetTypeDefinition((TypeDefinitionHandle)MetadataTokens.Handle(typeToken)).GetDeclaringType();
+        return parent.IsNil ? null : MetadataTokens.GetToken(parent);
+    }
 
     /// <summary>For closures and state machines: the type the user wrote that contains them.</summary>
     public int GetEnclosingUserType(int typeDefToken)
@@ -125,7 +185,8 @@ internal sealed partial class ModuleMetadata
             MethodSignature<string> signature = method.DecodeSignature(SignatureNames.Instance, this);
             result.Add(new MethodDescription(
                 MetadataTokens.GetToken(handle), name, (method.Attributes & MethodAttributes.Static) != 0,
-                signature.ParameterTypes.ToArray(), signature.GenericParameterCount));
+                signature.ParameterTypes.ToArray(), signature.GenericParameterCount)
+            { ReturnType = signature.ReturnType });
         }
         return result;
     }
@@ -224,6 +285,15 @@ internal sealed partial class ModuleMetadata
     public List<(int MethodToken, int ILOffset)> FindMethodsByName(string name)
     {
         var result = new List<(int, int)>();
+        string? parameters = null;
+        int open = name.IndexOf('(');
+        if (open >= 0)
+        {
+            if (!name.EndsWith(')'))
+                return result;
+            parameters = DisplayType(name[(open + 1)..^1]).Replace(" ", "");
+            name = name[..open];
+        }
         name = StripGenericArguments(name).Replace('+', '.').Replace(" ", "");
         if (name.Length == 0)
             return result;
@@ -239,6 +309,9 @@ internal sealed partial class ModuleMetadata
             int token = MetadataTokens.GetToken(handle);
             string fullName = StripArity(GetTypeName(method.GetDeclaringType())) + "." + simpleName;
             if (fullName != name && !fullName.EndsWith("." + name, StringComparison.Ordinal))
+                continue;
+            if (parameters != null && DisplayType(string.Join(",", method.DecodeSignature(SignatureNames.Instance, this).ParameterTypes))
+                .Replace(" ", "") != parameters)
                 continue;
             var points = GetSequencePoints(token);
             result.Add((token, points?.FirstOrDefault(p => !p.IsHidden).Offset ?? 0));

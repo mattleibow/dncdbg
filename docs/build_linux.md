@@ -1,5 +1,28 @@
 # Building from Source Code on Linux OS
 
+## Managed debugger (.NET 10 / C# 14)
+
+Install the stable .NET SDK selected by `global.json` and its distribution's
+runtime prerequisites, then run from the repository root:
+
+```sh
+dotnet build
+dotnet publish src/DncDbg.Adapter -c Release -o bin
+./bin/dncdbg --buildinfo
+cd test-suite
+DNCDBG=../bin/dncdbg bash run_tests.sh
+```
+
+Use matching debugger/target architectures. Native CLR debugging assets come
+from NuGet; a C++ compiler and CMake are not required for the managed build.
+For self-contained deployments, specify the platform RID (for example,
+`-r linux-x64 --self-contained true`).
+
+## Legacy native reference build
+
+The instructions below apply only to the retained C++ reference implementation
+while managed compatibility work is in progress.
+
 ## Prerequisites
 
 1. You need to install `cmake` and `make`;

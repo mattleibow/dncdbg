@@ -4,4 +4,7 @@
     <Project Path="src/DncDbg.Engine/DncDbg.Engine.csproj" />
     <Project Path="src/DncDbg.Protocol/DncDbg.Protocol.csproj" />
   </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/DncDbg.SmokeTests/DncDbg.SmokeTests.csproj" />
+  </Folder>
 </Solution>

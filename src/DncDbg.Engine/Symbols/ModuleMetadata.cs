@@ -191,13 +191,20 @@ internal sealed partial class ModuleMetadata : IDisposable
         if (_pdb == null)
             return null;
 
-        string wanted = NormalizePath(sourcePath);
+        string wanted = NormalizeSourcePath(sourcePath);
+        bool relative = !System.IO.Path.IsPathRooted(sourcePath) && !(sourcePath.Length > 1 && sourcePath[1] == ':');
+        bool MatchesPath(string path, StringComparison pathComparison) =>
+            path.Equals(wanted, pathComparison) || relative && path.EndsWith("/" + wanted, pathComparison);
+        StringComparison comparison = _pdb.Documents.Any(handle => MatchesPath(
+            NormalizeSourcePath(_pdb.GetString(_pdb.GetDocument(handle).Name)), PathComparison))
+            ? PathComparison : StringComparison.OrdinalIgnoreCase;
         (int Token, SequencePoint Point)? best = null;
         (int Token, SequencePoint Point)? bestAtColumn = null;
         foreach (DocumentHandle docHandle in _pdb.Documents)
         {
-            string docPath = NormalizePath(_pdb.GetString(_pdb.GetDocument(docHandle).Name));
-            if (!docPath.Equals(wanted, PathComparison) || !PointsByDocument.TryGetValue(docHandle, out var points))
+            string docPath = NormalizeSourcePath(_pdb.GetString(_pdb.GetDocument(docHandle).Name));
+            if (!MatchesPath(docPath, comparison)
+                || !PointsByDocument.TryGetValue(docHandle, out var points))
                 continue;
 
             foreach (var candidate in points)
@@ -221,6 +228,24 @@ internal sealed partial class ModuleMetadata : IDisposable
             (p.EndLine > line || (p.EndLine == line && column < p.EndColumn));
 
         static long Span(SequencePoint p) => (p.EndLine - p.StartLine) * 10000L + (p.EndColumn - p.StartColumn);
+    }
+
+    private static string NormalizeSourcePath(string path)
+    {
+        var segments = new List<string>();
+        foreach (string segment in path.Replace('\\', '/').Split('/'))
+        {
+            if (segment is "" or ".")
+                continue;
+            if (segment == "..")
+            {
+                if (segments.Count > 0)
+                    segments.RemoveAt(segments.Count - 1);
+            }
+            else
+                segments.Add(segment);
+        }
+        return string.Join("/", segments);
     }
 
     // Preference: a point starting on the line; then the innermost point spanning the line

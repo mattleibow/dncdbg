@@ -58,6 +58,12 @@ internal sealed partial class ModuleMetadata
         return !type.BaseType.IsNil && GetTypeHandleName(type.BaseType) is "System.ValueType" or "System.Enum";
     }
 
+    public string? GetBaseTypeName(int typeDefToken)
+    {
+        TypeDefinition type = _md.GetTypeDefinition((TypeDefinitionHandle)MetadataTokens.Handle(typeDefToken));
+        return type.BaseType.IsNil ? null : GetTypeHandleName(type.BaseType);
+    }
+
     /// <summary>Name as System.Type.GetType() wants it: '+' between nested types.</summary>
     public string GetReflectionName(int typeDefToken)
     {

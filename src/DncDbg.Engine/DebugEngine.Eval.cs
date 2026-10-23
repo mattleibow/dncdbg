@@ -117,7 +117,7 @@ public sealed partial class DebugEngine : IEvalHost
     /// the lock is released while waiting so the completion callback can get in. Everything obtained from ICorDebug
     /// before this call (frames, values) is stale afterwards, except strong handles.
     /// </summary>
-    private CorDebugValue? RunEval(int threadId, Action<CorDebugEval> start)
+    private CorDebugValue? RunEval(int threadId, Action<CorDebugEval> start, bool returnException = false)
     {
         CorDebugProcess process = RequireStopped();
         if (_pendingEval != null)
@@ -199,7 +199,7 @@ public sealed partial class DebugEngine : IEvalHost
                 // void method
             }
 
-            if (pending.ThrewException)
+            if (pending.ThrewException && !returnException)
             {
                 string description = "exception";
                 if (result != null)
@@ -275,7 +275,7 @@ public sealed partial class DebugEngine : IEvalHost
         {
             return RunEval(threadId, eval => eval.CallParameterizedFunction(
                 function.Raw, typeArguments.Length, typeArguments.Select(t => t.Raw).ToArray(),
-                arguments.Length, arguments.Select(a => a.Raw).ToArray()));
+                arguments.Length, arguments.Select(a => a.Raw).ToArray()), returnException: !isImplicit);
         }
         finally
         {

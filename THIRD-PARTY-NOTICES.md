@@ -13,10 +13,23 @@ The licenses below apply only to the corresponding third-party components. The p
 - **Copyright:** Copyright (c) 2026 dvislobokov and dotnet-debugger contributors
 - **License text:** [`src/DncDbg.LICENSE`](src/DncDbg.LICENSE)
 
-The managed projects also consume ClrDebug (0.4.2), Microsoft.CodeAnalysis.CSharp
-(5.9.0), Microsoft.Diagnostics.DbgShim (10.0.745401), Microsoft.DiaSymReader
-(2.0.0), and Microsoft.DiaSymReader.Native (17.0.0-beta1.21524.1) through NuGet.
-Their package licenses and native runtime assets remain applicable.
+### Managed NuGet dependencies
+
+The managed build/publish includes the following packages and their native
+runtime assets. Licenses are retained under [`src/licenses`](src/licenses/) and
+copied to `licenses/` beside the published executable.
+
+| Component | Version | License / notices |
+| --- | --- | --- |
+| [ClrDebug](https://github.com/lordmilko/ClrDebug) | 0.4.2 | MIT; Copyright (c) 2022 lordmilko. [`ClrDebug.LICENSE`](src/licenses/ClrDebug.LICENSE) |
+| [Microsoft.CodeAnalysis.CSharp and Microsoft.CodeAnalysis.Common](https://github.com/dotnet/roslyn) | 5.9.0 | MIT; Microsoft Corporation. [`Microsoft.MIT.LICENSE`](src/licenses/Microsoft.MIT.LICENSE), [`Roslyn.ThirdPartyNotices.rtf`](src/licenses/Roslyn.ThirdPartyNotices.rtf) |
+| [Microsoft.Diagnostics.DbgShim](https://github.com/dotnet/diagnostics) | 10.0.745401 | MIT; .NET Foundation and Contributors / Microsoft Corporation. [`Microsoft.MIT.LICENSE`](src/licenses/Microsoft.MIT.LICENSE) |
+| [Microsoft.DiaSymReader](https://github.com/dotnet/symreader) | 2.0.0 | MIT; Microsoft Corporation. [`Microsoft.MIT.LICENSE`](src/licenses/Microsoft.MIT.LICENSE) |
+| Microsoft.DiaSymReader.Native | 17.0.0-beta1.21524.1 | Microsoft .NET Library license terms, preserved verbatim from the package: [`Microsoft.DiaSymReader.Native.LICENSE`](src/licenses/Microsoft.DiaSymReader.Native.LICENSE) |
+
+The managed implementation does not change the licensing of these components.
+The native third-party components listed below belong to the retained C++
+reference implementation.
 
 ## .NET Diagnostics
 

@@ -1,5 +1,26 @@
 # Building from Source Code on macOS
 
+## Managed debugger (.NET 10 / C# 14)
+
+Install the stable .NET SDK selected by `global.json`, then run from the repository root:
+
+```sh
+dotnet build
+dotnet publish src/DncDbg.Adapter -c Release -o bin
+./bin/dncdbg --buildinfo
+cd test-suite
+DNCDBG=../bin/dncdbg bash run_tests.sh
+```
+
+Apple Silicon uses the arm64 SDK/runtime; Intel uses x64. The debugger and target
+process must have matching architecture. CLR debugging assets are restored from
+NuGet. Xcode and CMake are not prerequisites for the managed build.
+
+## Legacy native reference build
+
+The instructions below apply only to the retained C++ reference implementation
+while managed compatibility work is in progress.
+
 ## Prerequisites
 
 Before you begin, ensure you have the necessary tools installed.

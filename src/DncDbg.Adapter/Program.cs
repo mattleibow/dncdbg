@@ -5,13 +5,6 @@ using DncDbg.Adapter;
 using DncDbg.Protocol;
 using Microsoft.Win32.SafeHandles;
 
-// dncdbg: a .NET debugger speaking the Debug Adapter Protocol.
-//
-//   dncdbg                   DAP over stdin/stdout (default)
-//   dncdbg --server[=PORT]   DAP over TCP, one session (default port 4711)
-//   --log=FILE                        write a protocol/engine trace
-//   --version
-
 // Helper mode, started by the DAP client inside its terminal:  --run-in-terminal PORT TOKEN -- PROGRAM [ARGS...]
 if (args.Length >= 5 && args[0] == TerminalLauncher.HelperOption && args[3] == "--")
 {
@@ -30,40 +23,27 @@ if (args.Length >= 5 && args[0] == TerminalLauncher.HelperOption && args[3] == "
 if (args.Length == 2 && args[0] == DncDbg.Engine.Launch.ConsoleCodePage.HelperOption && int.TryParse(args[1], out int consoleOwner))
     return DncDbg.Engine.Launch.ConsoleCodePage.RunHelper(consoleOwner);
 
-int? port = null;
-string? logPath = null;
-foreach (string arg in args)
+CommandLineOptions options;
+try
 {
-    if (arg == "--server")
-        port = 4711;
-    else if (arg.StartsWith("--server="))
-        port = int.Parse(arg["--server=".Length..]);
-    else if (arg.StartsWith("--log="))
-        logPath = arg["--log=".Length..];
-    else if (arg == "--version")
-    {
-        Console.WriteLine(typeof(DebugAdapter).Assembly.GetName().Version);
-        return 0;
-    }
-    else if (arg is "--help" or "-h")
-    {
-        Console.Error.WriteLine("Usage: dncdbg [--server[=PORT]] [--log=FILE]");
-        return 0;
-    }
-    else
-    {
-        Console.Error.WriteLine($"Unknown option '{arg}'.");
-        return 1;
-    }
+    options = CommandLineOptions.Parse(args);
 }
+catch (ArgumentException e)
+{
+    Console.Error.WriteLine(e.Message);
+    return 1;
+}
+if (options.ExitRequested)
+    return 0;
 
 // DNCDBG_LOG_DIR: a trace per adapter process without touching the client's configuration (CI, bug reports)
-if (logPath == null && Environment.GetEnvironmentVariable("DNCDBG_LOG_DIR") is { Length: > 0 } logDirectory)
+string? protocolLogPath = options.ProtocolLogPath;
+if (protocolLogPath == null && Environment.GetEnvironmentVariable("DNCDBG_LOG_DIR") is { Length: > 0 } logDirectory)
 {
     try
     {
         Directory.CreateDirectory(logDirectory);
-        logPath = Path.Combine(logDirectory, $"adapter-{DateTime.Now:HHmmss-fff}-{Environment.ProcessId}.log");
+        protocolLogPath = Path.Combine(logDirectory, $"adapter-{DateTime.Now:HHmmss-fff}-{Environment.ProcessId}.log");
     }
     catch (Exception e) when (e is IOException or UnauthorizedAccessException)
     {
@@ -71,46 +51,53 @@ if (logPath == null && Environment.GetEnvironmentVariable("DNCDBG_LOG_DIR") is {
     }
 }
 
-StreamWriter? logWriter = logPath == null ? null : new StreamWriter(logPath, append: false) { AutoFlush = true };
-void Log(string message)
+try
 {
-    if (logWriter == null)
-        return;
-    lock (logWriter)
-        logWriter.WriteLine($"{DateTime.Now:HH:mm:ss.fff} {message}");
-}
+    string? engineLogPath = options.EngineLogPath;
+    if (engineLogPath == null && protocolLogPath != null && Environment.GetEnvironmentVariable("DNCDBG_LOG_DIR") != null)
+        engineLogPath = protocolLogPath + ".engine";
+    using var engineLog = new AdapterLog(engineLogPath, options.MinimumLogLevel, append: true);
+    using var protocolLog = new AdapterLog(protocolLogPath, LogLevel.Debug, append: false);
+    if (options.LogLevelWarning is { } warning)
+        engineLog.Write(LogLevel.Warning, warning);
 
-Stream input, output;
-TcpClient? client = null;
-if (port is { } p)
-{
-    var listener = new TcpListener(IPAddress.Loopback, p);
-    listener.Start();
-    Console.Error.WriteLine($"Waiting for a DAP client on 127.0.0.1:{((IPEndPoint)listener.LocalEndpoint).Port}");
-    client = listener.AcceptTcpClient();
-    listener.Stop();
-    input = output = client.GetStream();
-}
-else
-{
-    (input, output) = StdioTransport.Open();
-}
+    Stream input, output;
+    TcpClient? client = null;
+    if (options.Port is { } p)
+    {
+        var listener = new TcpListener(IPAddress.Loopback, p);
+        listener.Start();
+        Console.Error.WriteLine($"Waiting for a DAP client on 127.0.0.1:{((IPEndPoint)listener.LocalEndpoint).Port}");
+        client = listener.AcceptTcpClient();
+        listener.Stop();
+        input = output = client.GetStream();
+    }
+    else
+    {
+        (input, output) = StdioTransport.Open();
+    }
 
-using var connection = new DapConnection(input, output) { Trace = logWriter == null ? null : Log };
-using (var adapter = new DebugAdapter(connection, Log))
-{
-    try
+    using var connection = new DapConnection(input, output) { Trace = protocolLog.Write };
+    using (var adapter = new DebugAdapter(connection, engineLog.Write))
     {
-        adapter.Run();
+        try
+        {
+            adapter.Run();
+        }
+        catch (Exception e)
+        {
+            engineLog.Write("Fatal: " + e);
+            return 1;
+        }
     }
-    catch (Exception e)
-    {
-        Log("Fatal: " + e);
-        return 1;
-    }
+    client?.Dispose();
+    return 0;
 }
-client?.Dispose();
-return 0;
+catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException)
+{
+    Console.Error.WriteLine("Fatal error: " + e.Message);
+    return 1;
+}
 
 internal static class StdioTransport
 {

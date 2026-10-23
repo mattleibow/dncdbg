@@ -170,7 +170,14 @@ public sealed partial class DebugEngine
                         break;
                     }
                     if (!matched)
+                    {
+                        if (method.Name != "op_Implicit" && FindImplicitConversion(arguments[i], parameter) != null)
+                        {
+                            total += 1;
+                            continue;
+                        }
                         return -1;
+                    }
                     total += parameterSignature.ContainsMethodVariable ? 4 : 5;
                 }
             }

@@ -15,32 +15,19 @@
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
   </PropertyGroup>
 
-  <!--
-    .NET tool:  dotnet tool install -g dncdbg-dap   ->   dncdbg
-    ("dncdbg" itself is taken on nuget.org.) The package is RID-agnostic: dbgshim for every platform comes
-    along under runtimes/<rid>/native and the engine picks the one for the machine it runs on.
-  -->
   <PropertyGroup>
-    <IsPackable>false</IsPackable>
-    <PackAsTool>false</PackAsTool>
-    <PackageId>dncdbg-dap</PackageId>
-    <ToolCommandName>dncdbg</ToolCommandName>
-    <Title>dncdbg</Title>
+    <Title>DNCDbg</Title>
     <Description>A .NET debugger speaking the Debug Adapter Protocol (DAP): use it from VS Code, Neovim (nvim-dap), Emacs, Helix and any other DAP client. Breakpoints, stepping (async aware), expression evaluation, symbol servers, single-file and ReadyToRun applications.</Description>
-    <PackageTags>debugger;dap;debug-adapter-protocol;dotnet;coreclr;icordebug;vscode;neovim</PackageTags>
-    <PackageReadmeFile>README.md</PackageReadmeFile>
-    <PackageReleaseNotes>0.2.0
-- .NET Framework 4.x on Windows: launch and attach, legacy (non-SDK) projects built with MSBuild.exe, integratedTerminal/externalTerminal, several AppDomains, Windows (full/pdbonly) PDBs, NGen disabled with justMyCode=false.
-- 32-bit processes are refused with a plain message (64-bit only).
-- Linux/macOS, .NET 8: the adapter no longer hangs after "The debuggee cannot be stopped" while expanding an object.
-- Fixes from a black-box DAP probe of 0.1.0: unhandled exceptions always stop, non-ASCII output on Windows, async stepping, long strings, attach errors, paged and capped variables, implicit evaluation timeouts (option allowImplicitFuncEval), robust DAP parsing, expression evaluator additions.
-- JetBrains DAP client compatibility: variables filter "named", namedVariables, sorted threads, single terminate, exited -1 for a terminated debuggee.
-Full list: https://github.com/dvislobokov/dncdbg/blob/master/CHANGELOG.md</PackageReleaseNotes>
-    <PackageOutputPath>$(MSBuildThisFileDirectory)..\..\artifacts\packages</PackageOutputPath>
   </PropertyGroup>
 
   <ItemGroup>
     <None Include="..\DncDbg.LICENSE" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\licenses\*" Link="licenses\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Include="..\..\LICENSE" Link="LICENSE" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\THIRD-PARTY-NOTICES.md" Link="THIRD-PARTY-NOTICES.md" CopyToOutputDirectory="PreserveNewest" />
+    <AssemblyMetadata Include="BuildType" Value="$(Configuration)" />
+    <AssemblyMetadata Include="BuildDate" Value="$([System.DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss')) UTC" />
+    <AssemblyMetadata Include="TargetRuntime" Value="$(RuntimeIdentifier)" />
   </ItemGroup>
 
   <!--

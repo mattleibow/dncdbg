@@ -16,7 +16,7 @@ internal sealed record FrameRef(int ThreadId, int Depth);
 internal sealed record InspectionContext(int ThreadId, FrameRef? Frame);
 
 /// <summary>One row of a variables view.</summary>
-public sealed class VariableInfo
+public sealed record VariableInfo
 {
     public required string Name { get; init; }
     public required string Value { get; init; }
@@ -86,6 +86,8 @@ internal interface IEvalHost
 
     /// <summary>Throws <see cref="OperationCanceledException"/> once the client has given up on the current request.</summary>
     void ThrowIfCancelled();
+
+    VariableInfo EvaluateStatic(string expression, InspectionContext context, DisplayOptions options);
 }
 
 /// <summary>Turns ICorDebugValue objects into display strings and child lists.</summary>
@@ -137,8 +139,14 @@ internal sealed partial class ValueInspector
             return options?.ElementLimit is { } limit && info.IndexedChildren > limit && info.ChildrenProvider is { } all
                 ? new VariableInfo
                 {
-                    Name = info.Name, Value = info.Value, Type = info.Type, EvaluateName = info.EvaluateName, Location = info.Location,
-                    Context = info.Context, IndexedChildren = limit, NamedChildren = info.NamedChildren,
+                    Name = info.Name,
+                    Value = info.Value,
+                    Type = info.Type,
+                    EvaluateName = info.EvaluateName,
+                    Location = info.Location,
+                    Context = info.Context,
+                    IndexedChildren = limit,
+                    NamedChildren = info.NamedChildren,
                     ChildrenProvider = (start, count) =>
                     {
                         if (count == NamedOnly)
@@ -171,7 +179,28 @@ internal sealed partial class ValueInspector
         string? declaredType = SafeTypeName(value);
         CorDebugValue? target = Unwrap(value, out bool isNull);
         if (isNull || target == null)
-            return Leaf("null", declaredType);
+        {
+            bool hasStatics = context?.Frame != null && GetTypeLevels(value).Any(level =>
+                level.Metadata.GetFields(level.Token).Any(f => f.IsStatic || f.IsLiteral)
+                || level.Metadata.GetProperties(level.Token).Any(p => p.IsStatic));
+            return new VariableInfo
+            {
+                Name = name,
+                Value = "null",
+                Type = declaredType,
+                EvaluateName = evaluateName,
+                Location = getter,
+                Context = context,
+                ChildrenProvider = hasStatics ? (_, _) =>
+                [
+                    new VariableInfo
+                    {
+                        Name = "Static members", Value = "", Context = context,
+                        ChildrenProvider = (_, _) => GetStaticChildren(getter, context, options),
+                    },
+                ] : null,
+            };
+        }
 
         string typeName = SafeTypeName(target) ?? declaredType ?? "?";
         switch (target.Type)
@@ -181,22 +210,27 @@ internal sealed partial class ValueInspector
 
             case CorElementType.SZArray:
             case CorElementType.Array:
-            {
-                var array = target.As<CorDebugArrayValue>();
-                int count = array.Count;
-                int rank = array.Rank;
-                string dims = rank == 1 ? count.ToString() : string.Join(", ", array.GetDimensions(rank));
-                int bracket = typeName.IndexOf('[');
-                string display = bracket < 0 ? typeName : typeName[..(bracket + 1)] + dims + typeName[(typeName.IndexOf(']', bracket))..];
-                Func<CorDebugValue?> stable = count > 0 ? _host.Stabilize(getter) : getter;
-                DisplayOptions childOptions = options.ForChildren();
-                return new VariableInfo
                 {
-                    Name = name, Value = "{" + display + "}", Type = typeName, EvaluateName = evaluateName,
-                    Location = getter, Context = context, IndexedChildren = count,
-                    ChildrenProvider = count > 0 ? (start, n) => GetArrayChildren(stable, evaluateName, context, start, n, childOptions) : null,
-                };
-            }
+                    var array = target.As<CorDebugArrayValue>();
+                    int count = array.Count;
+                    int rank = array.Rank;
+                    string dims = rank == 1 ? count.ToString() : string.Join(", ", array.GetDimensions(rank));
+                    int bracket = typeName.IndexOf('[');
+                    string display = bracket < 0 ? typeName : typeName[..(bracket + 1)] + dims + typeName[(typeName.IndexOf(']', bracket))..];
+                    Func<CorDebugValue?> stable = count > 0 ? _host.Stabilize(getter) : getter;
+                    DisplayOptions childOptions = options.ForChildren();
+                    return new VariableInfo
+                    {
+                        Name = name,
+                        Value = "{" + display + "}",
+                        Type = typeName,
+                        EvaluateName = evaluateName,
+                        Location = getter,
+                        Context = context,
+                        IndexedChildren = count,
+                        ChildrenProvider = count > 0 ? (start, n) => GetArrayChildren(stable, evaluateName, context, start, n, childOptions) : null,
+                    };
+                }
 
             case CorElementType.Class when typeName == "System.String":
                 // a string reached through its address (ICorDebugProcess.GetObject) is typed as a plain object
@@ -218,7 +252,12 @@ internal sealed partial class ValueInspector
 
         VariableInfo Leaf(string text, string? type) => new()
         {
-            Name = name, Value = text, Type = type, EvaluateName = evaluateName, Location = getter, Context = context,
+            Name = name,
+            Value = text,
+            Type = type,
+            EvaluateName = evaluateName,
+            Location = getter,
+            Context = context,
         };
     }
 
@@ -229,7 +268,12 @@ internal sealed partial class ValueInspector
         CorDebugType type = target.ExactType;
         VariableInfo Leaf(string text, string? shownType = null) => new()
         {
-            Name = name, Value = text, Type = shownType ?? typeName, EvaluateName = evaluateName, Location = getter, Context = context,
+            Name = name,
+            Value = text,
+            Type = shownType ?? typeName,
+            EvaluateName = evaluateName,
+            Location = getter,
+            Context = context,
         };
 
         if (IsEnum(type))
@@ -253,8 +297,15 @@ internal sealed partial class ValueInspector
             VariableInfo inner = DescribeCore(name, () => NullableValue(getter), evaluateName, context, options);
             return new VariableInfo
             {
-                Name = name, Value = inner.Value, Type = typeName, EvaluateName = evaluateName, Location = getter, Context = context,
-                IndexedChildren = inner.IndexedChildren, NamedChildren = inner.NamedChildren, ChildrenProvider = inner.ChildrenProvider,
+                Name = name,
+                Value = inner.Value,
+                Type = typeName,
+                EvaluateName = evaluateName,
+                Location = getter,
+                Context = context,
+                IndexedChildren = inner.IndexedChildren,
+                NamedChildren = inner.NamedChildren,
+                ChildrenProvider = inner.ChildrenProvider,
             };
         }
 
@@ -288,8 +339,14 @@ internal sealed partial class ValueInspector
         }
         return new VariableInfo
         {
-            Name = name, Value = display, Type = typeName, EvaluateName = evaluateName, Location = getter, Context = context,
-            IndexedChildren = indexed, NamedChildren = indexed > 0 ? 1 : 0, // Raw View
+            Name = name,
+            Value = display,
+            Type = typeName,
+            EvaluateName = evaluateName,
+            Location = getter,
+            Context = context,
+            IndexedChildren = indexed,
+            NamedChildren = indexed > 0 ? 1 : 0, // Raw View
             ChildrenProvider = (start, n) => GetObjectChildren(stable, evaluateName, context, start, n, rawView, childOptions),
         };
     }
@@ -328,8 +385,7 @@ internal sealed partial class ValueInspector
         CorDebugValue? target = getter() is { } v ? Unwrap(v, out _) : null;
         if (target == null || !GetTypeLevels(target).Any(l => l.Metadata.GetTypeName(l.Token) == "System.Exception"))
             return null;
-        string? message = ReadString(GetFieldByName(target, "_message"));
-        return "{" + TypeName(target.ExactType) + (message == null ? "" : ": " + message) + "}";
+        return "{" + TypeName(target.ExactType) + "}";
     }
 
     private string? FormatWithToString(Func<CorDebugValue?> getter, InspectionContext? context)
@@ -373,21 +429,21 @@ internal sealed partial class ValueInspector
             case "System.TimeSpan":
                 return "{" + new TimeSpan((long)ReadIntegerBits(Field("_ticks")!)).ToString("c", CultureInfo.InvariantCulture) + "}";
             case "System.DateTimeOffset":
-            {
-                // .NET Framework: m_dateTime.dateData, m_offsetMinutes
-                ulong utc = ReadIntegerBits(GetFieldByName((Field("_dateTime") ?? Field("m_dateTime"))!, "_dateData", "dateData")!);
-                var offset = TimeSpan.FromMinutes(Convert.ToInt64(ReadPrimitive((Field("_offsetMinutes") ?? Field("m_offsetMinutes"))!), CultureInfo.InvariantCulture));
-                var local = new DateTime((long)(utc & 0x3FFFFFFFFFFFFFFF) + offset.Ticks, DateTimeKind.Unspecified);
-                string sign = offset < TimeSpan.Zero ? "-" : "+";
-                return "{" + FormatDateTime((ulong)local.Ticks) + " " + sign + offset.ToString(@"hh\:mm", CultureInfo.InvariantCulture) + "}";
-            }
+                {
+                    // .NET Framework: m_dateTime.dateData, m_offsetMinutes
+                    ulong utc = ReadIntegerBits(GetFieldByName((Field("_dateTime") ?? Field("m_dateTime"))!, "_dateData", "dateData")!);
+                    var offset = TimeSpan.FromMinutes(Convert.ToInt64(ReadPrimitive((Field("_offsetMinutes") ?? Field("m_offsetMinutes"))!), CultureInfo.InvariantCulture));
+                    var local = new DateTime((long)(utc & 0x3FFFFFFFFFFFFFFF) + offset.Ticks, DateTimeKind.Unspecified);
+                    string sign = offset < TimeSpan.Zero ? "-" : "+";
+                    return "{" + FormatDateTime((ulong)local.Ticks) + " " + sign + offset.ToString(@"hh\:mm", CultureInfo.InvariantCulture) + "}";
+                }
             case "System.Guid":
-            {
-                int a = (int)ReadIntegerBits(Field("_a")!);
-                short b = (short)ReadIntegerBits(Field("_b")!), c = (short)ReadIntegerBits(Field("_c")!);
-                byte[] rest = "defghijk".Select(f => (byte)ReadIntegerBits(Field("_" + f)!)).ToArray();
-                return "{" + new Guid(a, b, c, rest) + "}";
-            }
+                {
+                    int a = (int)ReadIntegerBits(Field("_a")!);
+                    short b = (short)ReadIntegerBits(Field("_b")!), c = (short)ReadIntegerBits(Field("_c")!);
+                    byte[] rest = "defghijk".Select(f => (byte)ReadIntegerBits(Field("_" + f)!)).ToArray();
+                    return "{" + new Guid(a, b, c, rest) + "}";
+                }
         }
 
         // a (ReadOnly)Memory<char> over a string reads best as the text it covers
@@ -541,8 +597,12 @@ internal sealed partial class ValueInspector
                     (string text, string? type) = FormatHost(value, options);
                     result.Add(new VariableInfo
                     {
-                        Name = name, Value = text, Type = type, EvaluateName = evaluateName == null ? null : evaluateName + name,
-                        Location = () => ElementAt(arrayGetter, position), Context = context,
+                        Name = name,
+                        Value = text,
+                        Type = type,
+                        EvaluateName = evaluateName == null ? null : evaluateName + name,
+                        Location = () => ElementAt(arrayGetter, position),
+                        Context = context,
                     });
                 }
             }
@@ -604,7 +664,9 @@ internal sealed partial class ValueInspector
                 AddNoteAboutTheRest(result, count, end, collection.Count);
                 result.Add(new VariableInfo
                 {
-                    Name = "Raw View", Value = "", Context = context,
+                    Name = "Raw View",
+                    Value = "",
+                    Context = context,
                     ChildrenProvider = (s, n) => GetObjectChildren(getter, evaluateName, context, s, n, rawView: true, options),
                 });
                 return result;
@@ -625,7 +687,9 @@ internal sealed partial class ValueInspector
                 result.AddRange(GetObjectChildren(proxy, evaluateName: null, context, start, count, rawView: false, options, publicOnly: true));
                 result.Add(new VariableInfo
                 {
-                    Name = "Raw View", Value = "", Context = context,
+                    Name = "Raw View",
+                    Value = "",
+                    Context = context,
                     ChildrenProvider = (s, n) => GetObjectChildren(getter, evaluateName, context, s, n, rawView: true, options),
                 });
                 return result;
@@ -716,7 +780,11 @@ internal sealed partial class ValueInspector
                     // Out of time for this request: the client asks for these one by one, when the user wants them.
                     result.Add(new VariableInfo
                     {
-                        Name = propertyName, Value = "", EvaluateName = propertyEvaluateName, Context = context, IsLazy = true,
+                        Name = propertyName,
+                        Value = "",
+                        EvaluateName = propertyEvaluateName,
+                        Context = context,
+                        IsLazy = true,
                         ChildrenProvider = (_, _) => [EvaluateProperty(getter, levelIndex, property, propertyEvaluateName, context, options, out _)],
                     });
                 }
@@ -731,7 +799,10 @@ internal sealed partial class ValueInspector
         {
             result.Add(new VariableInfo
             {
-                Name = "Results View", Value = "", Context = context, IsLazy = true,
+                Name = "Results View",
+                Value = "",
+                Context = context,
+                IsLazy = true,
                 ChildrenProvider = (_, _) => [ResultsView(getter, context!, options)],
             });
         }
@@ -740,7 +811,9 @@ internal sealed partial class ValueInspector
         {
             result.Add(new VariableInfo
             {
-                Name = "Static members", Value = "", Context = context,
+                Name = "Static members",
+                Value = "",
+                Context = context,
                 ChildrenProvider = (_, _) => GetStaticChildren(getter, context, options),
             });
         }
@@ -754,8 +827,12 @@ internal sealed partial class ValueInspector
             VariableInfo elements = Describe("Results View", _host.EnumerateToArray(sequence, context), null, context, options);
             return new VariableInfo
             {
-                Name = "Results View", Value = "Expanding the Results View enumerated the sequence", Context = context,
-                IndexedChildren = elements.IndexedChildren, NamedChildren = elements.NamedChildren, ChildrenProvider = elements.ChildrenProvider,
+                Name = "Results View",
+                Value = "Expanding the Results View enumerated the sequence",
+                Context = context,
+                IndexedChildren = elements.IndexedChildren,
+                NamedChildren = elements.NamedChildren,
+                ChildrenProvider = elements.ChildrenProvider,
             };
         }
         catch (Exception e) when (e is EvalFailedException or DebuggerException)
@@ -805,21 +882,27 @@ internal sealed partial class ValueInspector
         // results of calls are not storage locations
         return new VariableInfo
         {
-            Name = info.Name, Value = info.Value, Type = info.Type, EvaluateName = info.EvaluateName,
-            IndexedChildren = info.IndexedChildren, NamedChildren = info.NamedChildren, ChildrenProvider = info.ChildrenProvider, Context = context,
+            Name = info.Name,
+            Value = info.Value,
+            Type = info.Type,
+            EvaluateName = info.EvaluateName,
+            IndexedChildren = info.IndexedChildren,
+            NamedChildren = info.NamedChildren,
+            ChildrenProvider = info.ChildrenProvider,
+            Context = context,
         };
     }
 
     private List<VariableInfo> GetStaticChildren(Func<CorDebugValue?> getter, InspectionContext? context, DisplayOptions options)
     {
         var result = new List<VariableInfo>();
-        CorDebugValue? target = getter() is { } v ? Unwrap(v, out _) : null;
+        CorDebugValue? target = getter() is { } v ? Unwrap(v, out _) ?? v : null;
         if (target == null)
             return result;
 
         foreach (TypeLevel level in GetTypeLevels(target))
         {
-            string typeName = level.Metadata.GetTypeName(level.Token);
+            string typeName = TypeName(level.Type);
             foreach (FieldDescription field in level.Metadata.GetFields(level.Token))
             {
                 if (!field.IsStatic && !field.IsLiteral)
@@ -834,8 +917,13 @@ internal sealed partial class ValueInspector
                 }
                 CorDebugType type = level.Type;
                 int token = field.Token;
-                result.Add(Describe(CleanFieldName(field.Name), () => StaticField(type, token, context?.Frame), evaluateName, context, options));
+                result.Add(context?.Frame != null
+                    ? _host.EvaluateStatic(evaluateName, context, options) with { Name = CleanFieldName(field.Name) }
+                    : Describe(CleanFieldName(field.Name), () => StaticField(type, token, context?.Frame), evaluateName, context, options));
             }
+            if (context?.Frame != null)
+                foreach (PropertyDescription property in level.Metadata.GetProperties(level.Token).Where(p => p.IsStatic && !p.IsIndexer))
+                    result.Add(_host.EvaluateStatic(typeName + "." + property.Name, context, options) with { Name = property.Name });
         }
         return result;
     }
@@ -1128,31 +1216,31 @@ internal sealed partial class ValueInspector
                 or CorElementType.Ptr or CorElementType.ByRef or CorElementType.FnPtr:
                 return false;
             case CorElementType.ValueType:
-            {
-                var obj = target.As<CorDebugObjectValue>();
-                CorDebugType type = target.ExactType;
-                string typeName = TypeName(type);
-                if (IsEnum(type))
                 {
-                    CorDebugValue raw = GetField(obj, type, "value__")!;
-                    result = new EnumBits(type.Class, ReadIntegerBits(raw), ReadPrimitive(raw)!);
-                    return true;
-                }
-                if (typeName == "decimal")
-                {
-                    result = TryReadDecimal(obj, type);
-                    return result != null;
-                }
-                if (typeName.StartsWith("System.Nullable<", StringComparison.Ordinal))
-                {
-                    if (ReadIntegerBits(GetField(obj, type, "hasValue")!) == 0)
+                    var obj = target.As<CorDebugObjectValue>();
+                    CorDebugType type = target.ExactType;
+                    string typeName = TypeName(type);
+                    if (IsEnum(type))
+                    {
+                        CorDebugValue raw = GetField(obj, type, "value__")!;
+                        result = new EnumBits(type.Class, ReadIntegerBits(raw), ReadPrimitive(raw)!);
                         return true;
-                    return TryReadHostValue(GetField(obj, type, "value")!, out result);
+                    }
+                    if (typeName == "decimal")
+                    {
+                        result = TryReadDecimal(obj, type);
+                        return result != null;
+                    }
+                    if (typeName.StartsWith("System.Nullable<", StringComparison.Ordinal))
+                    {
+                        if (ReadIntegerBits(GetField(obj, type, "hasValue")!) == 0)
+                            return true;
+                        return TryReadHostValue(GetField(obj, type, "value")!, out result);
+                    }
+                    if (GetField(obj, type, "m_value") is { } primitive && primitive.Type != CorElementType.ValueType)
+                        return TryReadHostValue(primitive, out result);
+                    return false;
                 }
-                if (GetField(obj, type, "m_value") is { } primitive && primitive.Type != CorElementType.ValueType)
-                    return TryReadHostValue(primitive, out result);
-                return false;
-            }
             default:
                 result = ReadPrimitive(target);
                 return result != null;
@@ -1367,9 +1455,9 @@ internal sealed partial class ValueInspector
         }
         return value switch
         {
-            null => ("null", null),
+            null => ("null", "object"),
             bool b => (b ? "true" : "false", "bool"),
-            char c => (options.NoQuotes ? c.ToString() : FormatChar(c), "char"),
+            char c => (options.NoQuotes ? c.ToString() : ((int)c).ToString(inv) + " " + FormatChar(c), "char"),
             string { Length: > MaxStringLength } s when !options.FullStrings => FormatHost(s[..MaxStringLength] + "...", options with { FullStrings = true }),
             string s => (options.NoQuotes ? s : Quote(s), "string"),
             float f => (f.ToString("R", inv), "float"),
@@ -1383,8 +1471,8 @@ internal sealed partial class ValueInspector
             uint v => (v.ToString(inv), "uint"),
             long v => (v.ToString(inv), "long"),
             ulong v => (v.ToString(inv), "ulong"),
-            nint v => ("0x" + v.ToString("X"), "nint"),
-            nuint v => ("0x" + v.ToString("X"), "nuint"),
+            nint v => (v.ToString(inv), "nint"),
+            nuint v => (v.ToString(inv), "nuint"),
             _ => (Convert.ToString(value, inv) ?? "", value.GetType().FullName),
         };
     }
@@ -1450,14 +1538,14 @@ internal sealed partial class ValueInspector
             case CorElementType.ByRef: return "ref " + TypeName(type.FirstTypeParameter);
             case CorElementType.Class:
             case CorElementType.ValueType:
-            {
-                CorDebugClass cls = type.Class;
-                string name = _getMetadata(cls.Module)?.GetTypeName((int)cls.Token.Value) ?? $"<type 0x{cls.Token.Value:X8}>";
-                if (name == "System.Decimal")
-                    return "decimal";
-                CorDebugType[] typeArgs = TypeArgumentsOf(type);
-                return typeArgs.Length == 0 ? name : ApplyTypeArguments(name, typeArgs.Select(TypeName).ToArray());
-            }
+                {
+                    CorDebugClass cls = type.Class;
+                    string name = _getMetadata(cls.Module)?.GetTypeName((int)cls.Token.Value) ?? $"<type 0x{cls.Token.Value:X8}>";
+                    if (name == "System.Decimal")
+                        return "decimal";
+                    CorDebugType[] typeArgs = TypeArgumentsOf(type);
+                    return typeArgs.Length == 0 ? name : ApplyTypeArguments(name, typeArgs.Select(TypeName).ToArray());
+                }
             default:
                 return type.Type.ToString();
         }

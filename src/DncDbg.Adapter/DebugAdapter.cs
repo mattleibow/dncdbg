@@ -174,7 +174,13 @@ internal sealed class DebugAdapter : IDisposable
             // requests racing with the end of the process (or a restart) are normal; raw HRESULTs help nobody
             bool processGone = e.Message.Contains("CORDBG_E_PROCESS_TERMINATED", StringComparison.Ordinal)
                 || e.Message.Contains("CORDBG_E_PROCESS_DETACHED", StringComparison.Ordinal);
-            _connection.SendErrorResponse(message, processGone ? "The debuggee is not running." : ErrorText.Describe(e));
+            string diagnostic = processGone ? "The debuggee is not running." : ErrorText.Describe(e);
+            if (message.Command is "evaluate" or "setExpression" or "setVariable"
+                && diagnostic is not ("Expression has malformed or incomplete syntax." or "Failed to parse character.")
+                && !diagnostic.StartsWith("Evaluation timed out.", StringComparison.Ordinal)
+                && !diagnostic.StartsWith("error ", StringComparison.Ordinal))
+                diagnostic = "error: " + diagnostic;
+            _connection.SendErrorResponse(message, diagnostic);
         }
     }
 
@@ -184,6 +190,18 @@ internal sealed class DebugAdapter : IDisposable
         {
             case "initialize":
             {
+                if (_terminatedSent != 0)
+                {
+                    DebugEngine old = _engine;
+                    _engine = CreateEngine();
+                    old.Dispose();
+                    _terminatedSent = 0;
+                    _launchArguments = null;
+                    _breakpointRequests.Clear();
+                    _functionBreakpointRequests = [];
+                    _exceptionFilterRequests = null;
+                    _isAttach = false;
+                }
                 var args = request.GetArguments<InitializeArguments>() ?? new InitializeArguments();
                 _clientLinesStartAt1 = args.LinesStartAt1;
                 _clientColumnsStartAt1 = args.ColumnsStartAt1;
@@ -543,7 +561,7 @@ internal sealed class DebugAdapter : IDisposable
                     ?? throw new DebuggerException("No exception is being processed on this thread.");
                 return new ExceptionInfoResponseBody
                 {
-                    ExceptionId = data.TypeName,
+                    ExceptionId = "CLR/" + data.TypeName,
                     Description = data.Message,
                     BreakMode = data.BreakMode,
                     Details = ToExceptionDetails(data),

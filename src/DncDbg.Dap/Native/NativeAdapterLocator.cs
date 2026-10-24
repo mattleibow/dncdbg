@@ -115,7 +115,7 @@ internal static class NativeAdapterLocator
             var result = Run(path, [.. arguments, "--version"]);
             version = ParseVersion(result.Output);
             if (result.ExitCode != 0 || !result.Output.Contains("lldb", StringComparison.OrdinalIgnoreCase) || version == null)
-                throw new ArgumentException($"Error: Native debugger '{path}' did not identify as LLDB DAP: {result.Output.Trim()}");
+                version = ProbeDapVersion(path, arguments);
             if (expectedVersion != null && expectedVersion != version)
                 throw new ArgumentException($"Error: Native debugger bundle version mismatch: manifest {expectedVersion}, executable {version}.");
         }
@@ -131,6 +131,49 @@ internal static class NativeAdapterLocator
             return runtime.Groups[1].Value;
         Match version = Regex.Match(text, @"\d+(?:\.\d+){1,3}", RegexOptions.CultureInvariant);
         return version.Success ? version.Value : null;
+    }
+
+    internal static string DapVersion(NativeAdapterSession session, JsonElement capabilities, CancellationToken cancellation)
+    {
+        string? text = capabilities.TryGetProperty("$__lldb_version", out var version) && version.ValueKind == JsonValueKind.String
+            ? version.GetString() : null;
+        if (text == null)
+        {
+            DapMessage response = session.Request("evaluate", new { expression = "`version", context = "repl" }, cancellation);
+            if (response.Success == true && response.Body is JsonElement body && body.TryGetProperty("result", out var result))
+                text = result.GetString();
+        }
+        if (text == null || !text.Contains("lldb", StringComparison.OrdinalIgnoreCase) || ParseVersion(text) is not { } found)
+            throw new ArgumentException("Error: The native adapter did not report an LLDB runtime version through DAP.");
+        return found;
+    }
+
+    private static string ProbeDapVersion(string path, string[] arguments)
+    {
+        var diagnostics = new List<string>();
+        try
+        {
+            using var session = new NativeAdapterSession(new NativeAdapterDescriptor("lldb", path, arguments,
+                "DAP version probe", null, RuntimeInformation.RuntimeIdentifier, []), _ => { },
+                error => { lock (diagnostics) diagnostics.Add(error.Message); },
+                message => { lock (diagnostics) diagnostics.Add(message); });
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            DapMessage response = session.Request("initialize", new
+            {
+                adapterID = "dncdbg-version-probe", pathFormat = "path", linesStartAt1 = true,
+                columnsStartAt1 = true,
+            }, deadline.Token);
+            if (response.Success != true || response.Body is not JsonElement { ValueKind: JsonValueKind.Object } capabilities)
+                throw new ArgumentException("Error: The native debugger rejected the DAP initialization probe.");
+            return DapVersion(session, capabilities, deadline.Token);
+        }
+        catch (Exception error) when (error is IOException or OperationCanceledException or TimeoutException
+            or InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            lock (diagnostics)
+                throw new ArgumentException($"Error: Native debugger '{path}' could not complete its DAP version probe: "
+                    + error.Message + " " + string.Join(" ", diagnostics), error);
+        }
     }
 
     private static string Under(string root, string relative)

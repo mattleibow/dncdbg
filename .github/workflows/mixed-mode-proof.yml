@@ -7,6 +7,7 @@ on:
       - src/**
       - tests/DncDbg.MixedModeTests/**
       - tests/DncDbg.SmokeTests/**
+      - tests/DncDbg.ProtocolTests/**
       - test-suite/**
       - .github/workflows/mixed-mode-proof.yml
       - global.json
@@ -75,12 +76,17 @@ jobs:
           }
           if (-not (Test-Path $lldb)) { throw "Native DAP adapter not found: $lldb" }
           & $lldb --version | Tee-Object build/validation/mixed-mode/lldb-version.txt
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          if ($LASTEXITCODE) {
+            Write-Warning "This adapter has no CLI --version; DNCDbg will require the public DAP initialization/version probe."
+            $global:LASTEXITCODE = 0
+          }
           "LLDB_DAP=$lldb" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Publish and validate swappable DAP contracts
         shell: pwsh
         run: |
           dotnet publish src/DncDbg.Dap -c Release -o bin --nologo
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          dotnet run --project tests/DncDbg.ProtocolTests -c Release
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           $adapter = if ($IsWindows) { "bin/dncdbg-dap.exe" } else { "bin/dncdbg-dap" }
           python tests/DncDbg.MixedModeTests/proxy_contracts.py --adapter $adapter 2>&1 |

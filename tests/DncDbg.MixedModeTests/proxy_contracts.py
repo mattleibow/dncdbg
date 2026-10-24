@@ -30,6 +30,10 @@ def arguments(kind="dap", mode="normal", lldb=None, barrier=None):
 
 
 def fake_contracts(adapter):
+    older = subprocess.run([adapter, *arguments("lldb", "no-cli-version"), "--native-debugger-info"],
+                           capture_output=True, text=True)
+    check(older.returncode == 0 and json.loads(older.stdout)["version"] == "21.1.8",
+          "A public LLDB DAP adapter without --version must use the initialization version: " + older.stderr)
     with Dap(adapter, "native-proxy-contracts", arguments()) as peer:
         init = peer.request("initialize", dict(adapterID="dncdbg", supportsRunInTerminalRequest=True))
         check(not init["supportsCancelRequest"], "Untranslated native request IDs must not advertise cancellation")

@@ -122,15 +122,14 @@ public sealed class DapConnection : IDisposable
     }
 
     public int SendRequest(string command, object? arguments = null)
+        => Send(CreateRequest(command, arguments));
+
+    private static DapMessage CreateRequest(string command, object? arguments) => new()
     {
-        var msg = new DapMessage
-        {
-            Type = "request",
-            Command = command,
-            Arguments = arguments == null ? null : JsonSerializer.SerializeToElement(arguments, DapJson.Options),
-        };
-        return Send(msg);
-    }
+        Type = "request",
+        Command = command,
+        Arguments = arguments == null ? null : JsonSerializer.SerializeToElement(arguments, DapJson.Options),
+    };
 
     /// <summary>
     /// Sends a request whose response is delivered through <see cref="CompleteRequest"/> by whoever reads the stream.
@@ -139,14 +138,7 @@ public sealed class DapConnection : IDisposable
     {
         cancellation.ThrowIfCancellationRequested();
         var completion = new TaskCompletionSource<DapMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
-        int seq;
-        lock (_writeLock)
-        {
-            // registered under the write lock so the response cannot overtake the registration
-            seq = SendRequest(command, arguments);
-            lock (_pendingRequests)
-                _pendingRequests[seq] = completion;
-        }
+        int seq = Send(CreateRequest(command, arguments), completion);
         return AwaitResponse();
 
         async Task<DapMessage> AwaitResponse()
@@ -193,17 +185,31 @@ public sealed class DapConnection : IDisposable
 
     public int SendMessage(DapMessage message) => Send(message);
 
-    private int Send(DapMessage msg)
+    private int Send(DapMessage msg, TaskCompletionSource<DapMessage>? completion = null)
     {
         lock (_writeLock)
         {
-            msg.Seq = ++_seq;
-            byte[] payload = JsonSerializer.SerializeToUtf8Bytes(msg, DapJson.Options);
-            byte[] header = Encoding.ASCII.GetBytes($"Content-Length: {payload.Length}\r\n\r\n");
-            Trace?.Invoke("-> " + Encoding.UTF8.GetString(payload));
-            _output.Write(header);
-            _output.Write(payload);
-            _output.Flush();
+            msg.Seq = checked(++_seq);
+            // Register before writing: an in-process peer or fast pipe response can arrive during Flush.
+            if (completion != null)
+                lock (_pendingRequests)
+                    _pendingRequests.Add(msg.Seq, completion);
+            try
+            {
+                byte[] payload = JsonSerializer.SerializeToUtf8Bytes(msg, DapJson.Options);
+                byte[] header = Encoding.ASCII.GetBytes($"Content-Length: {payload.Length}\r\n\r\n");
+                Trace?.Invoke("-> " + Encoding.UTF8.GetString(payload));
+                _output.Write(header);
+                _output.Write(payload);
+                _output.Flush();
+            }
+            catch
+            {
+                if (completion != null)
+                    lock (_pendingRequests)
+                        _pendingRequests.Remove(msg.Seq);
+                throw;
+            }
             return msg.Seq;
         }
     }

@@ -260,8 +260,9 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         if (response.Success == true)
         {
             JsonObject capabilities = Object(response.Body);
-            string? reported = capabilities["$__lldb_version"]?.GetValue<string>();
-            if (descriptor.Version != null && reported != null && NativeAdapterLocator.ParseVersion(reported) != descriptor.Version)
+            string? reported = descriptor.Kind == "lldb"
+                ? NativeAdapterLocator.DapVersion(_native, JsonSerializer.SerializeToElement(capabilities, DapJson.Options), OperationToken()) : null;
+            if (descriptor.Version != null && reported != null && reported != descriptor.Version)
                 throw new DebuggerException("Native debugger version mismatch between discovery and DAP initialization.");
             capabilities["supportsCancelRequest"] = false;
             capabilities["dncdbg"] = JsonSerializer.SerializeToNode(new

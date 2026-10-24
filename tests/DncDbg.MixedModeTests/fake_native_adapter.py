@@ -24,6 +24,8 @@ if options.target_gate:
     sys.exit(0)
 
 if options.version:
+    if options.mode == "no-cli-version":
+        sys.exit(1)
     if options.lldb:
         sys.exit(subprocess.run([options.lldb, "--version"]).returncode)
     print("lldb version 21.1.8")

@@ -15,6 +15,11 @@ import time
 base = runpy.run_path(str(Path(__file__).with_name("run.py")))
 Dap, check, build, line = (base[n] for n in ("Dap", "check", "build", "line"))
 ROOT, OUT, DLL, FIXTURE = (base[n] for n in ("ROOT", "OUT", "DLL", "FIXTURE"))
+EXTRA_ENV = {}
+
+
+def target(extra=()):
+    return (shutil.which("dotnet"), [str(DLL), *extra]) if DLL.suffix == ".dll" else (str(DLL), list(extra))
 
 
 def alive(pid):
@@ -64,8 +69,9 @@ def scenario(adapter, lldb, managed, finish):
         capabilities = session.request("initialize", dict(adapterID="dncdbg", pathFormat="path",
                                                           linesStartAt1=True, columnsStartAt1=True))
         check(capabilities["dncdbg"]["executionOwner"] == "native-adapter", str(capabilities))
-        launch = session.send("launch", dict(program=shutil.which("dotnet"), args=[str(DLL)],
-                                             env=dict(DNCDBG_MIXED_CHECKPOINTS="1"),
+        program, arguments_to_target = target()
+        launch = session.send("launch", dict(program=program, args=arguments_to_target,
+                                             env=dict(DNCDBG_MIXED_CHECKPOINTS="1", **EXTRA_ENV),
                                              managedInspection=managed))
         session.event("initialized")
         breakpoints = session.request("setBreakpoints", dict(source=dict(path=str(FIXTURE / "native.c")),
@@ -161,8 +167,9 @@ def detach_scenario(adapter, lldb, managed):
     try:
         with Dap(adapter, "lldb-proxy-detach", ["--native-debugger=lldb", "--native-debugger-path=" + lldb]) as peer:
             peer.request("initialize", dict(adapterID="dncdbg", pathFormat="path", linesStartAt1=True, columnsStartAt1=True))
-            launch = peer.send("launch", dict(program=shutil.which("dotnet"), args=[str(DLL), "--exit-gate", str(gate)],
-                                              env=dict(DNCDBG_MIXED_CHECKPOINTS="1"), managedInspection=managed,
+            program, arguments_to_target = target(["--exit-gate", str(gate)])
+            launch = peer.send("launch", dict(program=program, args=arguments_to_target,
+                                              env=dict(DNCDBG_MIXED_CHECKPOINTS="1", **EXTRA_ENV), managedInspection=managed,
                                               preRunCommands=[
                                                   'settings set target.output-path "' + str(OUT / "detached.stdout").replace("\\", "/") + '"',
                                                   'settings set target.error-path "' + str(OUT / "detached.stderr").replace("\\", "/") + '"',
@@ -203,8 +210,16 @@ if __name__ == "__main__":
     parser.add_argument("--adapter", default=str(ROOT / "bin" / "dncdbg-dap"))
     parser.add_argument("--lldb-dap", required=True)
     parser.add_argument("--native-only", action="store_true")
+    parser.add_argument("--fixture", type=Path)
+    parser.add_argument("--skip-build", action="store_true")
+    parser.add_argument("--tiered-jit", choices=("0", "1"))
     options = parser.parse_args()
-    build()
+    if not options.skip_build:
+        build()
+    if options.fixture:
+        DLL = options.fixture.resolve()
+    if options.tiered_jit is not None:
+        EXTRA_ENV["DOTNET_TieredCompilation"] = options.tiered_jit
     info = subprocess.run([options.adapter, "--native-debugger=lldb", "--native-debugger-path=" + options.lldb_dap,
                            "--native-debugger-info"], capture_output=True, text=True)
     check(info.returncode == 0, info.stderr)

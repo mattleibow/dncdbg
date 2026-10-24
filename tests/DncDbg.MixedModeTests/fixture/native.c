@@ -17,3 +17,9 @@ EXPORT NOINLINE int native_add(int left, int right)
     int result = native_sum(left, right);
     return result;
 }
+
+EXPORT NOINLINE void native_checkpoint(int phase, int result)
+{
+    volatile int observed = phase + result; /* NATIVE_CHECKPOINT */
+    (void)observed;
+}

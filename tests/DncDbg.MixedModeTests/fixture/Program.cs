@@ -24,12 +24,21 @@ internal static class Program
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static int ManagedCall(int left, int right)
     {
+        if (Checkpoints)
+            NativeCheckpoint(1, left + right);
         Console.WriteLine($"BEFORE:{left},{right}"); // MANAGED_BEFORE
         int result = NativeAdd(left, right);
         Console.WriteLine($"AFTER:{result}"); // MANAGED_AFTER
+        if (Checkpoints)
+            NativeCheckpoint(2, result);
         return result;
     }
 
     [DllImport("mixedfixture", EntryPoint = "native_add", CallingConvention = CallingConvention.Cdecl)]
     private static extern int NativeAdd(int left, int right);
+
+    [DllImport("mixedfixture", EntryPoint = "native_checkpoint", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void NativeCheckpoint(int phase, int result);
+
+    private static bool Checkpoints => Environment.GetEnvironmentVariable("DNCDBG_MIXED_CHECKPOINTS") == "1";
 }

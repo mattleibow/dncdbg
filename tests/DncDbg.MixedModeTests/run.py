@@ -28,9 +28,9 @@ def line(path, marker):
 
 
 class Dap:
-    def __init__(self, executable, name):
+    def __init__(self, executable, name, arguments=()):
         self.process = subprocess.Popen(
-            [str(executable)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            [str(executable), *arguments], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.messages = queue.Queue()
         self.saved = []
         self.seq = 0
@@ -324,8 +324,7 @@ def rejected_native_configurations(adapter):
         response = session.receive(lambda m: m.get("type") == "response" and m.get("request_seq") == launch)
         check(not response["success"], str(response))
         check("native debugging" in response["message"].lower(), str(response))
-        if sys.platform != "win32":
-            check("Windows x64" in response["message"], str(response))
+        check("retired" in response["message"].lower(), str(response))
         session.request("attach", dict(processId=-1, nativeDebugging=True), success=False)
         check(session.request("dotnet/info")["debuggeeProcessId"] == 0, "Rejected config started a process")
         session.request("disconnect")

@@ -260,18 +260,27 @@ internal static class NativeAdapterLocator
             throw new System.ComponentModel.Win32Exception(assignError);
         }
         process.StandardInput.Dispose();
-        Task<(string Text, bool Complete)> output = Task.Run(() => ReadPipe(process.StandardOutput.BaseStream, deadline.Token));
-        Task<(string Text, bool Complete)> error = Task.Run(() => ReadPipe(process.StandardError.BaseStream, deadline.Token));
+        using var readersDone = new CountdownEvent(2);
+        Task<(string Text, bool Complete)> output = Task.Run(() =>
+        {
+            try { return ReadPipe(process.StandardOutput.BaseStream, deadline.Token); }
+            finally { readersDone.Signal(); }
+        });
+        Task<(string Text, bool Complete)> error = Task.Run(() =>
+        {
+            try { return ReadPipe(process.StandardError.BaseStream, deadline.Token); }
+            finally { readersDone.Signal(); }
+        });
         try
         {
             uint waitStatus = WaitForSingleObject(processHandle, (uint)Math.Max(0, 5000 - (int)timer.ElapsedMilliseconds));
             if (waitStatus != 0)
                 throw new ArgumentException("Error: Native debugger discovery/version probe timed out: " + executable);
             int remaining = Math.Max(0, 5000 - (int)timer.ElapsedMilliseconds);
-            if (!Task.WaitAll([output, error], remaining))
+            if (!readersDone.Wait(remaining))
                 deadline.Cancel();
             deadline.Cancel();
-            Task.WaitAll([output, error], TimeSpan.FromSeconds(1));
+            readersDone.Wait(TimeSpan.FromSeconds(1));
             if (!GetExitCodeProcess(processHandle, out uint rawExitCode))
                 throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
             (string Text, bool Complete) outResult = output.IsCompletedSuccessfully ? output.Result : ("", false);
@@ -289,7 +298,7 @@ internal static class NativeAdapterLocator
                 && QueryInformationJobObject(job, 1, out var accounting, Marshal.SizeOf<JobObjectBasicAccountingInformation>(), IntPtr.Zero)
                 && accounting.ActiveProcesses != 0)
                 System.Threading.Thread.Sleep(10);
-            Task.WaitAll([output, error], TimeSpan.FromSeconds(1));
+            readersDone.Wait(TimeSpan.FromSeconds(1));
             try { process.StandardOutput.Dispose(); } catch (Exception) { }
             try { process.StandardError.Dispose(); } catch (Exception) { }
         }
@@ -314,21 +323,29 @@ internal static class NativeAdapterLocator
         }
         stdout.DisposeLocalCopyOfClientHandle();
         stderr.DisposeLocalCopyOfClientHandle();
-        Task<(string Text, bool Complete)> output = Task.Run(() => ReadPipe(stdout, deadline.Token));
-        Task<(string Text, bool Complete)> error = Task.Run(() => ReadPipe(stderr, deadline.Token));
+        var timer = Stopwatch.StartNew();
+        using var readersDone = new CountdownEvent(2);
+        Task<(string Text, bool Complete)> output = Task.Run(() =>
+        {
+            try { return ReadPipe(stdout, deadline.Token); }
+            finally { readersDone.Signal(); }
+        });
+        Task<(string Text, bool Complete)> error = Task.Run(() =>
+        {
+            try { return ReadPipe(stderr, deadline.Token); }
+            finally { readersDone.Signal(); }
+        });
         int status = 0;
         bool reaped = false;
         try
         {
             if (!WaitUnixExitedWithoutReap(pid, deadline.Token))
                 throw new ArgumentException("Error: Native debugger discovery/version probe timed out: " + executable);
-            try
-            {
-                Task.WhenAll(output, error).WaitAsync(deadline.Token).GetAwaiter().GetResult();
-            }
-            catch (OperationCanceledException) { }
+            int remaining = Math.Max(0, 5000 - (int)timer.ElapsedMilliseconds);
+            if (!readersDone.Wait(remaining))
+                deadline.Cancel();
             deadline.Cancel();
-            Task.WaitAll([output, error], TimeSpan.FromSeconds(1));
+            readersDone.Wait(TimeSpan.FromSeconds(1));
             _ = kill(-pid, 9);
             reaped = ReapUnix(pid, out status);
             (string Text, bool Complete) outResult = output.IsCompletedSuccessfully ? output.Result : ("", false);
@@ -348,7 +365,7 @@ internal static class NativeAdapterLocator
             var cleanup = Stopwatch.StartNew();
             while (cleanup.ElapsedMilliseconds < 1000 && kill(-pid, 0) == 0)
                 System.Threading.Thread.Sleep(5);
-            Task.WaitAll([output, error], TimeSpan.FromSeconds(1));
+            readersDone.Wait(TimeSpan.FromSeconds(1));
             stdout.Dispose();
             stderr.Dispose();
         }

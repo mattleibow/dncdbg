@@ -60,7 +60,7 @@ jobs:
         shell: pwsh
         run: |
           $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
-          $instance = & $vswhere -products '*' -version '[17.0,18.0)' `
+          $instance = & $vswhere -latest -products '*' -version '[17.0,18.0)' `
             -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           if (!$instance) {
             $installer = Join-Path $env:RUNNER_TEMP "vs_BuildTools2022.exe"
@@ -73,19 +73,34 @@ jobs:
             if ($process.ExitCode -notin @(0, 3010)) {
               throw "Visual Studio 2022 Build Tools installation failed: $($process.ExitCode)"
             }
-            $instance = & $vswhere -products '*' -version '[17.0,18.0)' `
+            $instance = & $vswhere -latest -products '*' -version '[17.0,18.0)' `
               -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           }
           if (!$instance) {
             throw "No Visual Studio 2022 C++ instance is available after installation."
           }
           Write-Output "Visual Studio 2022: $instance"
+          # The historical CMake flow expects a developer shell, including Windows SDK tools such as mc.exe.
+          $devCmd = Join-Path $instance "Common7/Tools/VsDevCmd.bat"
+          $environment = & $env:ComSpec /d /c "`"$devCmd`" -no_logo -arch=x64 -host_arch=x64 >nul && set"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Visual Studio 2022 developer environment initialization failed: $LASTEXITCODE"
+          }
+          foreach ($line in $environment) {
+            if ($line -match '^([^=]+)=(.*)$') {
+              $name, $value = $Matches[1], $Matches[2]
+              if ([Environment]::GetEnvironmentVariable($name) -ne $value) {
+                "$name=$value" >> $env:GITHUB_ENV
+              }
+            }
+          }
           exit 0
 
       - name: Configure native Release (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          Get-Command cl.exe, mc.exe
           cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
             -DCMAKE_BUILD_TYPE=Release `
             "-DCMAKE_INSTALL_PREFIX=$env:GITHUB_WORKSPACE/bin"

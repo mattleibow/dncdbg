@@ -1533,36 +1533,11 @@ internal sealed partial class ValueInspector
         };
     }
 
-    private static string FormatChar(char c) => c switch
-    {
-        '\'' => "'\\''",
-        '\\' => "'\\\\'",
-        '\0' => "'\\0'",
-        '\n' => "'\\n'",
-        '\r' => "'\\r'",
-        '\t' => "'\\t'",
-        _ when char.IsControl(c) => $"'\\u{(int)c:x4}'",
-        _ => "'" + c + "'",
-    };
+    private static string FormatChar(char c) =>
+        Microsoft.CodeAnalysis.CSharp.SymbolDisplay.FormatLiteral(c, quote: true);
 
-    private static string Quote(string s)
-    {
-        var sb = new System.Text.StringBuilder("\"");
-        foreach (char c in s)
-        {
-            sb.Append(c switch
-            {
-                '"' => "\\\"",
-                '\\' => "\\\\",
-                '\n' => "\\n",
-                '\r' => "\\r",
-                '\t' => "\\t",
-                '\0' => "\\0",
-                _ => c.ToString(),
-            });
-        }
-        return sb.Append('"').ToString();
-    }
+    private static string Quote(string s) =>
+        Microsoft.CodeAnalysis.CSharp.SymbolDisplay.FormatLiteral(s, quote: true);
 
     private string? SafeTypeName(CorDebugValue value) => TryGet(() => TypeName(value.ExactType));
 

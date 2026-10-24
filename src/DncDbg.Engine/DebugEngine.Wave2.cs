@@ -203,7 +203,7 @@ public sealed partial class DebugEngine
             foreach (ExceptionFilterRequest filter in filters)
             {
                 string[] tokens = (filter.Condition ?? "")
-                    .Split([' ', '\t', '\r', '\n', ','], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                    .Split([' ', '\t', '\r', '\n', '\f', '\v', ','], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                     .Where(item => item != "!")
                     .ToArray();
                 if (tokens.Length == 0)

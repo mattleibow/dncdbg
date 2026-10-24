@@ -31,8 +31,18 @@ jobs:
       DNCDBG_TARGET_FRAMEWORK: net10.0
 
     steps:
+      - name: Preserve source bytes for SourceLink comparisons (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          git config --global core.autocrlf false
+          exit $LASTEXITCODE
+
       - name: Check out native source
         uses: actions/checkout@v4
+
+      - name: Record SourceLink checkout line endings
+        run: git ls-files --eol test-suite/TestSourceLink
 
       - name: Install public .NET 10 SDK
         uses: actions/setup-dotnet@v4

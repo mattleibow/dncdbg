@@ -30,7 +30,9 @@ the migration-contract tests, and `TestStringEscaping` copied unchanged from
 managed `main`. Linux disables the Yama sibling-process attach restriction for
 the attach tests. If `windows-latest` lacks Visual Studio 2022, the workflow
 installs Microsoft's public VS 2022 C++ Build Tools before using its CMake
-generator and x64 configuration.
+generator and x64 configuration. The Windows checkout preserves Git blob line
+endings so exact SourceLink content comparisons use the same source bytes as
+the public raw-content URL.
 
 The full build and DAP/test output is retained in the Actions job logs. The job
 summary lists each test result and exact totals, or reports that setup/build

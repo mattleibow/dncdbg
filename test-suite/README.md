@@ -28,7 +28,9 @@ the documented CMake flows and the public .NET 10 SDK. It runs every test in the
 platform's historical runner manifest, including the Windows-only WinForms case,
 the migration-contract tests, and `TestStringEscaping` copied unchanged from
 managed `main`. Linux disables the Yama sibling-process attach restriction for
-the attach tests.
+the attach tests. If `windows-latest` lacks Visual Studio 2022, the workflow
+installs Microsoft's public VS 2022 C++ Build Tools before using its CMake
+generator and x64 configuration.
 
 The full build and DAP/test output is retained in the Actions job logs. The job
 summary lists each test result and exact totals, or reports that setup/build

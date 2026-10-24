@@ -8,9 +8,10 @@ using ClrDebug;
 
 if (!OperatingSystem.IsWindows() || RuntimeInformation.ProcessArchitecture != Architecture.X64)
     throw new PlatformNotSupportedException("This proof requires Windows x64.");
-if (args is not [var fixture, var sourceDirectory])
+bool attach = args.Length == 3 && args[2] == "--attach";
+if (args.Length != 2 && !attach)
     throw new ArgumentException("Supply Fixture.dll and its source directory.");
-await new InteropProof(Path.GetFullPath(fixture), Path.GetFullPath(sourceDirectory)).Run();
+await new InteropProof(Path.GetFullPath(args[0]), Path.GetFullPath(args[1])).Run(attach);
 
 internal sealed class InteropProof(string fixture, string sourceDirectory)
 {
@@ -29,7 +30,7 @@ internal sealed class InteropProof(string fixture, string sourceDirectory)
     private IntPtr _symbolHandle;
     private int _pid;
 
-    public async Task Run()
+    public async Task Run(bool attach)
     {
         string shimPath = Path.Combine(AppContext.BaseDirectory, "runtimes", "win-x64", "native", "dbgshim.dll");
         if (!File.Exists(shimPath))
@@ -43,10 +44,27 @@ internal sealed class InteropProof(string fixture, string sourceDirectory)
                 try { action(); }
                 catch (Exception e) { Fail(e); }
         });
-        var launched = shim.CreateProcessForLaunch($"dotnet \"{fixture}\" --preload", true);
-        _pid = launched.ProcessId;
-        using Process target = Process.GetProcessById(_pid);
-        Console.WriteLine($"Created suspended target {_pid}; host={RuntimeInformation.RuntimeIdentifier}");
+        string release = Path.Combine(Path.GetDirectoryName(fixture)!, $"attach-{Guid.NewGuid():N}.release");
+        CreateProcessForLaunchResult launched = default;
+        Process target;
+        if (attach)
+        {
+            var start = new ProcessStartInfo("dotnet") { RedirectStandardOutput = true };
+            foreach (string argument in new[] { fixture, "--preload", "--wait-file", release })
+                start.ArgumentList.Add(argument);
+            target = Process.Start(start) ?? throw new InvalidOperationException("Cannot start attach fixture.");
+            _pid = target.Id;
+            string? ready = await target.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(15));
+            Require(ready == $"WAIT:{_pid}", $"Attach synchronization: {ready}");
+        }
+        else
+        {
+            launched = shim.CreateProcessForLaunch($"dotnet \"{fixture}\" --preload", true);
+            _pid = launched.ProcessId;
+            target = Process.GetProcessById(_pid);
+        }
+        using var targetLifetime = target;
+        Console.WriteLine($"Target {_pid}, attach={attach}; host={RuntimeInformation.RuntimeIdentifier}");
         IntPtr registration = IntPtr.Zero;
         try
         {
@@ -63,22 +81,29 @@ internal sealed class InteropProof(string fixture, string sourceDirectory)
                     Console.WriteLine("PASS CanLaunchOrAttach(win32DebuggingEnabled:true)");
                     _process = _debugger.DebugActiveProcess(_pid, true);
                     Console.WriteLine("PASS DebugActiveProcess(win32Attach:true)");
+                    if (attach)
+                        File.WriteAllText(release, "release");
                 }
                 catch (Exception e) { Fail(e); }
             }));
-            shim.ResumeProcess(launched.ResumeHandle);
+            if (!attach)
+                shim.ResumeProcess(launched.ResumeHandle);
             await _completed.Task.WaitAsync(TimeSpan.FromSeconds(60));
             await target.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15));
             Require(_nativeExitCode == 0, $"Native process exit event code: {_nativeExitCode}");
             Require(_managedStops == 2 && _nativeStops == 1 && _nativeSteps == 1,
                 $"Incomplete scenario: managed={_managedStops}, native={_nativeStops}, native steps={_nativeSteps}");
-            Console.WriteLine("PASS public ICorDebug interop launch: managed -> native -> managed, result 42, clean exit");
+            if (attach)
+                Console.Write(await target.StandardOutput.ReadToEndAsync());
+            Console.WriteLine($"PASS public ICorDebug interop {(attach ? "attach" : "launch")}: managed -> native -> managed, result 42, clean exit");
         }
         finally
         {
             if (registration != IntPtr.Zero)
                 shim.UnregisterForRuntimeStartup(registration);
-            shim.CloseResumeHandle(launched.ResumeHandle);
+            if (!attach)
+                shim.CloseResumeHandle(launched.ResumeHandle);
+            File.Delete(release);
             try
             {
                 if (!target.HasExited)

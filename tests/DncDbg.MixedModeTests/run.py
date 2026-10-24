@@ -7,6 +7,7 @@ from pathlib import Path
 import queue
 import shutil
 import subprocess
+import sys
 import threading
 import time
 
@@ -111,7 +112,14 @@ class Dap:
             except (OSError, EOFError, queue.Empty, AssertionError) as error:
                 print(f"Cleanup disconnect failed for PID {self.process.pid}: {error}", flush=True)
         if self.process.poll() is None:
-            self.process.kill()
+            if self.disconnected:
+                try:
+                    self.process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    print(f"DAP peer {self.process.pid} did not exit after disconnect", flush=True)
+                    self.process.kill()
+            else:
+                self.process.kill()
         self.process.wait(timeout=10)
         self.reader.join(timeout=5)
         self.error_reader.join(timeout=5)
@@ -224,17 +232,30 @@ def managed_baseline(adapter):
     print("PASS managed breakpoints/stack/arguments/result across P/Invoke", flush=True)
 
 
-def windows_engine(adapter):
-    with Dap(adapter, "windows-engine") as session:
+def windows_engine(adapter, finish):
+    with Dap(adapter, "windows-engine-" + finish) as session:
         session.request("initialize", dict(adapterID="dncdbg"))
-        launch = session.send("launch", dict(program=str(DLL), args=["--preload"], nativeDebugging=True))
+        launch = session.send("launch", dict(program=str(DLL), args=["--preload", "--repeat"], nativeDebugging=True))
         session.event("initialized")
         session.request("setBreakpoints", dict(source=dict(path=str(FIXTURE / "Program.cs")),
                                               breakpoints=[dict(line=line(FIXTURE / "Program.cs", marker))
                                                            for marker in ("MANAGED_BEFORE", "MANAGED_AFTER")]))
         session.request("configurationDone")
         session.response(launch)
+        capabilities = session.event("capabilities")["capabilities"]
+        check(not capabilities["supportsSingleThreadExecutionRequests"] and not capabilities["supportsRestartRequest"],
+              str(capabilities))
         before = session.event("stopped")
+        pid = session.request("dotnet/info")["debuggeeProcessId"]
+        session.request("stepIn", dict(threadId=before["threadId"]), success=False)
+        session.request("continue", dict(threadId=before["threadId"], singleThread=True), success=False)
+        session.request("dotnet/setNativeBreakpoint", dict(module="mixedfixture.dll",
+                                                         source=dict(path=str(FIXTURE / "native.c")),
+                                                         line=line(FIXTURE / "native.c", "NATIVE_BREAK")), success=False)
+        session.request("dotnet/setNativeBreakpoint", dict(module="not-loaded.dll",
+                                                         source=dict(path=str(FIXTURE / "native.c")),
+                                                         line=11, oneShot=True), success=False)
+        session.request("evaluate", dict(expression="NativeAdd(19, 23)", context="watch"), success=False)
         bp = session.request("dotnet/setNativeBreakpoint", dict(module="mixedfixture.dll",
                                                                source=dict(path=str(FIXTURE / "native.c")),
                                                                line=line(FIXTURE / "native.c", "NATIVE_BREAK"),
@@ -243,6 +264,7 @@ def windows_engine(adapter):
         session.request("continue", dict(threadId=before["threadId"]))
         stop = session.event("stopped")
         check(stop["description"] == "Native breakpoint", str(stop))
+        check(stop["hitBreakpointIds"] == [bp["id"]], str(stop))
         threads = session.request("threads")["threads"]
         check(any(t["id"] == stop["threadId"] for t in threads), "Missing native stopped thread")
         frames = session.request("stackTrace", dict(threadId=stop["threadId"]))["stackFrames"]
@@ -250,14 +272,63 @@ def windows_engine(adapter):
         check(any("native_add" in f["name"] for f in frames), "Missing native caller")
         check(Path(frames[0]["source"]["path"]).resolve() == (FIXTURE / "native.c").resolve(), str(frames[0]))
         check(frames[0]["line"] == line(FIXTURE / "native.c", "NATIVE_BREAK"), str(frames[0]))
+        check(frames[0]["endLine"] >= frames[0]["line"], str(frames[0]))
         session.request("scopes", dict(frameId=frames[0]["id"]), success=False)
         session.request("stepIn", dict(threadId=stop["threadId"]), success=False)
-        session.request("continue", dict(threadId=stop["threadId"]))
-        after = managed_after(session)
-        session.request("continue", dict(threadId=after["threadId"]))
-        check(session.event("exited")["exitCode"] == 0, "Windows engine exit")
+        session.request("continue", dict(threadId=stop["threadId"], singleThread=True), success=False)
+        session.request("disconnect", dict(terminateDebuggee=False), success=False)
+        check(session.request("dotnet/info")["nativeStopped"], "Rejected detach changed session state")
+        if finish == "continue":
+            session.request("continue", dict(threadId=stop["threadId"]))
+            after = managed_after(session)
+            session.request("continue", dict(threadId=after["threadId"]))
+            check(session.event("exited")["exitCode"] == 0, "Windows engine exit")
+            session.request("disconnect")
+        elif finish == "terminate":
+            session.request("terminate")
+            session.event("exited")
+            session.request("disconnect")
+        elif finish == "disconnect":
+            session.request("disconnect", dict(terminateDebuggee=True))
+        else:
+            session.process.stdin.close()
+        session.process.wait(timeout=15)
+        check(session.process.returncode == 0, f"Adapter exit: {session.process.returncode}")
+        require_windows_exit(pid)
+    print(f"PASS Windows DNCDbg native source stop/stack and {finish} lifecycle", flush=True)
+
+
+def require_windows_exit(pid):
+    import ctypes
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel.OpenProcess(0x100000, False, pid)
+    if not handle:
+        check(ctypes.get_last_error() == 87, f"OpenProcess({pid}) error {ctypes.get_last_error()}")
+        return
+    try:
+        check(kernel.WaitForSingleObject(handle, 0) == 0, f"Native target {pid} survived session shutdown")
+    finally:
+        check(kernel.CloseHandle(handle), "CloseHandle")
+
+
+def rejected_native_configurations(adapter):
+    with Dap(adapter, "native-configuration-errors") as session:
+        session.request("initialize", dict(adapterID="dncdbg"))
+        launch = session.send("launch", dict(program=str(DLL), nativeDebugging=True, noDebug=True))
+        response = session.receive(lambda m: m.get("type") == "response" and m.get("request_seq") == launch)
+        check(not response["success"], str(response))
+        check("native debugging" in response["message"].lower(), str(response))
+        if sys.platform != "win32":
+            check("Windows x64" in response["message"], str(response))
+        session.request("attach", dict(processId=-1, nativeDebugging=True), success=False)
+        check(session.request("dotnet/info")["debuggeeProcessId"] == 0, "Rejected config started a process")
         session.request("disconnect")
-    print("PASS Windows DNCDbg managed -> native source breakpoint/stack -> managed result", flush=True)
+    print("PASS unsupported native configurations are rejected before process creation", flush=True)
 
 
 def coordination_probe(adapter, lldb, preload=False):
@@ -301,6 +372,8 @@ if __name__ == "__main__":
     parser.add_argument("--lldb-dap", type=Path)
     parser.add_argument("--windows-engine", action="store_true",
                         help="Require the experimental Windows DNCDbg engine/DAP slice.")
+    parser.add_argument("--reject-native", action="store_true",
+                        help="Verify native launch/attach configuration errors without a native session.")
     parser.add_argument("--probe-coordination", action="store_true",
                         help="Require the full dual-debugger scenario; currently FAILS on macOS.")
     parser.add_argument("--preload", action="store_true",
@@ -308,8 +381,12 @@ if __name__ == "__main__":
     options = parser.parse_args()
     check(not options.preload or options.probe_coordination, "--preload requires --probe-coordination")
     build()
-    if options.windows_engine:
-        windows_engine(options.adapter.resolve())
+    if options.reject_native:
+        rejected_native_configurations(options.adapter.resolve())
+    elif options.windows_engine:
+        rejected_native_configurations(options.adapter.resolve())
+        for finish in ("continue", "terminate", "disconnect", "eof"):
+            windows_engine(options.adapter.resolve(), finish)
     else:
         check(options.lldb_dap is not None, "--lldb-dap is required for LLDB baselines")
         native_baseline(options.lldb_dap)

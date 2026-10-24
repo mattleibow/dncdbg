@@ -7,13 +7,16 @@ internal static class Program
     {
         if (args.Contains("--preload"))
             NativeLibrary.Load("mixedfixture", typeof(Program).Assembly, null);
-        if (Array.IndexOf(args, "--wait-file") is var index && index >= 0)
+        int index = Array.IndexOf(args, "--wait-file");
+        if (index >= 0)
         {
             Console.WriteLine($"WAIT:{Environment.ProcessId}");
             while (!File.Exists(args[index + 1]))
                 Thread.Sleep(20);
         }
         int result = ManagedCall(19, 23);
+        if (args.Contains("--repeat"))
+            result = NativeAdd(19, 23);
         Console.WriteLine($"RESULT:{result}");
         return result == 42 ? 0 : 1;
     }

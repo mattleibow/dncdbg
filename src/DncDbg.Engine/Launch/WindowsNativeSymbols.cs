@@ -81,7 +81,8 @@ internal sealed class WindowsNativeSymbols : IDisposable
                     bool hasSource = SymGetLineFromAddr64(_process, frame.PC.Offset, out _, ref location);
                     string? path = hasSource ? Marshal.PtrToStringAnsi(location.FileName) : null;
                     result.Add(new FrameInfo(nextId(), "[Native] " + name, path,
-                        hasSource ? location.LineNumber : 0, hasSource ? 1 : 0, 0, 0,
+                        hasSource ? location.LineNumber : 0, hasSource ? 1 : 0,
+                        hasSource ? location.LineNumber : 0, hasSource ? 1 : 0,
                         PresentationHint: hasSource ? null : "subtle"));
                 }
                 return result;

@@ -54,8 +54,6 @@ internal sealed class InteropProof(string fixture, string sourceDirectory)
                 start.ArgumentList.Add(argument);
             target = Process.Start(start) ?? throw new InvalidOperationException("Cannot start attach fixture.");
             _pid = target.Id;
-            string? ready = await target.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(15));
-            Require(ready == $"WAIT:{_pid}", $"Attach synchronization: {ready}");
         }
         else
         {
@@ -68,6 +66,11 @@ internal sealed class InteropProof(string fixture, string sourceDirectory)
         IntPtr registration = IntPtr.Zero;
         try
         {
+            if (attach)
+            {
+                string? ready = await target.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(15));
+                Require(ready == $"WAIT:{_pid}", $"Attach synchronization: {ready}");
+            }
             registration = shim.RegisterForRuntimeStartup(_pid, (RuntimeStartupCallback)((debugger, _, hr) =>
             {
                 try

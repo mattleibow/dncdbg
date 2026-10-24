@@ -614,7 +614,12 @@ public sealed partial class DebugEngine : IDisposable
     {
         if (NativeDebugging)
         {
-            _terminating = true;
+            lock (_lock)
+            {
+                if (_relinquished || _processExited || _processId == 0 || _terminating)
+                    return;
+                _terminating = true;
+            }
             KillProcess();
             return;
         }
@@ -778,9 +783,10 @@ public sealed partial class DebugEngine : IDisposable
             debugger = _cannotSynchronize ? null : _corDebug;
             _corDebug = null;
         }
+        try { _nativeSymbols?.Dispose(); }
+        catch (Exception e) { Log?.Invoke("Native symbols cleanup failed: " + e.Message); }
         try
         {
-            _nativeSymbols?.Dispose();
             // Termination waits for callbacks, which must remain free to acquire the engine lock.
             debugger?.Terminate();
         }
@@ -1332,10 +1338,10 @@ public sealed partial class DebugEngine : IDisposable
         {
             if (_process == null || !_stopped)
                 return;
+            if (NativeDebugging && singleThread)
+                throw new DebuggerException("Single-thread continuation is not supported during experimental native debugging.");
             if (IsNativeStopped)
             {
-                if (singleThread)
-                    throw new DebuggerException("Single-thread continuation is not supported at a native stop.");
                 ClearStopState();
                 _process.Continue(false);
                 return;

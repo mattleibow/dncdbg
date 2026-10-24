@@ -3,6 +3,14 @@ name: Mixed-mode public API proof
 on:
   push:
     branches: [mattleibow-mixed-mode-debugging]
+    paths:
+      - src/**
+      - tests/DncDbg.MixedModeTests/**
+      - tests/DncDbg.SmokeTests/**
+      - test-suite/**
+      - .github/workflows/mixed-mode-proof.yml
+      - global.json
+      - DncDbg.slnx
   workflow_dispatch:
 
 permissions:
@@ -17,6 +25,9 @@ jobs:
     runs-on: windows-2025
     timeout-minutes: 15
     steps:
+      - name: Preserve source bytes
+        shell: pwsh
+        run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
@@ -60,8 +71,9 @@ jobs:
           dotnet run --project tests/DncDbg.SmokeTests -c Release -- bin/dncdbg-dap.exe 2>&1 |
             Tee-Object build/validation/mixed-mode/windows-smoke.log
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $regressionLog = Join-Path $PWD "build/validation/mixed-mode/windows-regressions.log"
           & ./test-suite/run_tests.ps1 TestBreakpoint TestStackTrace TestThreads TestStepping TestAttach TestDisconnect 2>&1 |
-            Tee-Object build/validation/mixed-mode/windows-regressions.log
+            Tee-Object $regressionLog
           exit $LASTEXITCODE
       - name: Preserve proof logs and binaries
         if: always()

@@ -135,9 +135,16 @@ public sealed partial class DebugEngine
 
     private void NativeFailure(Exception error)
     {
-        Log?.Invoke("Native debugger failed: " + error);
-        Output?.Invoke("stderr", "Native debugger failed: " + ErrorText.Describe(error) + Environment.NewLine);
-        KillProcess();
+        try
+        {
+            Log?.Invoke("Native debugger failed: " + error);
+            Output?.Invoke("stderr", "Native debugger failed: " + ErrorText.Describe(error) + Environment.NewLine);
+        }
+        finally
+        {
+            if (!_processExited)
+                KillProcess();
+        }
     }
 
     private IReadOnlyList<FrameInfo> GetNativeStack(int threadId)

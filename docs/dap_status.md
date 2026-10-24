@@ -9,10 +9,17 @@ This document shows, message by message and field by field, which parts of the [
 
 ## Mixed managed/native debugging
 
-**Decision:** preserve the managed engine's existing behavior. Do not advertise
-mixed-mode DAP support or add a macOS dual-controller production path without a
-passing external baseline. Investigate the direct Windows ICorDebug interop path
-separately; a native-only LLDB stop is not evidence of a working mixed debugger.
+**Decision:** use one ICorDebug interop controller for an **opt-in Windows x64**
+launch slice, after its independent public API baseline passed. Preserve the
+managed engine's default behavior. Do not advertise cross-platform mixed-mode
+parity or add a macOS dual-controller production path: its external baseline
+fails. A native-only LLDB stop is not evidence of a working mixed debugger.
+
+The implementation is intentionally bounded to one-shot source breakpoints in
+an already loaded native DLL, native stacks, and continue back to managed code.
+It uses `DncDbg.Engine` directly, normal `DncDbg.Protocol` framing, and the explicit
+`dotnet/setNativeBreakpoint` extension, not a DAP multiplexer.
+See [configuration, request shape and limitations](build_windows.md#experimental-mixed-mode-launch).
 
 ### Scenarios and acceptance boundary
 
@@ -83,17 +90,42 @@ redistributed by this repository.
 
 | Surface | Measured support |
 | --- | --- |
-| DNCDbg production mixed-mode capabilities | None added; managed-only DAP behavior is unchanged. |
+| DNCDbg experimental Windows x64 launch | `nativeDebugging:true`, explicit one-shot native source breakpoint, native stack/threads at that stop, continue to managed, terminate. Default managed-only behavior is unchanged. |
 | macOS `osx-arm64` / .NET 10 / Xcode LLDB | Separate managed and native launch baselines pass. Concurrent transition probe fails. |
 | macOS `osx-x64` | Not validated. |
 | Linux `linux-x64` / `linux-arm64` | Fixture is portable; no mixed-mode baseline established. No support claim. |
-| Windows `win-x64` | Dedicated public Actions proof; results must be recorded before implementation. |
+| Windows `win-x64` / .NET 10 | Public ICorDebug raw launch **and attach** proofs pass. The bounded production slice is launch-only; attach, stepping and native variables are not exposed. |
 | Windows x86 / arm64 | Runtime feature gate exists, but these fixture/proof runs do not validate them. |
 
 Debugger/target architecture must match. Runtime DBI/DAC selection and
 cross-version compatibility remain the CLR's contracts; native symbols must
 match the exact DLL/PDB or shared-library DWARF. No frozen debugger-version
 compatibility is inferred from one passing toolchain.
+
+### Windows evidence and next slice
+
+The first complete external launch proof passed at
+[run 40076033180](https://github.com/mattleibow/dncdbg/actions/runs/40076033180),
+before any production change. Both raw launch and raw attach passed at
+[run 40076146350](https://github.com/mattleibow/dncdbg/actions/runs/40076146350).
+They established exact managed source points, a DbgHelp-resolved native source
+breakpoint, `native_sum -> native_add` stack unwinding, x64 argument registers
+`19,23`, a native instruction step, managed return local `42`, and native exit
+event code zero.
+
+Early failing runs were useful proof boundaries: an unaligned x64 context
+returned `ERROR_NOACCESS`; after alignment, failing to rewind RIP past `INT3`
+corrupted the result and failed the `42` assertion. Neither assertion was
+weakened. The working baseline restores the opcode and instruction pointer.
+The DNCDbg DAP test was also run before implementation and failed with
+`Unsupported request 'dotnet/setNativeBreakpoint'`.
+
+Next incremental slice: prove a native breakpoint rearm plus a managed/native
+transition stepper on Windows x64, including an unoptimized and optimized DLL,
+before replacing the explicit one-shot contract with persistent IDE source
+breakpoints. Adapter attach/detach and native locals require their own lifecycle
+and PDB type/location proofs. macOS needs a supported exception-ownership
+architecture, not a DAP routing workaround.
 
 ### Official references checked
 

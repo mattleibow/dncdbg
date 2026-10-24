@@ -771,6 +771,11 @@ internal sealed class DebugAdapter : IDisposable
             },
             ExternalLauncher = terminalKind == null ? null : token => TerminalLauncher.Launch(_connection, launch, terminalKind, token),
         });
+        if (args.NativeDebugging)
+            _connection.SendEvent("capabilities", new
+            {
+                Capabilities = new { SupportsSingleThreadExecutionRequests = false, SupportsRestartRequest = false },
+            });
         SendProcessEvent(Path.GetFileName(launch.Program), "launch");
     }
 

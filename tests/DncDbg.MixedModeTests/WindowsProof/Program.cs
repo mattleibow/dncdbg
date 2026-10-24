@@ -9,11 +9,12 @@ using ClrDebug;
 if (!OperatingSystem.IsWindows() || RuntimeInformation.ProcessArchitecture != Architecture.X64)
     throw new PlatformNotSupportedException("This proof requires Windows x64.");
 bool attach = args.Length == 3 && args[2] == "--attach";
-if (args.Length != 2 && !attach)
+bool terminateAtNative = args.Length == 3 && args[2] == "--terminate-native";
+if (args.Length != 2 && !attach && !terminateAtNative)
     throw new ArgumentException("Supply Fixture.dll and its source directory.");
-await new InteropProof(Path.GetFullPath(args[0]), Path.GetFullPath(args[1])).Run(attach);
+await new InteropProof(Path.GetFullPath(args[0]), Path.GetFullPath(args[1]), terminateAtNative).Run(attach);
 
-internal sealed class InteropProof(string fixture, string sourceDirectory)
+internal sealed class InteropProof(string fixture, string sourceDirectory, bool terminateAtNative)
 {
     private readonly CorDebugManagedCallback _managed = new();
     private readonly CorDebugUnmanagedCallback _unmanaged = new();
@@ -93,12 +94,14 @@ internal sealed class InteropProof(string fixture, string sourceDirectory)
                 shim.ResumeProcess(launched.ResumeHandle);
             await _completed.Task.WaitAsync(TimeSpan.FromSeconds(60));
             await target.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15));
-            Require(_nativeExitCode == 0, $"Native process exit event code: {_nativeExitCode}");
-            Require(_managedStops == 2 && _nativeStops == 1 && _nativeSteps == 1,
+            Require(_nativeExitCode == (terminateAtNative ? -1 : 0), $"Native process exit event code: {_nativeExitCode}");
+            Require(_managedStops == (terminateAtNative ? 1 : 2) && _nativeStops == 1 && _nativeSteps == (terminateAtNative ? 0 : 1),
                 $"Incomplete scenario: managed={_managedStops}, native={_nativeStops}, native steps={_nativeSteps}");
             if (attach)
                 Console.Write(await target.StandardOutput.ReadToEndAsync());
-            Console.WriteLine($"PASS public ICorDebug interop {(attach ? "attach" : "launch")}: managed -> native -> managed, result 42, clean exit");
+            Console.WriteLine(terminateAtNative
+                ? "PASS public ICorDebug termination from an outstanding native stop, exit code -1"
+                : $"PASS public ICorDebug interop {(attach ? "attach" : "launch")}: managed -> native -> managed, result 42, clean exit");
         }
         finally
         {
@@ -250,12 +253,18 @@ internal sealed class InteropProof(string fixture, string sourceDirectory)
                     process.ClearUnmanagedBreakpoint(new CORDB_ADDRESS(_nativeAddress));
                     Require((ulong)context->Rip == _nativeAddress + 1, "Expected x64 INT3 post-instruction context.");
                     context->Rip = checked((long)_nativeAddress);
-                    context->EFlags |= (X86_CONTEXT_FLAGS)0x100;
+                    if (!terminateAtNative)
+                        context->EFlags |= (X86_CONTEXT_FLAGS)0x100;
                     process.SetThreadContext(e.dwThreadId, sizeof(AMD64_CONTEXT), (IntPtr)context);
                 }
                 finally { NativeMemory.AlignedFree(context); }
             }
             process.ClearCurrentException(e.dwThreadId);
+            if (terminateAtNative && address == _nativeAddress && _nativeAddress != 0)
+            {
+                process.Terminate(-1);
+                return;
+            }
         }
         else if (e.dwDebugEventCode == DebugEventType.EXCEPTION_DEBUG_EVENT
             && (uint)e.u.Exception.ExceptionRecord.ExceptionCode == 0x80000004 && _nativeStops == 1)

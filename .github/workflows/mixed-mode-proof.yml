@@ -56,6 +56,9 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           dotnet run --project tests/DncDbg.MixedModeTests/WindowsProof -- build/validation/mixed-mode/fixture/Fixture.dll tests/DncDbg.MixedModeTests/fixture --attach 2>&1 |
             Tee-Object build/validation/mixed-mode/windows-attach-proof.log
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          dotnet run --project tests/DncDbg.MixedModeTests/WindowsProof -- build/validation/mixed-mode/fixture/Fixture.dll tests/DncDbg.MixedModeTests/fixture --terminate-native 2>&1 |
+            Tee-Object build/validation/mixed-mode/windows-terminate-proof.log
           exit $LASTEXITCODE
       - name: Run opt-in DNCDbg Windows vertical slice
         shell: pwsh

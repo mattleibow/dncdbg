@@ -262,6 +262,8 @@ internal sealed class InteropProof(string fixture, string sourceDirectory, bool 
             process.ClearCurrentException(e.dwThreadId);
             if (terminateAtNative && address == _nativeAddress && _nativeAddress != 0)
             {
+                process.Stop(0);
+                Console.WriteLine("PASS native stop synchronized for termination");
                 process.Terminate(-1);
                 return;
             }

@@ -144,23 +144,42 @@ internal sealed class OwnedLocalTarget : IDisposable
 
     private static bool WindowsDescendsFrom(int pid, int ancestor, DateTime childStarted, DateTime adapterStarted, Action<string> log)
     {
-        Dictionary<int, int> parents = WindowsParents();
+        var parents = new List<Process>();
+        var edges = new List<(int Child, int Parent, Process ParentProcess, DateTime ParentStarted)>();
+        Dictionary<int, int> snapshot = WindowsParents();
         var seen = new HashSet<int>();
-        while (pid > 1 && seen.Add(pid))
+        try
         {
-            if (!parents.TryGetValue(pid, out int parent))
-                return false;
-            log($"Native launch ancestry edge {pid} -> {parent} requires generation validation.");
-            using Process parentProcess = Process.GetProcessById(parent);
-            DateTime parentStarted = parentProcess.StartTime.ToUniversalTime();
-            if (parentProcess.HasExited || parentStarted > childStarted || parentStarted < adapterStarted)
-                return false;
-            if (parent == ancestor)
-                return parentStarted == adapterStarted;
-            pid = parent;
-            childStarted = parentStarted;
+            while (pid > 1 && seen.Add(pid))
+            {
+                if (!snapshot.TryGetValue(pid, out int parent))
+                    return false;
+                log($"Native launch ancestry edge {pid} -> {parent} requires generation validation.");
+                Process parentProcess = Process.GetProcessById(parent);
+                parents.Add(parentProcess);
+                _ = parentProcess.SafeHandle;
+                DateTime parentStarted = parentProcess.StartTime.ToUniversalTime();
+                if (parentProcess.HasExited || parentStarted > childStarted || parentStarted < adapterStarted)
+                    return false;
+                edges.Add((pid, parent, parentProcess, parentStarted));
+                if (parent == ancestor)
+                {
+                    if (parentStarted != adapterStarted)
+                        return false;
+                    Dictionary<int, int> verified = WindowsParents();
+                    return edges.All(e => !e.ParentProcess.HasExited
+                        && verified.TryGetValue(e.Child, out int current) && current == e.Parent);
+                }
+                pid = parent;
+                childStarted = parentStarted;
+            }
+            return false;
         }
-        return false;
+        finally
+        {
+            foreach (Process process in parents)
+                process.Dispose();
+        }
     }
 
     internal static int? LinuxParent(string stat)
@@ -169,7 +188,8 @@ internal sealed class OwnedLocalTarget : IDisposable
         if (end < 0 || end + 2 >= stat.Length)
             return null;
         string[] fields = stat[(end + 2)..].Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        return fields.Length >= 2 && int.TryParse(fields[1], NumberStyles.None, CultureInfo.InvariantCulture, out int parent)
+        return fields.Length >= 2 && fields[0] is not ("Z" or "X")
+            && int.TryParse(fields[1], NumberStyles.None, CultureInfo.InvariantCulture, out int parent)
             && parent > 0 ? parent : null;
     }
 

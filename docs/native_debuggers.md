@@ -572,6 +572,10 @@ queued reverse generations and completed-reply cancellation races.
 The launch-provenance/kernel-identity review is preserved in
 `evidence/454362e1-provenance-pid-reuse-drain.txt`, including isolated public-CI
 forced PID reuse, external sibling survival and three-frame output drain.
+The ancestry-generation review is preserved in
+`evidence/cfb87b28-ancestry-generation-red-green.txt`, covering same-tick
+intermediate-parent and adapter-root PID reuse, legitimate equal-tick launch
+admission, exited-generation liveness and malformed `startMethod` guards.
 
 Real attach reached SIGSTOP with a verified native checkpoint breakpoint, but
 did not reach the checkpoint after continue. The current Xcode adapter also

@@ -51,6 +51,20 @@ Executing review reds, before production correction:
 2026-10-24T19:04:02.5150624Z FAIL Linux generation proof: exited retained generation threw instead of returning false: No such process
 2026-10-24T19:04:02.5151374Z FAIL Linux generation proof: legitimate same-tick wrapper/child ancestry was rejected
 
+At 2067f7e6256055fc6876c3f72f2790b6e968996f (https://github.com/mattleibow/dncdbg/actions/runs/40123748805/job/120960679130),
+Ubuntu executed and passed:
+2026-10-24T19:07:10.6164887Z PASS native adapter startup retains its Linux root generation
+2026-10-24T19:07:10.6835125Z PASS exited retained Linux generation returns false without throwing
+2026-10-24T19:07:10.7039719Z PASS legitimate same-tick wrapper/child Capture retains its kernel-bound identity
+2026-10-24T19:07:11.0348862Z PASS forced PID reuse includes equal Linux creation ticks with replacement survival
+2026-10-24T19:07:11.1990865Z PASS same-tick intermediate-parent PID reuse cannot authorize independent target termination
+2026-10-24T19:07:11.1998915Z Native target 17 lacks live corroborated launch ancestry; independent cleanup is not authorized.
+The root-reuse harness then failed at parent_reuse.py:136 with ChildProcessError
+because it called os.waitpid(target, os.WNOHANG) from PID1 while the live
+replacement parent still owned target; parent_reuse.py now checks /proc/<target>/stat
+while the replacement parent is live and calls waitpid after reaping the parent
+reparents target to PID1.
+
 The positive fixture creates a real wrapper/child with consecutive forks and
 checks their actual /proc creation ticks before calling Capture. A preliminary
 fixture at b75840d7 included interpreter startup and did not exercise equal

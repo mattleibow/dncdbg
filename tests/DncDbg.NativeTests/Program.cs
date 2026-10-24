@@ -200,7 +200,7 @@ if (args.Length == 2 || args[2] == "late-capture")
 if (args.Length == 2 || args[2] == "process-parent-parse")
 {
     foreach (string malformed in new[] { "", ")", "(name)", "1 (name) ", "1 (name) S", "1 (name) S nope", "1 (name) S -1",
-        "1 (name) S 9999999999999999999999" })
+        "1 (name) Z 42 0", "1 (name) X 42 0", "1 (name) S 9999999999999999999999" })
         if (OwnedLocalTarget.LinuxParent(malformed) != null)
             throw new InvalidOperationException("Malformed process ancestry authorized a parent.");
     if (OwnedLocalTarget.LinuxParent("2 (name with ) parentheses) S 42 0") != 42)

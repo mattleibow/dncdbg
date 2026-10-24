@@ -133,15 +133,20 @@ try:
         matched = original_tick == ticks(parent) == ticks(target)
         send(f"CAPTURE_ROOT {target}")
         result = receive()
-        exited, status = os.waitpid(target, os.WNOHANG)
-        if exited:
-            target = None
-            raise AssertionError(f"Replacement adapter root authorized killing its unrelated target; same_tick={matched}, status={status}")
+        # This target still belongs to the live replacement root, not PID1.
+        # Inspect its state; waitpid is valid only after that parent is reaped.
+        stat = Path(f"/proc/{target}/stat").read_text()
+        if stat[stat.rindex(")") + 2:].split()[0] in ("Z", "X"):
+            raise AssertionError(f"Replacement adapter root authorized killing its unrelated target; same_tick={matched}")
         if result != "ROOT_DONE rejected":
             raise AssertionError(f"Replacement root acquired cleanup authority; same_tick={matched}, result={result}")
         print(f"PASS replacement adapter root rejected and unrelated target survives: same_tick={matched}", flush=True)
         reap(parent)
         parent = None
+        exited, status = os.waitpid(target, os.WNOHANG)
+        if exited:
+            target = None
+            raise AssertionError(f"Replacement adapter root authorized killing its unrelated target; same_tick={matched}, status={status}")
         reap(target)
         target = None
         if matched:

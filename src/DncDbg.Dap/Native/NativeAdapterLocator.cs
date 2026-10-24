@@ -245,12 +245,14 @@ internal static class NativeAdapterLocator
         };
         foreach (string argument in arguments)
             start.ArgumentList.Add(argument);
+        var timer = Stopwatch.StartNew();
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         using SafeFileHandle job = CreateJobObjectW(IntPtr.Zero, null);
         if (job.IsInvalid)
             throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
         using Process process = Process.Start(start) ?? throw new ArgumentException("Error: Cannot start " + executable);
-        if (!AssignProcessToJobObject(job, process.SafeHandle))
+        SafeProcessHandle processHandle = process.SafeHandle;
+        if (!AssignProcessToJobObject(job, processHandle))
         {
             int assignError = Marshal.GetLastPInvokeError();
             try { process.Kill(entireProcessTree: true); }
@@ -262,39 +264,26 @@ internal static class NativeAdapterLocator
         Task<(string Text, bool Complete)> error = Task.Run(() => ReadPipe(process.StandardError.BaseStream, deadline.Token));
         try
         {
-            try
-            {
-                process.WaitForExitAsync(deadline.Token).GetAwaiter().GetResult();
-            }
-            catch (OperationCanceledException)
-            {
+            uint waitStatus = WaitForSingleObject(processHandle, (uint)Math.Max(0, 5000 - (int)timer.ElapsedMilliseconds));
+            if (waitStatus != 0)
                 throw new ArgumentException("Error: Native debugger discovery/version probe timed out: " + executable);
-            }
-            try
-            {
-                Task.WhenAll(output, error).WaitAsync(deadline.Token).GetAwaiter().GetResult();
-            }
-            catch (OperationCanceledException) { }
+            int remaining = Math.Max(0, 5000 - (int)timer.ElapsedMilliseconds);
+            if (!Task.WaitAll([output, error], remaining))
+                deadline.Cancel();
             deadline.Cancel();
             Task.WaitAll([output, error], TimeSpan.FromSeconds(1));
+            if (!GetExitCodeProcess(processHandle, out uint rawExitCode))
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
             (string Text, bool Complete) outResult = output.IsCompletedSuccessfully ? output.Result : ("", false);
             (string Text, bool Complete) errResult = error.IsCompletedSuccessfully ? error.Result : ("", false);
             bool complete = outResult.Complete && errResult.Complete;
-            return (process.ExitCode, CompleteLines(outResult.Text, complete) + CompleteLines(errResult.Text, complete), complete);
+            return (unchecked((int)rawExitCode), CompleteLines(outResult.Text, complete) + CompleteLines(errResult.Text, complete), complete);
         }
         finally
         {
             deadline.Cancel();
             _ = TerminateJobObject(job, 1);
-            try
-            {
-                if (!process.HasExited)
-                {
-                    process.Kill(entireProcessTree: true);
-                    process.WaitForExit(1000);
-                }
-            }
-            catch (Exception cleanupError) when (cleanupError is InvalidOperationException or System.ComponentModel.Win32Exception) { }
+            _ = WaitForSingleObject(processHandle, 1000);
             var cleanup = Stopwatch.StartNew();
             while (cleanup.ElapsedMilliseconds < 1000
                 && QueryInformationJobObject(job, 1, out var accounting, Marshal.SizeOf<JobObjectBasicAccountingInformation>(), IntPtr.Zero)
@@ -517,6 +506,13 @@ internal static class NativeAdapterLocator
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool QueryInformationJobObject(SafeFileHandle job, int infoClass,
         out JobObjectBasicAccountingInformation info, int length, IntPtr returnLength);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint WaitForSingleObject(SafeProcessHandle handle, uint milliseconds);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetExitCodeProcess(SafeProcessHandle process, out uint exitCode);
 
     [DllImport("libc", SetLastError = true)]
     private static extern int posix_spawnattr_init(IntPtr attr);

@@ -51,6 +51,10 @@ if (OperatingSystem.IsLinux() && (args.Length == 2 || args[2] == "linux-ancestry
             def ticks(pid):
                 stat = open(f"/proc/{pid}/stat").read()
                 return stat[stat.rindex(")") + 2:].split()[19]
+            wrapper = os.fork()
+            if wrapper != 0:
+                os.waitpid(wrapper, 0)
+                sys.exit(0)
             child = os.fork()
             if child == 0:
                 while True:

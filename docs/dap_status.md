@@ -113,6 +113,23 @@ breakpoint, `native_sum -> native_add` stack unwinding, x64 argument registers
 `19,23`, a native instruction step, managed return local `42`, and native exit
 event code zero.
 
+The complete adapter slice and regressions passed in
+[run 40077553328](https://github.com/mattleibow/dncdbg/actions/runs/40077553328),
+testing source commit `6e9df1bcb08a3dee19a01135e3216599c3d8eb89` on
+`windows-2025` / `win-x64` / target runtime `10.0.13`. Evidence includes raw
+launch, attach and native-stop termination; adapter continue, terminate,
+disconnect and EOF lifecycles; actual target-exit checks; one-shot behavior on
+a repeated native call; explicit capability/error shapes; 95 CLI/protocol smoke
+checks; and all six unchanged acceptance cases (`TestBreakpoint`,
+`TestStackTrace`, `TestThreads`, `TestStepping`, `TestAttach`, `TestDisconnect`).
+The `windows-x64-mixed-mode-proof` artifact contains transcripts, logs and
+fixture binaries/PDBs. This is a focused matrix, not the full acceptance suite.
+
+The final macOS arm64 managed build, the same 95 smoke checks and six acceptance
+cases also passed, as did native-configuration rejection and the separate LLDB
+and managed fixture baselines. The failing macOS concurrent probe remains an
+explicit blocker, not part of a falsely green mixed-mode matrix.
+
 Early failing runs were useful proof boundaries: an unaligned x64 context
 returned `ERROR_NOACCESS`; after alignment, failing to rewind RIP past `INT3`
 corrupted the result and failed the `42` assertion. Neither assertion was

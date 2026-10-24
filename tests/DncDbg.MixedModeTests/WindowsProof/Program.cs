@@ -217,6 +217,8 @@ internal sealed class InteropProof(string fixture, string sourceDirectory)
                     Require(context->Rcx == 19 && context->Rdx == 23, "Native x64 argument registers must contain 19 and 23.");
                     NativeSymbols.RequireNativeStack(_symbolHandle, e.dwThreadId, *context);
                     process.ClearUnmanagedBreakpoint(new CORDB_ADDRESS(_nativeAddress));
+                    Require((ulong)context->Rip == _nativeAddress + 1, "Expected x64 INT3 post-instruction context.");
+                    context->Rip = checked((long)_nativeAddress);
                     context->EFlags |= (X86_CONTEXT_FLAGS)0x100;
                     process.SetThreadContext(e.dwThreadId, sizeof(AMD64_CONTEXT), (IntPtr)context);
                 }

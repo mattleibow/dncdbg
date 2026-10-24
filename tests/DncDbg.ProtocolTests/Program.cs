@@ -75,6 +75,15 @@ using (var queuedCancellation = new CancellationTokenSource())
 }
 Console.WriteLine("PASS DAP queued cancellation preserves unrelated active writes");
 
+var disposableInput = new DisposeCounter();
+var disposableOutput = new DisposeCounter();
+var disposableConnection = new DapConnection(disposableInput, disposableOutput);
+disposableConnection.Dispose();
+disposableConnection.Dispose();
+if (disposableInput.Count != 1 || disposableOutput.Count != 1)
+    throw new InvalidOperationException("DAP connection disposal released its streams more than once.");
+Console.WriteLine("PASS DAP connection disposal is idempotent");
+
 class ImmediatePeer : MemoryStream
 {
     public DapConnection? Connection { get; set; }
@@ -111,5 +120,15 @@ sealed class BlockingPeer : ImmediatePeer
         await Release.Task;
         await base.WriteAsync(buffer, CancellationToken.None);
         Drained.TrySetResult();
+    }
+}
+
+sealed class DisposeCounter : MemoryStream
+{
+    public int Count { get; private set; }
+    protected override void Dispose(bool disposing)
+    {
+        Count++;
+        base.Dispose(disposing);
     }
 }

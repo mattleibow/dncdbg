@@ -245,6 +245,10 @@ while True:
             owned_target = subprocess.Popen([sys.executable, __file__, "--target-gate", str(options.barrier)],
                                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             event("process", dict(systemProcessId=owned_target.pid, name="owned-test-target", isLocalProcess=True))
+        if options.mode.startswith("client-block-"):
+            owned_target = subprocess.Popen([sys.executable, __file__, "--target-gate", str(options.barrier) + ".target"],
+                                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            event("process", dict(systemProcessId=owned_target.pid, name="owned-backpressure-target", isLocalProcess=True))
         response(request)
         event("initialized")
     elif command == "configurationDone":
@@ -263,7 +267,7 @@ while True:
         if options.mode == "wide-threads" and args["threadId"] != (1 << 40) + 7:
             response(request, success=False, message="Native thread identity truncated")
             continue
-        response(request, dict(totalFrames=2, stackFrames=[dict(id=1, name="native", line=3, column=1,
+        response(request, dict(totalFrames=2, stackFrames=[dict(id=0 if options.mode == "zero-frame" else 1, name="native", line=3, column=1,
                                                                instructionPointerReference="0x1000",
                                                                source=dict(name="native.c", sourceReference=1)),
                                                           dict(id=2, name="native-caller", line=4, column=1,
@@ -276,8 +280,16 @@ while True:
         selected_frame = args["frameId"]
         response(request, dict(scopes=[dict(name="Registers" if options.mode.startswith("register-") else "Locals",
                                            variablesReference=3 if options.mode.startswith("register-") else 1, expensive=False)]),
-                 success=args["frameId"] in (1, 2))
+                 success=args["frameId"] in (0, 1, 2))
     elif command == "variables":
+        if options.mode == "client-block-transition":
+            value = dict(seq=0, type="response", request_seq=request["seq"], command=command, success=True,
+                         body=dict(variables=[dict(name="old", value="x" * 80, variablesReference=2)] * 80000))
+            write(sys.stdout.buffer, value)
+            while not options.barrier.exists():
+                time.sleep(0.01)
+            event("module", dict(reason="changed"))
+            continue
         if options.mode == "client-block-variables":
             response(request, dict(variables=[dict(name="old-value", value="x" * 80, variablesReference=2)] * 80000))
             continue
@@ -314,7 +326,7 @@ while True:
     elif command == "threads":
         response(request, dict(threads=[dict(id=(1 << 40) + 7 if options.mode == "wide-threads" else 7, name="Native")]))
     elif command == "evaluate":
-        if options.mode == "selected-repl":
+        if options.mode in ("selected-repl", "zero-frame"):
             response(request, dict(result=str(selected_frame), variablesReference=0))
             continue
         if options.mode == "selected-frame" and "frameId" not in args:
@@ -333,6 +345,8 @@ while True:
         deferred = request
     elif command == "timeout":
         continue
+    elif command == "eofRequest":
+        os._exit(0)
     elif command == "releaseDeferred":
         response(deferred, dict(released=True))
         response(request)
@@ -344,6 +358,22 @@ while True:
         event("capabilities", dict(capabilities=dict(supportsCancelRequest=True)))
     elif command == "disconnect":
         disconnects.append(args.get("terminateDebuggee"))
+        if options.mode in ("queued-terminals", "late-terminals", "staggered-terminals"):
+            if options.mode == "staggered-terminals":
+                event("exited", dict(exitCode=0))
+                response(request)
+                while not options.barrier.exists():
+                    time.sleep(0.01)
+                event("terminated")
+                break
+            if options.mode == "late-terminals":
+                response(request)
+                time.sleep(0.2)
+            event("exited", dict(exitCode=0))
+            event("terminated")
+            if options.mode == "queued-terminals":
+                response(request)
+            break
         if options.mode == "disconnect-timeout" and len(disconnects) == 1:
             continue
         if options.mode == "disconnect-timeout" and args.get("terminateDebuggee") is not False:

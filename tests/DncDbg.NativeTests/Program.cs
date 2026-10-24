@@ -6,15 +6,71 @@ if (args.Length is < 2 or > 3)
     throw new ArgumentException("Supply the public Python executable and fake_native_adapter.py test peer.");
 string python = args[0], fake = args[1];
 
+if (args.Length == 3 && args[2].StartsWith("managed-publication-", StringComparison.Ordinal))
+{
+    string[] selection = args[2]["managed-publication-".Length..].Split(':');
+    ManagedPublicationProof.Run(selection[0], selection.Length > 1 && selection[1] == "module");
+    return;
+}
+
+if (args.Length == 2 || args[2] == "startup-atomic")
+{
+    const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+    using var connection = new DncDbg.Protocol.DapConnection(Stream.Null, Stream.Null);
+    using var proxy = new NativeDebugProxy(connection, new NativeAdapterDescriptor("dap", python, [fake], "test", null,
+        RuntimeInformation.RuntimeIdentifier, []), Console.Error.WriteLine);
+    using var backend = Session("startup-failure");
+    typeof(NativeDebugProxy).GetField("_native", flags)!.SetValue(proxy, backend);
+    var snapshot = (CancellationTokenSource)typeof(NativeDebugProxy).GetField("_snapshotCancellation", flags)!.GetValue(proxy)!;
+    using var registration = snapshot.Token.Register(() =>
+        typeof(NativeDebugProxy).GetMethod("Receive", flags)!.Invoke(proxy, [0L, new DncDbg.Protocol.DapMessage
+        {
+            Type = "event", Event = "process",
+            Body = System.Text.Json.JsonSerializer.SerializeToElement(new { systemProcessId = 42 }),
+        }]));
+    typeof(NativeDebugProxy).GetMethod("Start", flags)!.Invoke(proxy, [new DncDbg.Protocol.DapMessage { Seq = 1, Type = "request", Command = "launch" },
+        new System.Text.Json.Nodes.JsonObject { ["program"] = "owned-test-target" }, backend]);
+    var starts = (List<Task>)typeof(NativeDebugProxy).GetField("_starts", flags)!.GetValue(proxy)!;
+    Task.WaitAll(starts.ToArray(), TimeSpan.FromSeconds(5));
+    if (!(bool)typeof(NativeDebugProxy).GetField("_startupEvidence", flags)!.GetValue(proxy)!
+        || !(bool)typeof(NativeDebugProxy).GetField("_started", flags)!.GetValue(proxy)!)
+        throw new InvalidOperationException("Start reset erased target evidence arriving during admission.");
+    Console.WriteLine("PASS atomic startup admission preserves concurrent process evidence before an explicit failure");
+    if (args.Length == 3)
+        return;
+}
+
+if (args.Length == 2 || args[2] == "backend-eof")
+{
+    using var backend = Session("normal");
+    try
+    {
+        backend.Request("eofRequest", new { });
+        throw new InvalidOperationException("Immediate backend EOF succeeded.");
+    }
+    catch (TimeoutException error) { throw new InvalidOperationException("Immediate backend EOF was misreported as a timeout.", error); }
+    catch (Exception error) when (error is IOException or OperationCanceledException) { }
+    Console.WriteLine("PASS immediate pending-request backend EOF is reported as transport loss, not timeout");
+    if (args.Length == 3)
+        return;
+}
+
 if (args.Length == 2 || args[2] == "disconnect-terminal")
 {
     const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
     using var connection = new DncDbg.Protocol.DapConnection(Stream.Null, new ClosedClientOutput());
     using var proxy = new NativeDebugProxy(connection, new NativeAdapterDescriptor("dap", python, [], "test", null,
         RuntimeInformation.RuntimeIdentifier, []), Console.Error.WriteLine);
-    var terminals = (List<DncDbg.Protocol.DapMessage>)typeof(NativeDebugProxy).GetField("_terminalEvents", flags)!.GetValue(proxy)!;
-    terminals.Add(new DncDbg.Protocol.DapMessage { Type = "event", Event = "exited" });
-    terminals.Add(new DncDbg.Protocol.DapMessage { Type = "event", Event = "terminated" });
+    typeof(NativeDebugProxy).GetField("_disconnecting", flags)!.SetValue(proxy, true);
+    typeof(NativeDebugProxy).GetField("_disconnectDelivery", flags)!.SetValue(proxy,
+        new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously));
+    var eventWorker = new System.Threading.Thread(() => typeof(NativeDebugProxy).GetMethod("ProcessEvents", flags)!.Invoke(proxy, null))
+        { IsBackground = true };
+    typeof(NativeDebugProxy).GetField("_eventWorker", flags)!.SetValue(proxy, eventWorker);
+    foreach (string terminal in new[] { "exited", "terminated" })
+        typeof(NativeDebugProxy).GetMethod("Receive", flags)!.Invoke(proxy, [0L,
+            new DncDbg.Protocol.DapMessage { Type = "event", Event = terminal }]);
+    eventWorker.Start();
     var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
     var work = Activator.CreateInstance(typeof(NativeDebugProxy).GetNestedType("Work", System.Reflection.BindingFlags.NonPublic)!,
         [new DncDbg.Protocol.DapMessage { Type = "request", Command = "disconnect" }, 0L, completion, false, false])!;
@@ -78,7 +134,7 @@ if (args.Length == 2 || args[2] == "reverse-client-timeout")
     var backend = Session("normal");
     typeof(NativeDebugProxy).GetField("_native", flags)!.SetValue(proxy, backend);
     var envelope = Activator.CreateInstance(typeof(NativeDebugProxy).GetNestedType("BackendMessage", System.Reflection.BindingFlags.NonPublic)!,
-        [0L, 0L, 0L, new DncDbg.Protocol.DapMessage { Seq = 500, Type = "request", Command = "runInTerminal" }])!;
+        [0L, 0L, 0L, new DncDbg.Protocol.DapMessage { Seq = 500, Type = "request", Command = "runInTerminal" }, null])!;
     typeof(NativeDebugProxy).GetMethod("ForwardReverse", flags)!.Invoke(proxy, [envelope]);
     var body = (System.Text.Json.JsonElement)backend.Request("reverseStatus", new { }).Body!;
     if (body.GetProperty("response").GetProperty("success").GetBoolean())

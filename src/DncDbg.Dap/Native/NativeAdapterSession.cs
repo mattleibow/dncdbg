@@ -19,6 +19,7 @@ internal sealed class NativeAdapterSession : IDisposable
     public int ProcessId => _process.Id;
     public bool IsAlive => !_process.HasExited;
     public bool TransportFailed => _connection.WriteFailed || _reader.IsCompleted;
+    public bool WaitForReader(TimeSpan timeout) => _reader.Wait(timeout);
 
     public NativeAdapterSession(NativeAdapterDescriptor descriptor, Action<DapMessage> receive,
         Action<Exception> failed, Action<string> log)
@@ -84,9 +85,13 @@ internal sealed class NativeAdapterSession : IDisposable
             _disconnected |= command == "disconnect" && response.Success == true;
             return response;
         }
-        catch (OperationCanceledException) when (!cancellation.IsCancellationRequested)
+        catch (OperationCanceledException) when (!cancellation.IsCancellationRequested && timeout.IsCancellationRequested)
         {
             throw new TimeoutException($"Native debug adapter timed out handling '{command}'.");
+        }
+        catch (OperationCanceledException error) when (!cancellation.IsCancellationRequested)
+        {
+            throw new IOException($"Native debug adapter connection ended handling '{command}'.", error);
         }
     }
 

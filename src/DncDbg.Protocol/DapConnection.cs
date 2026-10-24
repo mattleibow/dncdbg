@@ -17,6 +17,7 @@ public sealed class DapConnection : IDisposable
     private readonly Dictionary<int, TaskCompletionSource<DapMessage>> _pendingRequests = [];
     private Exception? _writeFailure;
     private int _seq;
+    private int _disposed;
 
     public bool WriteFailed => Volatile.Read(ref _writeFailure) != null;
 
@@ -242,10 +243,12 @@ public sealed class DapConnection : IDisposable
 
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            return;
         _writes.Cancel();
         CancelPendingRequests();
-        _input.Dispose();
-        _output.Dispose();
+        try { _output.Dispose(); }
+        finally { _input.Dispose(); }
     }
 
     public void CancelPendingRequests()

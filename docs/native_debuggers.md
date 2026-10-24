@@ -69,6 +69,11 @@ write. A transition cancels an expired response before or during publication;
 an interrupted partial client frame fails the transport closed, never rebinding
 its child handles to a fresh stop. Full client pipes must not lock out native
 stop transitions, EOF, disconnect or transport teardown.
+The same helper covers **all** managed scopes, variables, scalar evaluation
+and strict `dotnet/managedStackTrace` responses. It validates both the captured
+stop and inspection epoch, including module changes that do not resume the
+target. Real CoreCLR tests gate each response behind client output and exercise
+both a native stop transition and a same-stop module/inspection transition.
 Replies are bound to their originating backend generation. A client timeout or
 failure produces a failed reply to that backend, never to its replacement.
 Each native request has its own cancellation/timeout registration; one timeout
@@ -90,6 +95,9 @@ a retry only if no process/stopped target evidence was observed; otherwise
 ownership still requires reconciliation.
 Each admitted startup resets its configuration phase. Late process/stopped
 events after a failed response re-reserve startup ownership until reconciliation.
+Admission checks and target/evidence/configuration/PID/selection resets are one
+state-locked operation; a concurrent native event cannot be erased by a later
+unlocked reset.
 For backends that do not advertise `configurationDone`, the deadline starts
 with startup instead, so the absence of that optional phase cannot hang launch.
 Disconnect cancels the startup token as well as the active request token,
@@ -104,15 +112,28 @@ its request worker. The pipe-fill tests prove worker admission by consuming
 only the next header and one payload byte before the backend stops reading.
 Lifetime cancellation and pending-request cancellation precede state-dependent
 invalidation. All proxy client writes are bounded and outside the state lock.
-Disconnect copies buffered terminal events under the lock, sends them outside
-it, and always completes its admission waiter in an outer `finally`, even when
+Disconnect never sends terminal events while holding the lock, and always
+completes its admission waiter in an outer `finally`, even when
 the client's pipe has broken. A disconnect against a poisoned backend reports
 transport failure and exits to cleanup; it does not require a second frontend EOF.
+Terminal delivery now has one queue owner rather than racing buffered and live
+senders. Disconnect cancels reverse/inspection waits separately from the output
+lifetime, releases terminal delivery only after its response, then waits at most
+two seconds for backend receive completion and two seconds for a queue barrier.
+Queued, shortly delayed and staggered `exited`/`terminated` events retain their
+order and are delivered once before output shutdown. Exceeding the drain budget
+is logged; an unresponsive adapter/client does not get unbounded shutdown time.
 If a client pipe has already failed, error-response delivery logs the transport
 failure and cancels the lifetime instead of throwing an unhandled exception
 from a background worker. Native reverse-response writes report partial-write
 failure to the session owner; client reverse-write timeouts fail explicitly to
 the originating backend.
+Run's frontend-read wait observes lifetime cancellation. A partial/truncated
+client publication or write deadline therefore closes the frontend and cleans
+up its owned native target even when the client keeps stdin open waiting for a
+body that cannot be completed. DAP connection disposal is idempotent. Immediate
+backend EOF cancels pending work as a transport failure, not as a fictitious
+elapsed request timeout.
 
 ## Find an installed debugger
 
@@ -269,6 +290,8 @@ on both initialize and later capability events.
 Frame-less native evaluation restores the last explicit client frame, rather
 than inheriting an internal register read's selected frame.
 Managed/hybrid frames cannot replace the remembered native-only selection.
+Native frame ID **0** is valid and can replace a prior selection; native
+ownership is determined by the absence of a managed frame ID, not by positivity.
 Explicit-frame evaluation also restores the actual backend selection through
 `scopes` before forwarding: REPL commands such as `` `frame info `` can consult
 global LLDB frame selection even when `evaluate.frameId` is present.
@@ -446,6 +469,10 @@ The subsequent shutdown review's exact red/green excerpts are in
 broken buffered-terminal delivery, poisoned transport classification, native
 selection, fresh configuration, late startup evidence and wide-thread view
 preservation. Earlier successful CI did not establish these newer guarantees.
+The next review's exact red/green excerpts are in
+`evidence/dded7bd2-managed-publication-terminal-drain.txt`, including real CLR
+response gating, native frame zero, terminal queue draining, open-input partial
+publication cleanup, atomic startup admission and immediate backend EOF.
 
 Real attach reached SIGSTOP with a verified native checkpoint breakpoint, but
 did not reach the checkpoint after continue. The current Xcode adapter also

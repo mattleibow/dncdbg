@@ -943,9 +943,12 @@ def nonmutating_queries_contract(adapter, lldb):
 def client_backpressure_contract(adapter, command="variables", finish="eof"):
     name = "client-backpressure-" + command + "-" + finish
     with (OUT / (name + ".stderr")).open("wb") as errors:
-        process = subprocess.Popen([adapter, *arguments("dap", "client-block-" + command)],
+        gate = OUT / name
+        gate.unlink(missing_ok=True)
+        mode = "client-block-transition" if finish == "module" else "client-block-" + command
+        process = subprocess.Popen([adapter, *arguments("dap", mode, barrier=gate)],
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors)
-        seq, backend = 0, None
+        seq, backend, target_pid = 0, None, None
         def send(command, args=None):
             nonlocal seq
             seq += 1
@@ -973,7 +976,9 @@ def client_backpressure_contract(adapter, command="variables", finish="eof"):
             request("initialize", dict(adapterID="dncdbg"))
             request("launch", dict(program="owned-test-target"))
             request("configurationDone")
-            backend = request("dotnet/info")["nativeAdapterProcessId"]
+            info = request("dotnet/info")
+            backend, target_pid = info["nativeAdapterProcessId"], info["debuggeeProcessId"]
+            check(isinstance(target_pid, int), "Backpressure test did not own a real child target")
             frame = request("stackTrace", dict(threadId=7))["stackFrames"][0]["id"]
             args = dict(frameId=frame)
             if command == "variables":
@@ -984,21 +989,29 @@ def client_backpressure_contract(adapter, command="variables", finish="eof"):
             check(process.stdout.read(1) == b"{", "The large response write was not admitted")
             if finish == "eof":
                 process.stdin.close()
-            else:
+            elif finish == "disconnect":
                 send("disconnect", dict(terminateDebuggee=True))
+            elif finish == "module":
+                gate.write_text("module invalidation")
+            elif finish != "deadline":
+                raise AssertionError("Unknown output backpressure mode")
             try:
                 process.wait(timeout=15)
             except subprocess.TimeoutExpired:
                 raise AssertionError("Client backpressure held state/teardown during " + command + "/" + finish) from None
             check(process.returncode == 0, "Client backpressure shutdown failed: " + str(process.returncode))
             check(not integration["alive"](backend), "Client backpressure stranded the native adapter")
+            integration["exited"](target_pid)
         finally:
             if process.poll() is None:
                 process.kill()
             process.wait(timeout=5)
             process.stdout.close()
+            gate.unlink(missing_ok=True)
             if backend and integration["alive"](backend):
                 os.kill(backend, getattr(signal, "SIGKILL", signal.SIGTERM))
+            if target_pid and integration["alive"](target_pid):
+                os.kill(target_pid, getattr(signal, "SIGKILL", signal.SIGTERM))
     print("PASS full client pipe permits bounded " + command + "/" + finish + " shutdown", flush=True)
 
 
@@ -1084,6 +1097,64 @@ def hybrid_selection_contract(adapter, lldb, wide=False):
             check("frame #1:" in result and "native_add" in result, "Managed frame replaced remembered native selection: " + result)
         peer.request("disconnect")
     print("PASS " + ("unrepresentable overlay thread preserves existing snapshots" if wide else "hybrid managed frames cannot replace native selection"), flush=True)
+
+
+def zero_frame_contract(adapter):
+    with Dap(adapter, "native-frame-zero", arguments("dap", "zero-frame")) as peer:
+        peer.request("initialize", dict(adapterID="dncdbg"))
+        peer.request("launch", dict(program="owned-test-target"))
+        peer.event("initialized")
+        peer.request("configurationDone")
+        peer.event("stopped")
+        frames = peer.request("stackTrace", dict(threadId=7))["stackFrames"]
+        peer.request("scopes", dict(frameId=frames[1]["id"]))
+        peer.request("scopes", dict(frameId=frames[0]["id"]))
+        result = peer.request("evaluate", dict(expression="`frame info", context="repl"))["result"]
+        check(result == "0", "Native frame zero was not remembered; frame-less REPL restored " + result)
+        peer.request("disconnect")
+    print("PASS native frame zero replaces prior native selection without changing hybrid ownership", flush=True)
+
+
+def disconnect_terminal_drain_contract(adapter, mode="queued-terminals"):
+    release = OUT / "terminal-drain-release"
+    release.unlink(missing_ok=True)
+    with Dap(adapter, mode, arguments("dap", mode, barrier=release)) as peer:
+        peer.request("initialize", dict(adapterID="dncdbg", supportsRunInTerminalRequest=True))
+        peer.request("launch", dict(program="owned-test-target"))
+        peer.event("initialized")
+        peer.request("configurationDone")
+        peer.event("stopped")
+        peer.request("reverse")
+        peer.receive(lambda m: m.get("type") == "request" and m.get("command") == "runInTerminal")
+        started = time.monotonic()
+        request = peer.send("disconnect", dict(terminateDebuggee=True))
+        peer.response(request)
+        if mode == "staggered-terminals":
+            peer.event("exited")
+            release.write_text("release terminated after exited delivery")
+        try:
+            peer.process.wait(timeout=12)
+        except subprocess.TimeoutExpired:
+            raise AssertionError("Successful disconnect did not bound terminal draining during reverse wait") from None
+        peer.reader.join(timeout=3)
+        messages = [json.loads(line) for line in (OUT / (mode + ".jsonl")).read_text().splitlines()]
+        terminals = [m["event"] for m in messages if m.get("event") in ("exited", "terminated")]
+        check(terminals == ["exited", "terminated"], "Successful disconnect lost or duplicated terminal events: " + str(terminals))
+        disconnect_index = next(i for i, m in enumerate(messages) if m.get("request_seq") == request and m.get("type") == "response")
+        terminal_index = next(i for i, m in enumerate(messages) if m.get("event") == "exited")
+        check(disconnect_index < terminal_index and time.monotonic() - started < 12,
+              "Terminal events were not drained in order after disconnect response")
+    release.unlink(missing_ok=True)
+    print("PASS successful disconnect drains exited/terminated exactly once after reverse wait: " + mode, flush=True)
+
+
+def managed_publication_contracts(lldb):
+    subprocess.run(["dotnet", "build", "tests/DncDbg.NativeTests", "-c", "Release", "--nologo", "-v", "quiet"], check=True)
+    env = dict(os.environ, DNCDBG_TEST_LLDB_DAP=lldb)
+    for command in ("scopes", "variables", "evaluate", "dotnet/managedStackTrace"):
+        for transition in ("", ":module"):
+            subprocess.run(["dotnet", "run", "--no-build", "--project", "tests/DncDbg.NativeTests", "-c", "Release", "--",
+                            sys.executable, str(FAKE), "managed-publication-" + command + transition], env=env, check=True)
 
 
 def native_only_watch_contract(adapter):
@@ -1277,9 +1348,15 @@ if __name__ == "__main__":
     inspection_stop_publication_contract(options.adapter)
     inspection_stop_publication_contract(options.adapter, command="scopes")
     explicit_repl_contract(options.adapter)
+    zero_frame_contract(options.adapter)
+    disconnect_terminal_drain_contract(options.adapter)
+    disconnect_terminal_drain_contract(options.adapter, mode="late-terminals")
+    disconnect_terminal_drain_contract(options.adapter, mode="staggered-terminals")
     for command in ("variables", "scopes"):
         for finish in ("eof", "disconnect"):
             client_backpressure_contract(options.adapter, command=command, finish=finish)
+    client_backpressure_contract(options.adapter, finish="module")
+    client_backpressure_contract(options.adapter, finish="deadline")
     poisoned_disconnect_contract(options.adapter)
     fresh_configuration_contract(options.adapter)
     late_startup_evidence_contract(options.adapter)
@@ -1296,6 +1373,7 @@ if __name__ == "__main__":
     detached_backend_stall(options.adapter)
     if options.lldb_dap:
         build()
+        managed_publication_contracts(options.lldb_dap)
         strict_managed_contract(options.adapter, options.lldb_dap)
         strict_managed_contract(options.adapter, options.lldb_dap, "decimal-modules")
         native_watch_contract(options.adapter, options.lldb_dap)

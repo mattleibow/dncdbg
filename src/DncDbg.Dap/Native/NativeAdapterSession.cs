@@ -18,6 +18,7 @@ internal sealed class NativeAdapterSession : IDisposable
 
     public int ProcessId => _process.Id;
     public bool IsAlive => !_process.HasExited;
+    public bool TransportFailed => _connection.WriteFailed || _reader.IsCompleted;
 
     public NativeAdapterSession(NativeAdapterDescriptor descriptor, Action<DapMessage> receive,
         Action<Exception> failed, Action<string> log)

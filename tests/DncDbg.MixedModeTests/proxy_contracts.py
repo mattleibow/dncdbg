@@ -812,6 +812,7 @@ def startup_deadline_gaps_contract(adapter, mode="startup-preinitialized"):
             peer.response(launch, success=False)
             launch = peer.send("launch", dict(program="retry-test-target"))
             peer.event("initialized")
+            peer.request("configurationDone")
         try:
             peer.response(launch, success=False, timeout=35)
         except queue.Empty:
@@ -937,6 +938,152 @@ def nonmutating_queries_contract(adapter, lldb):
             peer.request("scopes", dict(frameId=managed["id"]))
         peer.request("disconnect", dict(terminateDebuggee=True))
     print("PASS completion/data-breakpoint queries preserve the live managed view without invalidation support", flush=True)
+
+
+def client_backpressure_contract(adapter, command="variables", finish="eof"):
+    name = "client-backpressure-" + command + "-" + finish
+    with (OUT / (name + ".stderr")).open("wb") as errors:
+        process = subprocess.Popen([adapter, *arguments("dap", "client-block-" + command)],
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors)
+        seq, backend = 0, None
+        def send(command, args=None):
+            nonlocal seq
+            seq += 1
+            payload = json.dumps(dict(seq=seq, type="request", command=command, arguments=args or {})).encode()
+            process.stdin.write(f"Content-Length: {len(payload)}\r\n\r\n".encode() + payload)
+            process.stdin.flush()
+            return seq
+        def header():
+            length = None
+            while True:
+                text = process.stdout.readline()
+                check(text, "Client backpressure adapter exited before publication")
+                if text == b"\r\n":
+                    return length
+                if text.lower().startswith(b"content-length:"):
+                    length = int(text.split(b":", 1)[1])
+        def request(command, args=None):
+            target = send(command, args)
+            while True:
+                message = json.loads(process.stdout.read(header()))
+                if message.get("request_seq") == target:
+                    check(message["success"], str(message))
+                    return message.get("body", {})
+        try:
+            request("initialize", dict(adapterID="dncdbg"))
+            request("launch", dict(program="owned-test-target"))
+            request("configurationDone")
+            backend = request("dotnet/info")["nativeAdapterProcessId"]
+            frame = request("stackTrace", dict(threadId=7))["stackFrames"][0]["id"]
+            args = dict(frameId=frame)
+            if command == "variables":
+                args = dict(variablesReference=request("scopes", args)["scopes"][0]["variablesReference"])
+            target = send(command, args)
+            length = header()
+            check(length > 1000000, "Response is not large enough to fill a client pipe")
+            check(process.stdout.read(1) == b"{", "The large response write was not admitted")
+            if finish == "eof":
+                process.stdin.close()
+            else:
+                send("disconnect", dict(terminateDebuggee=True))
+            try:
+                process.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                raise AssertionError("Client backpressure held state/teardown during " + command + "/" + finish) from None
+            check(process.returncode == 0, "Client backpressure shutdown failed: " + str(process.returncode))
+            check(not integration["alive"](backend), "Client backpressure stranded the native adapter")
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
+            process.stdout.close()
+            if backend and integration["alive"](backend):
+                os.kill(backend, getattr(signal, "SIGKILL", signal.SIGTERM))
+    print("PASS full client pipe permits bounded " + command + "/" + finish + " shutdown", flush=True)
+
+
+def poisoned_disconnect_contract(adapter):
+    gate = OUT / "poisoned-backend-disconnect"
+    gate.unlink(missing_ok=True)
+    gate.with_suffix(".ready").unlink(missing_ok=True)
+    with Dap(adapter, gate.name, arguments("dap", "blocked-writes", barrier=gate)) as peer:
+        try:
+            peer.request("initialize", dict(adapterID="dncdbg"))
+            request = peer.send("pipeFill", dict(payload="x" * (8 * 1024 * 1024)))
+            wait_file(gate.with_suffix(".ready"))
+            peer.response(request, success=False, timeout=35)
+            disconnect = peer.send("disconnect", dict(terminateDebuggee=False))
+            response = peer.receive(lambda m: m.get("type") == "response" and m.get("request_seq") == disconnect)
+            check(not response["success"] and "timed out" not in response["message"].lower(),
+                  "Poisoned transport was reported as a new request timeout: " + str(response))
+            peer.disconnected = True
+            peer.process.wait(timeout=15)
+            check(peer.process.returncode == 0, "Poisoned disconnect requires frontend EOF to clean up")
+        finally:
+            gate.write_text("release")
+    gate.unlink(missing_ok=True)
+    gate.with_suffix(".ready").unlink(missing_ok=True)
+    print("PASS poisoned backend disconnect reports transport loss and exits without frontend EOF", flush=True)
+
+
+def late_startup_evidence_contract(adapter):
+    with Dap(adapter, "startup-late-evidence", arguments("dap", "startup-late-evidence")) as peer:
+        peer.request("initialize", dict(adapterID="dncdbg"))
+        peer.request("launch", dict(program="owned-test-target"), success=False)
+        peer.request("lateEvidence")
+        peer.event("stopped")
+        peer.request("launch", dict(program="second-test-target"), success=False)
+        check(peer.request("ownershipStatus")["launches"] == 1, "Late target evidence failed to reserve startup ownership")
+        peer.request("disconnect")
+    print("PASS process/stopped after a failed launch re-reserves target ownership", flush=True)
+
+
+def fresh_configuration_contract(adapter):
+    with Dap(adapter, "fresh-configuration", arguments("dap", "fresh-configuration")) as peer:
+        peer.request("initialize", dict(adapterID="dncdbg"))
+        launch = peer.send("launch", dict(program="first-test-target"))
+        peer.event("initialized")
+        peer.request("configurationDone")
+        peer.response(launch, success=False)
+        launch = peer.send("launch", dict(program="retry-test-target"))
+        peer.event("initialized")
+        try:
+            message = peer.receive(lambda m: m.get("type") == "response" and m.get("request_seq") == launch, timeout=31)
+            raise AssertionError("Retry inherited prior configurationDone instead of a fresh setup phase: " + str(message))
+        except queue.Empty:
+            pass
+        peer.request("disconnect")
+        peer.response(launch, success=False)
+    print("PASS each admitted startup gets a fresh initialized/configuration phase", flush=True)
+
+
+def hybrid_selection_contract(adapter, lldb, wide=False):
+    with Dap(adapter, "hybrid-selection-" + str(wide), ["--native-debugger=lldb", "--native-debugger-path=" + lldb]) as peer:
+        peer.request("initialize", dict(adapterID="dncdbg", supportsInvalidatedEvent=True))
+        launch = peer.send("launch", dict(program=shutil.which("dotnet"), args=[str(DLL)],
+                                          env=["DNCDBG_MIXED_CHECKPOINTS=1"], managedInspection=True))
+        peer.event("initialized")
+        peer.request("setBreakpoints", dict(source=dict(path=str(FIXTURE / "native.c")),
+                                           breakpoints=[dict(line=line(FIXTURE / "native.c", "NATIVE_BREAK"))]))
+        peer.request("configurationDone")
+        peer.response(launch)
+        stop = peer.event("stopped")
+        frames = peer.request("stackTrace", dict(threadId=stop["threadId"]))["stackFrames"]
+        managed = next(f for f in frames if "[Managed]" in f["name"] and "ManagedCall" in f["name"])
+        caller = frames[1]
+        peer.request("scopes", dict(frameId=caller["id"]))
+        serial = peer.request("dotnet/info")["managedSnapshot"]
+        if wide:
+            response = peer.request("stackTrace", dict(threadId=(1 << 40) + 7))
+            check(response["dncdbgManagedInspection"]["status"] == "unavailable", str(response))
+            peer.request("scopes", dict(frameId=managed["id"]))
+            check(peer.request("dotnet/info")["managedSnapshot"] == serial, "Wide overlay thread destroyed another thread's snapshot")
+        else:
+            peer.request("scopes", dict(frameId=managed["id"]))
+            result = peer.request("evaluate", dict(expression="`frame info", context="repl"))["result"]
+            check("frame #1:" in result and "native_add" in result, "Managed frame replaced remembered native selection: " + result)
+        peer.request("disconnect")
+    print("PASS " + ("unrepresentable overlay thread preserves existing snapshots" if wide else "hybrid managed frames cannot replace native selection"), flush=True)
 
 
 def native_only_watch_contract(adapter):
@@ -1130,6 +1277,12 @@ if __name__ == "__main__":
     inspection_stop_publication_contract(options.adapter)
     inspection_stop_publication_contract(options.adapter, command="scopes")
     explicit_repl_contract(options.adapter)
+    for command in ("variables", "scopes"):
+        for finish in ("eof", "disconnect"):
+            client_backpressure_contract(options.adapter, command=command, finish=finish)
+    poisoned_disconnect_contract(options.adapter)
+    fresh_configuration_contract(options.adapter)
+    late_startup_evidence_contract(options.adapter)
     startup_deadline_gaps_contract(options.adapter)
     startup_deadline_gaps_contract(options.adapter, mode="startup-postconfig-retry")
     startup_failed_evidence_contract(options.adapter)
@@ -1149,6 +1302,8 @@ if __name__ == "__main__":
         native_watch_contract(options.adapter, options.lldb_dap, invalidation=True)
         duplicate_native_pc_contract(options.adapter, options.lldb_dap)
         real_explicit_repl_contract(options.adapter, options.lldb_dap)
+        hybrid_selection_contract(options.adapter, options.lldb_dap)
+        hybrid_selection_contract(options.adapter, options.lldb_dap, wide=True)
         nonmutating_queries_contract(options.adapter, options.lldb_dap)
         for mode in ("mutation-failure", "mutation-timeout"):
             for command in ("evaluate", "writeMemory"):

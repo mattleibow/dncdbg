@@ -212,6 +212,13 @@ while True:
             deferred = request
             event("initialized")
             continue
+        if options.mode == "fresh-configuration":
+            if launch_count == 1:
+                deferred = request
+                event("initialized")
+            else:
+                event("initialized")
+            continue
         if options.mode in ("startup-timeout", "startup-no-configuration") and launch_count == 1:
             continue
         if options.mode == "startup-config" and launch_count == 1:
@@ -227,6 +234,9 @@ while True:
             event("process", dict(systemProcessId=os.getpid(), name="test-target-evidence", isLocalProcess=True))
             event("stopped", dict(reason="breakpoint", threadId=7, allThreadsStopped=True))
             response(request, success=False, message="Startup failed after target evidence")
+            continue
+        if options.mode == "startup-late-evidence" and launch_count == 1:
+            response(request, success=False, message="Explicit startup rejection")
             continue
         if options.mode == "startup-failure" and launch_count == 1:
             response(request, success=False, message="Explicit startup rejection")
@@ -244,6 +254,9 @@ while True:
         if options.mode == "startup-postconfig-retry" and launch_count == 1:
             response(deferred, success=False, message="Explicit failure after configuration")
             continue
+        if options.mode == "fresh-configuration" and launch_count == 1:
+            response(deferred, success=False, message="First configured launch rejected")
+            continue
         event("stopped", dict(reason="breakpoint", threadId=(1 << 40) + 7 if options.mode == "wide-threads" else 7,
                               allThreadsStopped=options.mode != "refused-control"))
     elif command == "stackTrace":
@@ -257,11 +270,17 @@ while True:
                                                                instructionPointerReference="0x2000",
                                                                source=dict(name="native.c", sourceReference=1))]))
     elif command == "scopes":
+        if options.mode == "client-block-scopes":
+            response(request, dict(scopes=[dict(name="Locals", variablesReference=1, expensive=False)] * 160000))
+            continue
         selected_frame = args["frameId"]
         response(request, dict(scopes=[dict(name="Registers" if options.mode.startswith("register-") else "Locals",
                                            variablesReference=3 if options.mode.startswith("register-") else 1, expensive=False)]),
                  success=args["frameId"] in (1, 2))
     elif command == "variables":
+        if options.mode == "client-block-variables":
+            response(request, dict(variables=[dict(name="old-value", value="x" * 80, variablesReference=2)] * 80000))
+            continue
         if options.mode.startswith("register-"):
             if args["variablesReference"] == 3:
                 response(request, dict(variables=[dict(name="General Purpose Registers", value="", variablesReference=4)]))
@@ -352,6 +371,10 @@ while True:
         response(request, dict(launches=launch_count, disconnects=disconnects, moduleReads=module_reads))
     elif command == "selectOtherFrame":
         selected_frame = 2
+        response(request)
+    elif command == "lateEvidence":
+        event("process", dict(systemProcessId=os.getpid(), name="late-test-target", isLocalProcess=True))
+        event("stopped", dict(reason="breakpoint", threadId=7, allThreadsStopped=True))
         response(request)
     elif command == "die":
         response(request)

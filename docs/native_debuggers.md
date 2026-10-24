@@ -62,9 +62,13 @@ Resume epochs advance only after accepted control, a native event, or an
 uncertain execution outcome, not merely when a request enters the queue.
 Native inspection responses and their child references belong to the captured
 request stop, never the stop that happens to be current when mapping finishes.
-Final stop validation and response publication share the state-transition gate:
-a continued/stopped event during a sizeable scopes/variables response rejects
-the expired result rather than exposing old values under fresh child handles.
+Final stop validation reserves the current snapshot cancellation token under
+the state-transition gate, then releases the gate **before client I/O**.
+Publication uses that token and the session lifetime with a bounded async
+write. A transition cancels an expired response before or during publication;
+an interrupted partial client frame fails the transport closed, never rebinding
+its child handles to a fresh stop. Full client pipes must not lock out native
+stop transitions, EOF, disconnect or transport teardown.
 Replies are bound to their originating backend generation. A client timeout or
 failure produces a failed reply to that backend, never to its replacement.
 Each native request has its own cancellation/timeout registration; one timeout
@@ -84,6 +88,8 @@ that event can suspend the timer for IDE breakpoint/configuration setup.
 configured session remain bounded. An explicit failed startup response permits
 a retry only if no process/stopped target evidence was observed; otherwise
 ownership still requires reconciliation.
+Each admitted startup resets its configuration phase. Late process/stopped
+events after a failed response re-reserve startup ownership until reconciliation.
 For backends that do not advertise `configurationDone`, the deadline starts
 with startup instead, so the absence of that optional phase cannot hang launch.
 Disconnect cancels the startup token as well as the active request token,
@@ -96,6 +102,12 @@ unusable; the proxy never appends a new frame to a potentially partial one.
 EOF cancels requests and stops/aborts the native transport **before** joining
 its request worker. The pipe-fill tests prove worker admission by consuming
 only the next header and one payload byte before the backend stops reading.
+Lifetime cancellation and pending-request cancellation precede state-dependent
+invalidation. All proxy client writes are bounded and outside the state lock.
+Disconnect copies buffered terminal events under the lock, sends them outside
+it, and always completes its admission waiter in an outer `finally`, even when
+the client's pipe has broken. A disconnect against a poisoned backend reports
+transport failure and exits to cleanup; it does not require a second frontend EOF.
 If a client pipe has already failed, error-response delivery logs the transport
 failure and cancels the lifetime instead of throwing an unhandled exception
 from a background worker. Native reverse-response writes report partial-write
@@ -256,6 +268,7 @@ leaking backend frame IDs. Unsupported cancel/restart capabilities stay masked
 on both initialize and later capability events.
 Frame-less native evaluation restores the last explicit client frame, rather
 than inheriting an internal register read's selected frame.
+Managed/hybrid frames cannot replace the remembered native-only selection.
 Explicit-frame evaluation also restores the actual backend selection through
 `scopes` before forwarding: REPL commands such as `` `frame info `` can consult
 global LLDB frame selection even when `evaluate.frameId` is present.
@@ -265,6 +278,8 @@ diagnostic is emitted; no floating-point bank is fabricated.
 Native-only thread IDs also retain signed 64-bit backend identity. Only the
 optional CoreCLR API's thread lookup narrows to its supported integer range;
 an unrepresentable overlay thread degrades to native-only inspection.
+That range check happens before opening or using a CLR view and does not
+invalidate snapshots/handles already held for other representable threads.
 The stopped/all-threads-stopped flags and stop invalidation commit under one
 state lock, including for snapshot-cancellation observers.
 
@@ -426,6 +441,11 @@ The later frozen-tip review has exact evidence in
 `evidence/84696b30-publication-repl-red-green.txt` and
 `evidence/84696b30-additional-af-red-green.txt`, including actual LLDB native
 memory side effects before failed/timed-out mutation responses.
+The subsequent shutdown review's exact red/green excerpts are in
+`evidence/83c74685-shutdown-red-green.txt`: full client pipe EOF/disconnect,
+broken buffered-terminal delivery, poisoned transport classification, native
+selection, fresh configuration, late startup evidence and wide-thread view
+preservation. Earlier successful CI did not establish these newer guarantees.
 
 Real attach reached SIGSTOP with a verified native checkpoint breakpoint, but
 did not reach the checkpoint after continue. The current Xcode adapter also

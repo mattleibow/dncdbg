@@ -6,6 +6,28 @@ if (args.Length is < 2 or > 3)
     throw new ArgumentException("Supply the public Python executable and fake_native_adapter.py test peer.");
 string python = args[0], fake = args[1];
 
+if (args.Length == 2 || args[2] == "disconnect-terminal")
+{
+    const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+    using var connection = new DncDbg.Protocol.DapConnection(Stream.Null, new ClosedClientOutput());
+    using var proxy = new NativeDebugProxy(connection, new NativeAdapterDescriptor("dap", python, [], "test", null,
+        RuntimeInformation.RuntimeIdentifier, []), Console.Error.WriteLine);
+    var terminals = (List<DncDbg.Protocol.DapMessage>)typeof(NativeDebugProxy).GetField("_terminalEvents", flags)!.GetValue(proxy)!;
+    terminals.Add(new DncDbg.Protocol.DapMessage { Type = "event", Event = "exited" });
+    terminals.Add(new DncDbg.Protocol.DapMessage { Type = "event", Event = "terminated" });
+    var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var work = Activator.CreateInstance(typeof(NativeDebugProxy).GetNestedType("Work", System.Reflection.BindingFlags.NonPublic)!,
+        [new DncDbg.Protocol.DapMessage { Type = "request", Command = "disconnect" }, 0L, completion, false, false])!;
+    Exception? failure = null;
+    try { typeof(NativeDebugProxy).GetMethod("Disconnect", flags)!.Invoke(proxy, [work]); }
+    catch (System.Reflection.TargetInvocationException error) { failure = error.InnerException; }
+    if (!completion.Task.IsCompleted)
+        throw new InvalidOperationException("Broken client terminal delivery skipped disconnect completion.", failure);
+    Console.WriteLine("PASS disconnect completion survives broken client output and buffered terminal events");
+    if (args.Length == 3)
+        return;
+}
+
 if (args.Length == 2 || args[2] == "closed-client")
 {
     using var output = new ClosedClientOutput();
@@ -41,6 +63,8 @@ if (args.Length == 2 || args[2] == "reverse-write")
     if (failures == 0)
         throw new InvalidOperationException("Native SendMessage did not surface its interrupted transport failure.");
     Console.WriteLine("PASS native reverse-response write failure notifies the owning session");
+    backend.StopTransport(terminateTarget: true);
+    File.Delete(Path.ChangeExtension(gate, ".ready"));
     if (args.Length == 3)
         return;
 }

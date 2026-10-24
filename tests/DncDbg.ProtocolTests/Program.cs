@@ -41,6 +41,12 @@ using (var blockedCancellation = new CancellationTokenSource())
     catch (OperationCanceledException) { }
     if (!blockedConnection.WriteFailed)
         throw new InvalidOperationException("An interrupted frame did not invalidate the output transport.");
+    try
+    {
+        await blockedConnection.SendRequestAsync("after-poison").WaitAsync(TimeSpan.FromSeconds(1));
+        throw new InvalidOperationException("A poisoned transport was reusable.");
+    }
+    catch (IOException) { }
     blockedWriter.Release.TrySetResult();
     await blockedWriter.Drained.Task.WaitAsync(TimeSpan.FromSeconds(1));
 }

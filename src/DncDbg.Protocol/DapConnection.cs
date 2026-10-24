@@ -192,8 +192,12 @@ public sealed class DapConnection : IDisposable
     private async Task<int> SendAsync(DapMessage msg, CancellationToken cancellation,
         TaskCompletionSource<DapMessage>? completion = null)
     {
+        if (WriteFailed)
+            throw new IOException("The DAP output transport failed during a previous write.", _writeFailure);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellation, _writes.Token);
-        await _writeLock.WaitAsync(linked.Token).ConfigureAwait(false);
+        try { await _writeLock.WaitAsync(linked.Token).ConfigureAwait(false); }
+        catch (OperationCanceledException) when (WriteFailed)
+        { throw new IOException("The DAP output transport failed while waiting to write.", _writeFailure); }
         bool exposed = false;
         try
         {

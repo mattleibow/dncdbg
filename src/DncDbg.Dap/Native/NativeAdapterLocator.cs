@@ -255,9 +255,12 @@ internal static class NativeAdapterLocator
         if (!AssignProcessToJobObject(job, processHandle))
         {
             int assignError = Marshal.GetLastPInvokeError();
-            try { process.Kill(entireProcessTree: true); }
-            catch (Exception cleanupError) when (cleanupError is InvalidOperationException or System.ComponentModel.Win32Exception) { }
-            throw new System.ComponentModel.Win32Exception(assignError);
+            if (assignError != 5 || WaitForSingleObject(processHandle, 0) != 0)
+            {
+                try { process.Kill(entireProcessTree: true); }
+                catch (Exception cleanupError) when (cleanupError is InvalidOperationException or System.ComponentModel.Win32Exception) { }
+                throw new System.ComponentModel.Win32Exception(assignError);
+            }
         }
         process.StandardInput.Dispose();
         (string Text, bool Complete) outResult = ("", false), errResult = ("", false);

@@ -25,7 +25,7 @@ class Program
                 Context.WasEntryPointHit(@"__FILE__:__LINE__");
             });
 
-        for (int i = 0; i < 12; i++)
+        for (int i = 0; i < 13; i++)
         {
             try
             {
@@ -85,6 +85,7 @@ partial class Context
             (false, new[] { invalid, "!" + invalid }, ""),
             (false, new[] { "!" + invalid, invalid }, ""),
             (false, new[] { "!, !" + invalid + ",\t" + nullRef }, nullRef),
+            (true, new[] { "!\f !" + invalid + "\v" + nullRef }, nullRef),
         };
         var actual = new List<string>();
         var expected = new List<string>();

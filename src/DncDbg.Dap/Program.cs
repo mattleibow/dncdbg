@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using DncDbg.Dap;
+using DncDbg.Dap.Native;
 using DncDbg.Protocol;
 using Microsoft.Win32.SafeHandles;
 
@@ -24,9 +25,13 @@ if (args.Length == 2 && args[0] == DncDbg.Engine.Launch.ConsoleCodePage.HelperOp
     return DncDbg.Engine.Launch.ConsoleCodePage.RunHelper(consoleOwner);
 
 CommandLineOptions options;
+NativeAdapterDescriptor? nativeDescriptor;
 try
 {
     options = CommandLineOptions.Parse(args);
+    nativeDescriptor = !options.ExitRequested && options.NativeDebugger is { } kind
+        ? NativeAdapterLocator.Resolve(kind, options.NativeDebuggerPath, options.NativeDebuggerArguments.ToArray())
+        : null;
 }
 catch (ArgumentException e)
 {
@@ -35,6 +40,11 @@ catch (ArgumentException e)
 }
 if (options.ExitRequested)
     return 0;
+if (options.NativeDebuggerInfo)
+{
+    Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(nativeDescriptor, DapJson.Options));
+    return 0;
+}
 
 // DNCDBG_LOG_DIR: a trace per adapter process without touching the client's configuration (CI, bug reports)
 string? protocolLogPath = options.ProtocolLogPath;
@@ -78,17 +88,23 @@ try
     }
 
     using var connection = new DapConnection(input, output) { Trace = protocolLog.Write };
-    using (var adapter = new DebugAdapter(connection, engineLog.Write))
+    try
     {
-        try
+        if (nativeDescriptor != null)
         {
+            using var proxy = new NativeDebugProxy(connection, nativeDescriptor, engineLog.Write);
+            proxy.Run();
+        }
+        else
+        {
+            using var adapter = new DebugAdapter(connection, engineLog.Write);
             adapter.Run();
         }
-        catch (Exception e)
-        {
-            engineLog.Write("Fatal: " + e);
-            return 1;
-        }
+    }
+    catch (Exception e)
+    {
+        engineLog.Write("Fatal: " + e);
+        return 1;
     }
     client?.Dispose();
     return 0;

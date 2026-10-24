@@ -9,17 +9,36 @@ This document shows, message by message and field by field, which parts of the [
 
 ## Mixed managed/native debugging
 
-**Decision:** use one ICorDebug interop controller for an **opt-in Windows x64**
+**Active decision:** use one external native DAP execution controller (LLDB or an
+explicitly selected DAP backend) plus optional **read-only CoreCLR inspection**.
+Do not recreate native breakpoints, symbol lookup, variables or stepping.
+The working LLDB-owned macOS proof uses persistent native checkpoints and fresh
+`ICLRDebugging.OpenVirtualProcess` views, not an invasive managed attach.
+Exact same-thread PC matches can gain managed source/scalar locals. Managed
+source breakpoints, managed stepping, CLR exception control and func-eval are
+not implemented in this mode.
+
+See [native backend design, discovery/bundling, request ownership, device setup,
+limitations and tests](native_debuggers.md). The default managed adapter remains
+unchanged. The direct Windows production controller and DbgHelp implementation
+below are **retired and removed**; `nativeDebugging:true` and
+`dotnet/setNativeBreakpoint` now fail explicitly. The raw Windows proof is
+retained only as independent research evidence.
+
+### Historical direct-controller decision (retired)
+
+The historical decision was to use one ICorDebug interop controller for an **opt-in Windows x64**
 launch slice, after its independent public API baseline passed. Preserve the
 managed engine's default behavior. Do not advertise cross-platform mixed-mode
 parity or add a macOS dual-controller production path: its external baseline
 fails. A native-only LLDB stop is not evidence of a working mixed debugger.
 
-The implementation is intentionally bounded to one-shot source breakpoints in
+The retired implementation was bounded to one-shot source breakpoints in
 an already loaded native DLL, native stacks, and continue back to managed code.
-It uses `DncDbg.Engine` directly, normal `DncDbg.Protocol` framing, and the explicit
+It used `DncDbg.Engine` directly, normal `DncDbg.Protocol` framing, and the explicit
 `dotnet/setNativeBreakpoint` extension, not a DAP multiplexer.
-See [configuration, request shape and limitations](build_windows.md#experimental-mixed-mode-launch).
+Those configurations are no longer supported. The history below is not the
+current native backend matrix or usage instructions.
 
 ### Scenarios and acceptance boundary
 
@@ -90,7 +109,7 @@ redistributed by this repository.
 
 | Surface | Measured support |
 | --- | --- |
-| DNCDbg experimental Windows x64 launch | `nativeDebugging:true`, explicit one-shot native source breakpoint, native stack/threads at that stop, continue to managed, terminate. Default managed-only behavior is unchanged. |
+| Retired direct Windows x64 experiment | Historical `nativeDebugging:true`/one-shot controller evidence only. This path is removed; do not enable or merge it as a production debugger. |
 | macOS `osx-arm64` / .NET 10 / Xcode LLDB | Separate managed and native launch baselines pass. Concurrent transition probe fails. |
 | macOS `osx-x64` | Not validated. |
 | Linux `linux-x64` / `linux-arm64` | Fixture is portable; no mixed-mode baseline established. No support claim. |
@@ -113,7 +132,7 @@ breakpoint, `native_sum -> native_add` stack unwinding, x64 argument registers
 `19,23`, a native instruction step, managed return local `42`, and native exit
 event code zero.
 
-The complete adapter slice and regressions passed in
+The now-retired adapter slice and regressions passed in
 [run 40077553328](https://github.com/mattleibow/dncdbg/actions/runs/40077553328),
 testing source commit `6e9df1bcb08a3dee19a01135e3216599c3d8eb89` on
 `windows-2025` / `win-x64` / target runtime `10.0.13`. Evidence includes raw
@@ -141,17 +160,18 @@ The native-stop termination probe additionally proved that a raw OS stop must
 first be CLR-synchronized (`ICorDebugController.Stop`), followed by
 `ICorDebugController.Terminate`. Terminating an unsynchronized raw stop returns
 `CORDBG_E_PROCESS_NOT_SYNCHRONIZED`; killing the OS process without continuing its
-outstanding debug event stalled the adapter lifecycle test. The production path
-therefore uses the synchronized CLR termination path, not a kill-only shortcut.
+outstanding debug event stalled the adapter lifecycle test. That retired path therefore used synchronized CLR termination rather than a
+kill-only shortcut. The active LLDB backend owns native shutdown itself.
 See the [documented termination contract](https://learn.microsoft.com/dotnet/core/unmanaged-api/debugging/icordebug/icordebugcontroller-terminate-method)
 and [CoreCLR's native-event continuation during termination](https://github.com/dotnet/runtime/blob/v10.0.13/src/coreclr/debug/di/process.cpp#L3296-L3365).
 
-Next incremental slice: prove a native breakpoint rearm plus a managed/native
+The historical next slice would have been to prove a native breakpoint rearm plus a managed/native
 transition stepper on Windows x64, including an unoptimized and optimized DLL,
 before replacing the explicit one-shot contract with persistent IDE source
 breakpoints. Adapter attach/detach and native locals require their own lifecycle
 and PDB type/location proofs. macOS needs a supported exception-ownership
-architecture, not a DAP routing workaround.
+architecture, not a DAP routing workaround. Instead, development pivoted to the
+single-owner LLDB/read-only inspection architecture linked above.
 
 ### Official references checked
 

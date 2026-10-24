@@ -49,9 +49,9 @@ public sealed partial class DebugEngine : IEvalHost
     private readonly List<(CorDebugEval Eval, int ThreadId)> _abandonedEvals = [];
 
     bool IEvalHost.BudgetExceeded =>
-        NativeDebugging || !AllowImplicitFuncEval || !_explicitExpansion && (_implicitEvalTimedOut || DateTime.UtcNow > _implicitEvalDeadline);
+        !AllowImplicitFuncEval || !_explicitExpansion && (_implicitEvalTimedOut || DateTime.UtcNow > _implicitEvalDeadline);
 
-    bool IEvalHost.FuncEvalAllowed => AllowImplicitFuncEval && !NativeDebugging;
+    bool IEvalHost.FuncEvalAllowed => AllowImplicitFuncEval;
     bool IEvalHost.ShowRawValues => ShowRawValues;
 
     string IEvalHost.FormatDebuggerDisplay(string template, Func<CorDebugValue?> self, InspectionContext context)
@@ -119,8 +119,6 @@ public sealed partial class DebugEngine : IEvalHost
     {
         using var operation = _lifetime.Enter();
         CorDebugProcess process = RequireStopped();
-        if (NativeDebugging)
-            throw new EvalFailedException("Function evaluation is not supported during experimental native debugging.");
         if (_pendingEval != null)
             throw new EvalFailedException("Evaluation not possible: another evaluation is in progress.");
         if (_abandonedEvals.Any(a => a.ThreadId == threadId))

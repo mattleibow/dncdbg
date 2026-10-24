@@ -97,3 +97,9 @@ native_sum
 
 No successful cross-mode continue/step is claimed. See the
 [architecture decision and public source references](dap_status.md#mixed-managednative-debugging).
+
+The active [native backend architecture](native_debuggers.md) avoids this
+dual-controller path. LLDB is the sole execution owner; a separate read-only
+`OpenVirtualProcess` view obtains managed frames/scalars through LLDB memory and
+register access. Its fixture checkpoint proof is not a managed source breakpoint
+or managed stepper, and the original failing probes above remain unchanged.

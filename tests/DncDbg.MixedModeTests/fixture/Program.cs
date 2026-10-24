@@ -18,6 +18,13 @@ internal static class Program
         if (args.Contains("--repeat"))
             result = NativeAdd(19, 23);
         Console.WriteLine($"RESULT:{result}");
+        int exitGate = Array.IndexOf(args, "--exit-gate");
+        if (exitGate >= 0)
+        {
+            File.WriteAllText(args[exitGate + 1] + ".ready", "ready");
+            while (!File.Exists(args[exitGate + 1]))
+                Thread.Sleep(20);
+        }
         return result == 42 ? 0 : 1;
     }
 

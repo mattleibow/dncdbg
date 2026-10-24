@@ -28,6 +28,13 @@ internal static class NativeSymbols
     {
         IntPtr thread = OpenThread(0x48, false, threadId);
         Check(thread != IntPtr.Zero, "OpenThread");
+        var aligned = (AMD64_CONTEXT*)NativeMemory.AlignedAlloc((nuint)sizeof(AMD64_CONTEXT), 16);
+        if (aligned == null)
+        {
+            CloseHandle(thread);
+            throw new OutOfMemoryException();
+        }
+        *aligned = context;
         try
         {
             var frame = new StackFrame
@@ -41,7 +48,7 @@ internal static class NativeSymbols
             ModuleBase moduleBase = SymGetModuleBase64;
             for (int i = 0; i < 8; i++)
             {
-                if (!StackWalk64(0x8664, process, thread, ref frame, ref context, IntPtr.Zero,
+                if (!StackWalk64(0x8664, process, thread, ref frame, (IntPtr)aligned, IntPtr.Zero,
                         functionTable, moduleBase, IntPtr.Zero))
                     break;
                 var symbol = new Symbol { SizeOfStruct = 88, MaxNameLen = 1024 };
@@ -54,7 +61,11 @@ internal static class NativeSymbols
                 throw new InvalidOperationException("DbgHelp did not unwind both native fixture frames.");
             Console.WriteLine("PASS native caller/callee stack");
         }
-        finally { Check(CloseHandle(thread), "CloseHandle"); }
+        finally
+        {
+            NativeMemory.AlignedFree(aligned);
+            Check(CloseHandle(thread), "CloseHandle");
+        }
     }
 
     private static void Check(bool result, string api)
@@ -119,7 +130,7 @@ internal static class NativeSymbols
 
     [DllImport("dbghelp", SetLastError = true)]
     private static extern bool StackWalk64(uint machine, IntPtr process, IntPtr thread, ref StackFrame frame,
-        ref AMD64_CONTEXT context, IntPtr readMemory, FunctionTable functionTable, ModuleBase moduleBase, IntPtr translate);
+        IntPtr context, IntPtr readMemory, FunctionTable functionTable, ModuleBase moduleBase, IntPtr translate);
 
     [DllImport("dbghelp")]
     private static extern IntPtr SymFunctionTableAccess64(IntPtr process, ulong address);

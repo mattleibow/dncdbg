@@ -183,14 +183,6 @@ public sealed class AttachArguments
     };
 }
 
-public sealed class NativeBreakpointArguments
-{
-    public string Module { get; set; } = "";
-    public Source Source { get; set; } = new();
-    public int Line { get; set; }
-    public bool OneShot { get; set; }
-}
-
 public sealed class ExpressionEvaluationOptions
 {
     public bool? AllowImplicitFuncEval { get; set; }

@@ -30,6 +30,7 @@ internal sealed class InteropProof(string fixture, string sourceDirectory, bool 
     private ulong _nativeAddress;
     private IntPtr _symbolHandle;
     private int _pid;
+    private int _resultSlot;
 
     public async Task Run(bool attach)
     {
@@ -165,6 +166,8 @@ internal sealed class InteropProof(string fixture, string sourceDirectory, bool 
         MetadataReader symbols = pdb.GetMetadataReader();
         MethodDefinitionHandle method = metadata.MethodDefinitions.Single(h =>
             metadata.GetString(metadata.GetMethodDefinition(h).Name) == "ManagedCall");
+        _resultSlot = symbols.GetLocalScopes(method).SelectMany(s => symbols.GetLocalScope(s).GetLocalVariables())
+            .Select(symbols.GetLocalVariable).Single(v => symbols.GetString(v.Name) == "result").Index;
         CorDebugCode code = module.GetFunctionFromToken(new mdMethodDef(MetadataTokens.GetToken(method))).ILCode;
         foreach (string marker in new[] { "MANAGED_BEFORE", "MANAGED_AFTER" })
         {
@@ -194,7 +197,7 @@ internal sealed class InteropProof(string fixture, string sourceDirectory, bool 
         else
         {
             int result = 0;
-            ((CorDebugGenericValue)frame.GetLocalVariable(0)).GetValue((IntPtr)(&result));
+            ((CorDebugGenericValue)frame.GetLocalVariable(_resultSlot)).GetValue((IntPtr)(&result));
             Require(result == 42 && _nativeStops == 1, $"Managed return {result}; native stops {_nativeStops}");
             Console.WriteLine("PASS managed return local result=42");
         }

@@ -52,8 +52,6 @@ public sealed partial class DebugEngine
     {
         lock (_lock)
         {
-            if (IsNativeStopped)
-                return GetNativeStack(threadId);
             RequireStopped();
             if (_threadFrames.TryGetValue(threadId, out List<FrameInfo>? cached))
                 return cached;

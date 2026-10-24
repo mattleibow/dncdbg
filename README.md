@@ -18,14 +18,16 @@ wrap another debugger executable. Native CLR debugging libraries and the Windows
 PDB reader remain runtime dependencies supplied through NuGet and the target
 runtime; no C++ compiler, CMake build, or vendored native source is required.
 
-Debugging a managed application that calls native code is supported. An
-**experimental Windows x64 launch-only slice** additionally supports one-shot
-native source breakpoints and native stacks through an explicit DAP extension.
-It is not cross-platform mixed-mode parity. The
+Debugging a managed application that calls native code is supported. An optional
+**external native DAP backend** (`--native-debugger=lldb|dap`) delegates native
+debugging to an existing debugger instead of recreating it. LLDB may be found in
+the system/toolchain or supplied as an explicitly licensed upstream bundle.
+An optional read-only CoreCLR view enriches matching native frames with managed
+source/scalar locals; it does not provide managed execution control.
+See [native debugger architecture and usage](docs/native_debuggers.md). The
 [mixed-mode investigation](docs/dap_status.md#mixed-managednative-debugging)
-includes a real P/Invoke fixture, public-tool baselines, the macOS PAL blocker,
-and the Windows public ICorDebug proof.
-See [Windows usage and limitations](docs/build_windows.md#experimental-mixed-mode-launch).
+preserves the earlier public baselines and dual-controller macOS blocker. The
+experimental direct Windows controller is **retired**, not a production backend.
 The fixture alone requires a C compiler and CMake; the debugger does not.
 
 ## Build and publish

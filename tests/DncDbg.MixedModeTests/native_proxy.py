@@ -3,14 +3,51 @@
 
 import argparse
 import json
+import os
 from pathlib import Path
 import runpy
 import shutil
+import signal
 import subprocess
+import sys
+import time
 
 base = runpy.run_path(str(Path(__file__).with_name("run.py")))
 Dap, check, build, line = (base[n] for n in ("Dap", "check", "build", "line"))
 ROOT, OUT, DLL, FIXTURE = (base[n] for n in ("ROOT", "OUT", "DLL", "FIXTURE"))
+
+
+def alive(pid):
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = kernel.OpenProcess(0x100000, False, pid)
+        if not handle:
+            check(ctypes.get_last_error() == 87, f"OpenProcess failed: {ctypes.get_last_error()}")
+            return False
+        try:
+            status = kernel.WaitForSingleObject(handle, 0)
+            check(status in (0, 258), f"WaitForSingleObject failed: {status}")
+            return status == 258
+        finally:
+            check(kernel.CloseHandle(handle), "CloseHandle")
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+
+
+def exited(pid):
+    deadline = time.monotonic() + 10
+    while alive(pid):
+        check(time.monotonic() < deadline, f"Target {pid} survived native adapter shutdown")
+        time.sleep(0.01)
 
 
 def locals_for(session, frame):
@@ -21,7 +58,8 @@ def locals_for(session, frame):
 
 
 def scenario(adapter, lldb, managed, finish):
-    arguments = ["--native-debugger=lldb", "--native-debugger-path=" + str(lldb)]
+    arguments = ["--native-debugger=lldb", "--native-debugger-path=" + str(lldb),
+                 "--log=" + str(OUT / ("proxy-" + finish + ".engine.log"))]
     with Dap(adapter, "lldb-proxy-" + finish, arguments) as session:
         capabilities = session.request("initialize", dict(adapterID="dncdbg", pathFormat="path",
                                                           linesStartAt1=True, columnsStartAt1=True))
@@ -47,6 +85,8 @@ def scenario(adapter, lldb, managed, finish):
         for visit in range(3):
             stop = session.event("stopped")
             thread = stop["threadId"]
+            pid = session.request("dotnet/info")["debuggeeProcessId"]
+            check(isinstance(pid, int), "Native backend did not report its actual target PID")
             stack = session.request("stackTrace", dict(threadId=thread))["stackFrames"]
             check("native_checkpoint" in stack[0]["name"] if visit != 1 else "native_sum" in stack[0]["name"], str(stack[:3]))
             if visit != 1:
@@ -95,6 +135,8 @@ def scenario(adapter, lldb, managed, finish):
                     session.process.stdin.close()
                 session.process.wait(timeout=15)
                 check(session.process.returncode == 0, f"Proxy did not shut down cleanly: {session.process.returncode}")
+                exited(pid)
+                print(f"PASS LLDB proxy: managed inspection={managed}, lifecycle={finish}, actual target exit", flush=True)
                 return
             if visit == 1:
                 session.request("next", dict(threadId=thread))
@@ -105,7 +147,55 @@ def scenario(adapter, lldb, managed, finish):
             session.request("continue", dict(threadId=thread))
         check(session.event("exited")["exitCode"] == 0, "Target exit failed")
         session.request("disconnect")
+        session.process.wait(timeout=15)
+        exited(pid)
     print(f"PASS LLDB proxy: managed inspection={managed}, lifecycle={finish}", flush=True)
+
+
+def detach_scenario(adapter, lldb, managed):
+    gate = OUT / "native-detach-release"
+    ready = Path(str(gate) + ".ready")
+    gate.unlink(missing_ok=True)
+    ready.unlink(missing_ok=True)
+    detached_pid = None
+    try:
+        with Dap(adapter, "lldb-proxy-detach", ["--native-debugger=lldb", "--native-debugger-path=" + lldb]) as peer:
+            peer.request("initialize", dict(adapterID="dncdbg", pathFormat="path", linesStartAt1=True, columnsStartAt1=True))
+            launch = peer.send("launch", dict(program=shutil.which("dotnet"), args=[str(DLL), "--exit-gate", str(gate)],
+                                              env=dict(DNCDBG_MIXED_CHECKPOINTS="1"), managedInspection=managed,
+                                              preRunCommands=[
+                                                  'settings set target.output-path "' + str(OUT / "detached.stdout").replace("\\", "/") + '"',
+                                                  'settings set target.error-path "' + str(OUT / "detached.stderr").replace("\\", "/") + '"',
+                                              ]))
+            peer.event("initialized")
+            peer.request("setBreakpoints", dict(source=dict(path=str(FIXTURE / "native.c")),
+                                               breakpoints=[dict(line=line(FIXTURE / "native.c", "NATIVE_CHECKPOINT"))]))
+            peer.request("configurationDone")
+            peer.response(launch)
+            stop = peer.event("stopped")
+            stack = peer.request("stackTrace", dict(threadId=stop["threadId"]))["stackFrames"]
+            if managed:
+                check(any("[Managed]" in f["name"] for f in stack), "No managed snapshot before detach")
+            pid = peer.request("dotnet/info")["debuggeeProcessId"]
+            peer.request("disconnect", dict(terminateDebuggee=False))
+            detached_pid = pid
+            peer.process.wait(timeout=15)
+            check(peer.process.returncode == 0, "Proxy failed to detach")
+            deadline = time.monotonic() + 10
+            while not ready.exists():
+                check(time.monotonic() < deadline and alive(pid), "Detached target did not survive and reach its exit gate")
+                time.sleep(0.01)
+            check(alive(pid), "Detach killed the target")
+            gate.write_text("release")
+            exited(pid)
+            detached_pid = None
+        print("PASS LLDB detach: inspected target survives, completes both transitions, then exits on release", flush=True)
+    finally:
+        if detached_pid is not None and alive(detached_pid):
+            os.kill(detached_pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+            exited(detached_pid)
+        gate.unlink(missing_ok=True)
+        ready.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
@@ -121,3 +211,4 @@ if __name__ == "__main__":
     check(json.loads(info.stdout)["path"] == options.lldb_dap, info.stdout)
     for finish in ("continue", "disconnect", "eof"):
         scenario(options.adapter, options.lldb_dap, not options.native_only, finish)
+    detach_scenario(options.adapter, options.lldb_dap, not options.native_only)

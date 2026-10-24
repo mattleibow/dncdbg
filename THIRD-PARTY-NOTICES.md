@@ -36,3 +36,14 @@ built from vendored C/C++ sources.
 The former C++ implementation and its vendored dependency sources are no longer
 distributed in this tree. Their original sources and notices remain in Git
 history, including [checkpoint f19fe33a](https://github.com/mattleibow/dncdbg/tree/f19fe33a/THIRD-PARTY-NOTICES.md).
+
+## Optional external native debugger
+
+Native DAP mode executes an installed or explicitly supplied debugger. This
+repository does not distribute an LLDB, lldb-server, debugserver, DbgEng, WinDbg
+or vsdbg binary. Upstream LLVM/LLDB is licensed under
+[Apache-2.0 WITH LLVM-exception](https://github.com/llvm/llvm-project/blob/llvmorg-21.1.8/lldb/LICENSE.TXT);
+an independently supplied upstream bundle must retain its full license,
+third-party notices and runtime dependencies. Xcode tooling is used in place
+under Apple's terms, not repackaged. See [native debugger distribution and
+discovery](docs/native_debuggers.md).

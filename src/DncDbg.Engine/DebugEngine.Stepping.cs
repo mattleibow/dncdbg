@@ -47,8 +47,6 @@ public sealed partial class DebugEngine
     {
         lock (_lock)
         {
-            if (NativeDebugging)
-                throw new DebuggerException("Stepping is not supported during experimental native debugging; use continue and breakpoints.");
             CorDebugProcess process = RequireStopped();
             CorDebugThread thread = RequireThread(threadId);
             _requestedStepKind = kind;

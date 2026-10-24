@@ -135,17 +135,30 @@ public sealed class DapConnection : IDisposable
     /// <summary>
     /// Sends a request whose response is delivered through <see cref="CompleteRequest"/> by whoever reads the stream.
     /// </summary>
-    public Task<DapMessage> SendRequestAsync(string command, object? arguments = null)
+    public Task<DapMessage> SendRequestAsync(string command, object? arguments = null, CancellationToken cancellation = default)
     {
+        cancellation.ThrowIfCancellationRequested();
         var completion = new TaskCompletionSource<DapMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+        int seq;
         lock (_writeLock)
         {
             // registered under the write lock so the response cannot overtake the registration
-            int seq = SendRequest(command, arguments);
+            seq = SendRequest(command, arguments);
             lock (_pendingRequests)
                 _pendingRequests[seq] = completion;
         }
-        return completion.Task;
+        return AwaitResponse();
+
+        async Task<DapMessage> AwaitResponse()
+        {
+            using CancellationTokenRegistration registration = cancellation.Register(() =>
+            {
+                lock (_pendingRequests)
+                    if (_pendingRequests.Remove(seq))
+                        completion.TrySetCanceled(cancellation);
+            });
+            return await completion.Task.ConfigureAwait(false);
+        }
     }
 
     /// <returns>false if the response does not belong to a request sent with <see cref="SendRequestAsync"/>.</returns>
@@ -177,6 +190,8 @@ public sealed class DapConnection : IDisposable
 
     public void SendEvent(string name, object? body = null) =>
         Send(new DapMessage { Type = "event", Event = name, Body = body });
+
+    public int SendMessage(DapMessage message) => Send(message);
 
     private int Send(DapMessage msg)
     {

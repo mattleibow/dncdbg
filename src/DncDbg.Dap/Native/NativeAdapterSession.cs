@@ -28,6 +28,11 @@ internal sealed class NativeAdapterSession : IDisposable
     {
         lock (_ownedTargets)
         {
+            if (_disposing || _transportStopped)
+            {
+                _log("Late native process event cannot acquire target cleanup authority during shutdown.");
+                return;
+            }
             if (_adapterStarted is { } started && !_ownedTargets.ContainsKey(pid)
                 && OwnedLocalTarget.Capture(pid, _process.Id, started, _log) is { } target)
                 _ownedTargets.Add(pid, target);

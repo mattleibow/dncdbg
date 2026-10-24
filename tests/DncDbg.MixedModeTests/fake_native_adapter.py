@@ -67,6 +67,7 @@ if options.lldb:
     child = subprocess.Popen([options.lldb], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=sys.stderr.buffer)
     held = False
     internal_seq = 2_000_000_000
+    memory_reads = 0
 
     def receive():
         while True:
@@ -99,6 +100,12 @@ if options.lldb:
         while True:
             message = read(sys.stdin.buffer)
             if message is None:
+                break
+            if message.get("command") == "readMemory":
+                memory_reads += 1
+            if ((options.mode == "eof-dac-memory" and message.get("command") == "readMemory" and memory_reads == 2)
+                    or (options.mode == "eof-dac-context" and message.get("command") == "scopes")):
+                child.kill()
                 break
             if (options.barrier and not held and options.barrier.with_suffix(".arm").exists()
                     and message.get("command") == "readMemory"):

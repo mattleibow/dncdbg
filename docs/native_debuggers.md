@@ -131,11 +131,13 @@ final queue barrier, it quiesces the native transport using the existing bounded
 shutdown: allow up to five seconds for adapter exit, stop it if needed according
 to target ownership, and allow five seconds for reader drain before cancelling
 its readiness wait with a one-second join budget.
-Only then is the final event barrier enqueued, with a delivery budget longer
-than the normal five-second client-publication deadline (six seconds).
-A valid output frame is not truncated by a shorter final-drain timer: a client
-that resumes after a three-second pause receives the full 2MiB output frame
-and then both terminal events. Queued and delayed/staggered events (including three-second delays)
+Only then is the final event barrier enqueued. Its idle budget follows event
+publication progress rather than charging all later writes against one
+six-second queue-wide timer. Each completed frame refreshes that budget; an
+active write still has its normal five-second deadline. A thirty-second total
+drain cap is enforced **between** frames, never by cutting a valid active write
+short. A client that pauses three seconds before each of three 2MiB outputs
+receives all frames and then both terminal events. Queued and delayed/staggered events (including three-second delays)
 retain `exited` then `terminated` order exactly once before output shutdown.
 An unresponsive adapter/client still does not get unbounded shutdown time.
 If a client pipe has already failed, error-response delivery logs the transport
@@ -370,27 +372,44 @@ not when the event worker later dequeues them. A queued request cannot adopt a
 replacement token after refusal. A successful client reply that won the
 completion race is not overwritten by cancellation after completion.
 
-For an admitted launch, the selected backend's explicit local `process` event
-can retain a separate process identity for emergency cleanup. The adapter's
-creation time is recorded before launch, and the target must be live, distinct
-from both debugger processes, and created during that adapter session. DNCDbg
-retains the .NET `Process`/exit observation (and Windows process handle) plus
-creation time; it checks the live PID's creation time again before independent
-termination. A changed/missing identity is not signaled. This is a public
-process-identity guard, not a general cross-platform job/container abstraction.
-Linux creation times have clock-tick granularity. An equal adapter/target
-timestamp is ambiguous and requires `/proc` parent-chain proof; equality alone
-must not adopt an older unrelated process. Failure to establish that proof
-disables independent cleanup for the ambiguous identity.
+An admitted launch does not authorize independent termination of an arbitrary
+PID reported by its backend. Adoption requires a local `process` event with
+`startMethod:"launch"` **and corroborated ancestry to the current adapter**.
+Creation times constrain that ancestry but are not launch provenance by
+themselves. An external sibling created after adapter initialization is rejected,
+whether its untrusted event says attach or launch. A session with a failed or
+uncertain launch still retains admission without acquiring arbitrary PID authority.
+
+Linux uses the public `pidfd_open`/`pidfd_send_signal` APIs. A pidfd is opened
+before PID-based metadata/ancestry checks; signal zero verifies that retained
+generation remains live after validation. All later independent signals use
+the pidfd, **never a numeric PID**, so forced PID reuse (including equal creation
+ticks) cannot target its replacement. `/proc` ancestry is required for every
+Linux adoption and malformed/truncated records fail closed. If libc/kernel
+pidfd support or permissions are missing, independent termination is unavailable
+and logged rather than falling back to check-then-signal.
+
+Windows pins `Process.SafeHandle` before reading creation time, validates its
+Toolhelp32 parent chain and creation-time boundaries, and signals only that
+retained kernel process handle with `TerminateProcess`. It does not reopen a
+numeric PID at termination. A late process event during/after transport shutdown
+cannot acquire cleanup authority.
+
+**macOS independent fallback is explicitly unavailable.** No kernel-bound
+termination authority is implemented there, so process metadata/creation-time
+checks cannot authorize a PID-only fallback. Normal native-adapter-controlled
+termination remains available. If the adapter has already exited, the proxy
+logs this limitation and leaves the orphan target alive rather than risking an
+unrelated process; the fixture's negative contract releases its own surviving
+target. This intentionally supersedes earlier macOS orphan-cleanup claims.
 
 When normal adapter cleanup cannot kill its tree because the adapter is already
 gone, cleanup can terminate the retained owned local target itself within a
-five-second bound. It does not infer arbitrary orphan descendants. Capturing or
+five-second bound where the kernel-bound fallback is supported. It does not infer arbitrary orphan descendants. Capturing or
 terminating an identity can fail due to OS permissions; those failures are
 logged rather than claiming cleanup succeeded. The fallback is never adopted
 for attach, non-local events or explicit non-termination/relinquishment, even
-after a refused terminating request. No PID-only kill is attempted without the
-retained launch identity and creation-time checks.
+after a refused terminating request. No PID-only independent kill is attempted.
 An unanswered disconnect has unknown outcome, not a confirmed refusal: it must
 not restore stopped/all-stop state or access modules/DAC without a fresh stopped
 event. Only an explicit failed response can restore the prior stop.
@@ -543,6 +562,9 @@ The subsequent cleanup review is preserved in
 termination after adapter death, attached/relinquished survival guards, slow
 terminal-output framing, fatal hybrid EOF, inherited stdout cancellation,
 queued reverse generations and completed-reply cancellation races.
+The launch-provenance/kernel-identity review is preserved in
+`evidence/454362e1-provenance-pid-reuse-drain.txt`, including isolated public-CI
+forced PID reuse, external sibling survival and three-frame output drain.
 
 Real attach reached SIGSTOP with a verified native checkpoint breakpoint, but
 did not reach the checkpoint after continue. The current Xcode adapter also
@@ -572,6 +594,10 @@ Missing/nonnamable PE metadata is not silently claimed as named-source support.
   and Windows [`PeekNamedPipe`](https://learn.microsoft.com/windows/win32/api/namedpipeapi/nf-namedpipeapi-peeknamedpipe).
 - Public process identity/control: [.NET `Process.StartTime`](https://learn.microsoft.com/dotnet/api/system.diagnostics.process.starttime)
   and [`Process.Kill`](https://learn.microsoft.com/dotnet/api/system.diagnostics.process.kill).
+- Kernel-bound Linux identity/signaling: [`pidfd_open`](https://man7.org/linux/man-pages/man2/pidfd_open.2.html),
+  [`pidfd_send_signal`](https://man7.org/linux/man-pages/man2/pidfd_send_signal.2.html).
+  Windows provenance: [`PROCESSENTRY32`](https://learn.microsoft.com/windows/win32/api/tlhelp32/ns-tlhelp32-processentry32w);
+  retained-handle signaling: [`TerminateProcess`](https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-terminateprocess).
 - [Public LLDB hover evaluation](https://github.com/llvm/llvm-project/blob/llvmorg-18.1.8/lldb/tools/lldb-dap/lldb-dap.cpp#L1316-L1330):
   variable-path lookup with `eDynamicDontRunTarget`; no expression-parser fallback for hover.
 - [LLDB remote platforms/server architecture](https://lldb.llvm.org/use/remote.html).

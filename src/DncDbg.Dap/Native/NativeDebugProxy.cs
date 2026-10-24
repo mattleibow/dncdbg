@@ -56,6 +56,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
     private Thread? _worker, _eventWorker;
     private volatile bool _stopping, _disconnecting;
     private bool _disposed;
+    private long _eventProgress, _terminalDrainUntil;
 
     public void Run()
     {
@@ -124,7 +125,9 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
             catch (Exception error)
             {
                 log($"Native proxy request '{work.Request.Command}' failed: {error}");
-                SendClientError(work.Request, ErrorText.Describe(error));
+                SendClientError(work.Request, _backendFailure != null || _native?.TransportFailed == true
+                    ? "Native debugger transport is unavailable: " + (_backendFailure?.Message ?? "The backend connection ended.")
+                    : ErrorText.Describe(error));
             }
             finally
             {
@@ -336,6 +339,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         _ownsTarget = true;
         _targetPid = null;
         _selectedNativeFrame = null;
+        Interlocked.Exchange(ref _terminalDrainUntil, 0);
         _targetEnded = false;
         _backendFailure = null;
         _disconnecting = false;
@@ -605,7 +609,8 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
                     _started = true;
                     _targetPid = pid.GetInt32();
                     if (_launchedTarget && _ownsTarget && process.TryGetProperty("isLocalProcess", out var local)
-                        && local.ValueKind == JsonValueKind.True)
+                        && local.ValueKind == JsonValueKind.True
+                        && process.TryGetProperty("startMethod", out var startMethod) && startMethod.GetString() == "launch")
                         _native?.TrackLaunchedLocalTarget(_targetPid.Value);
                 }
         }
@@ -670,7 +675,15 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
                 Task? delivery;
                 lock (_state) { delivery = _disconnecting && message.Event is "exited" or "terminated" ? _disconnectDelivery?.Task : null; }
                 delivery?.WaitAsync(_lifetime.Token).GetAwaiter().GetResult();
+                long until = Interlocked.Read(ref _terminalDrainUntil);
+                if (until != 0 && System.Diagnostics.Stopwatch.GetTimestamp() >= until)
+                {
+                    log("Native terminal drain reached its total budget; stopping between client frames.");
+                    _lifetime.Cancel();
+                    return;
+                }
                 SendClientEvent(message.Event!, message.Body);
+                Interlocked.Increment(ref _eventProgress);
             }
             catch (Exception error) when (error is IOException or OperationCanceledException or TimeoutException
                 or DebuggerException or ObjectDisposedException)
@@ -944,10 +957,26 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         // its existing shutdown bound). Only a quiesced reader makes the final
         // queue barrier include every terminal event it can still receive.
         _native?.StopTransport(terminateTarget: _ownsTarget);
+        Interlocked.Exchange(ref _terminalDrainUntil, System.Diagnostics.Stopwatch.GetTimestamp()
+            + 30L * System.Diagnostics.Stopwatch.Frequency);
         var drained = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         _events.Add(new BackendMessage(Session(), StopEpoch(), InspectionEpoch(), new DapMessage(), drained));
-        try { drained.Task.WaitAsync(ClientWriteTimeout + TimeSpan.FromSeconds(1), _lifetime.Token).GetAwaiter().GetResult(); }
-        catch (TimeoutException) { log("Native terminal event delivery did not drain within its shutdown budget."); }
+        long progress = Interlocked.Read(ref _eventProgress);
+        long lastProgress = System.Diagnostics.Stopwatch.GetTimestamp();
+        while (!drained.Task.Wait(TimeSpan.FromMilliseconds(50), _lifetime.Token))
+        {
+            long current = Interlocked.Read(ref _eventProgress);
+            if (current != progress)
+            {
+                progress = current;
+                lastProgress = System.Diagnostics.Stopwatch.GetTimestamp();
+            }
+            if (System.Diagnostics.Stopwatch.GetElapsedTime(lastProgress) > ClientWriteTimeout + TimeSpan.FromSeconds(1))
+            {
+                log("Native terminal event delivery stalled beyond its per-publication budget.");
+                return;
+            }
+        }
     }
 
     private void StopRequests()

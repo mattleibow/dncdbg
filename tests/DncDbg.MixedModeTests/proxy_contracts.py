@@ -1253,8 +1253,9 @@ def orphan_target_contract(adapter, reverse=False, attached=False, detached=Fals
     gate = OUT / ("orphan-target-" + mode + "-" + str(attached))
     gate.unlink(missing_ok=True)
     pid = None
+    engine_log = OUT / (gate.name + ".engine.log")
     with (OUT / (gate.name + ".stderr")).open("wb") as errors:
-        process = subprocess.Popen([adapter, *arguments("dap", mode, barrier=gate)],
+        process = subprocess.Popen([adapter, *arguments("dap", mode, barrier=gate), "--log=" + str(engine_log)],
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors)
         seq, backend = 0, None
         def send(command, args=None):
@@ -1304,8 +1305,11 @@ def orphan_target_contract(adapter, reverse=False, attached=False, detached=Fals
                 process.stdin.close()
             process.wait(timeout=36)
             check(process.returncode == 0 and not integration["alive"](backend), "Proxy/backend cleanup did not finish")
-            if attached or detached:
+            if attached or detached or sys.platform == "darwin":
                 check(integration["alive"](pid), "Independent fallback killed an attached/relinquished target")
+                if sys.platform == "darwin" and not attached and not detached:
+                    check("kernel-bound process identity" in engine_log.read_text(),
+                          "Unavailable independent Unix cleanup was not explicitly diagnosed")
                 gate.write_text("release")
                 integration["exited"](pid)
             else:
@@ -1323,7 +1327,9 @@ def orphan_target_contract(adapter, reverse=False, attached=False, detached=Fals
             if pid and integration["alive"](pid):
                 os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
             gate.unlink(missing_ok=True)
-    print("PASS adapter-exit target ownership: " + mode + (" attached" if attached else ""), flush=True)
+    print("PASS adapter-exit target ownership: " + mode + (" attached" if attached else "")
+          + (" (independent cleanup explicitly unavailable; fail-closed target survival)" if sys.platform == "darwin"
+             and not attached and not detached else ""), flush=True)
 
 
 def slow_terminal_output_contract(adapter, frames=1):
@@ -1428,6 +1434,28 @@ def hybrid_backend_eof_contract(adapter):
         peer.disconnected = True
         peer.process.wait(timeout=15)
     print("PASS hybrid stack acquisition propagates fatal backend EOF as connection loss", flush=True)
+
+
+def dac_backend_eof_contract(adapter, lldb, mode="eof-dac-memory"):
+    with Dap(adapter, mode, arguments("lldb", mode, lldb=lldb)) as peer:
+        peer.request("initialize", dict(adapterID="dncdbg"))
+        launch = peer.send("launch", dict(program=shutil.which("dotnet"), args=[str(DLL)],
+                                          env=["DNCDBG_MIXED_CHECKPOINTS=1"], managedInspection=True))
+        peer.event("initialized")
+        peer.request("setBreakpoints", dict(source=dict(path=str(FIXTURE / "native.c")),
+                                           breakpoints=[dict(line=line(FIXTURE / "native.c", "NATIVE_CHECKPOINT"))]))
+        peer.request("configurationDone")
+        peer.response(launch)
+        stop = peer.event("stopped")
+        request = peer.send("stackTrace", dict(threadId=stop["threadId"]))
+        reply = peer.receive(lambda m: m.get("type") == "response" and m.get("request_seq") == request)
+        text = reply.get("message", "").lower()
+        check(not reply["success"] and any(word in text for word in ("transport", "connection", "unavailable")),
+              "DAC COM wrapped backend loss into a generic runtime error: " + str(reply))
+        peer.process.stdin.close()
+        peer.disconnected = True
+        peer.process.wait(timeout=15)
+    print("PASS DAC COM backend failure retains transport-unavailable diagnostic: " + mode, flush=True)
 
 
 def inherited_stdout_contract(adapter, attach=False):
@@ -1689,6 +1717,8 @@ if __name__ == "__main__":
     detached_backend_stall(options.adapter)
     if options.lldb_dap:
         build()
+        dac_backend_eof_contract(options.adapter, options.lldb_dap)
+        dac_backend_eof_contract(options.adapter, options.lldb_dap, mode="eof-dac-context")
         managed_publication_contracts(options.lldb_dap)
         strict_managed_contract(options.adapter, options.lldb_dap)
         strict_managed_contract(options.adapter, options.lldb_dap, "decimal-modules")

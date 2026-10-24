@@ -6,6 +6,33 @@ if (args.Length is < 2 or > 3)
     throw new ArgumentException("Supply the public Python executable and fake_native_adapter.py test peer.");
 string python = args[0], fake = args[1];
 
+if (args.Length == 2 || args[2] == "late-capture")
+{
+    var backend = Session("normal");
+    backend.Dispose();
+    backend.TrackLaunchedLocalTarget(Environment.ProcessId + 1);
+    var targets = (System.Collections.IDictionary)typeof(NativeAdapterSession).GetField("_ownedTargets",
+        System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(backend)!;
+    if (targets.Count != 0)
+        throw new InvalidOperationException("Disposed native session adopted late cleanup authority.");
+    Console.WriteLine("PASS disposing/disposed native sessions reject late target identity capture");
+    if (args.Length == 3)
+        return;
+}
+
+if (args.Length == 2 || args[2] == "process-parent-parse")
+{
+    foreach (string malformed in new[] { "", ")", "(name)", "1 (name) ", "1 (name) S", "1 (name) S nope", "1 (name) S -1",
+        "1 (name) S 9999999999999999999999" })
+        if (OwnedLocalTarget.LinuxParent(malformed) != null)
+            throw new InvalidOperationException("Malformed process ancestry authorized a parent.");
+    if (OwnedLocalTarget.LinuxParent("2 (name with ) parentheses) S 42 0") != 42)
+        throw new InvalidOperationException("Valid process ancestry record was not parsed.");
+    Console.WriteLine("PASS Linux ancestry parsing fails closed on malformed/truncated process records");
+    if (args.Length == 3)
+        return;
+}
+
 if (args.Length == 3 && args[2] == "pid-reuse-worker")
 {
     if (!OperatingSystem.IsLinux())
@@ -16,9 +43,12 @@ if (args.Length == 3 && args[2] == "pid-reuse-worker")
     Console.WriteLine("READY");
     while (Console.ReadLine() is { } command && command != "EXIT")
     {
-        int pid = int.Parse(command.Split(' ')[0], System.Globalization.CultureInfo.InvariantCulture);
-        using var process = System.Diagnostics.Process.GetProcessById(pid);
-        using var target = new OwnedLocalTarget(process, process.StartTime.ToUniversalTime());
+        string[] identity = command.Split(' ');
+        int pid = int.Parse(identity[0], System.Globalization.CultureInfo.InvariantCulture);
+        int parent = int.Parse(identity[1], System.Globalization.CultureInfo.InvariantCulture);
+        using var ancestor = System.Diagnostics.Process.GetProcessById(parent);
+        using var target = OwnedLocalTarget.Capture(pid, parent, ancestor.StartTime.ToUniversalTime(), Console.Error.WriteLine)
+            ?? throw new InvalidOperationException("Forced-reuse fixture could not retain a verified pidfd identity.");
         target.Terminate(message =>
         {
             Console.Error.WriteLine(message);
@@ -86,8 +116,9 @@ if (args.Length == 2 || args[2] == "target-identity")
     using var child = System.Diagnostics.Process.Start(start)!;
     try
     {
-        using var stale = new OwnedLocalTarget(System.Diagnostics.Process.GetProcessById(child.Id), child.StartTime.ToUniversalTime().AddDays(-1));
-        stale.Terminate(Console.Error.WriteLine);
+        using var stale = OwnedLocalTarget.Capture(child.Id, Environment.ProcessId, DateTime.UtcNow.AddDays(1), Console.Error.WriteLine);
+        if (stale != null)
+            throw new InvalidOperationException("A mismatched launch creation boundary was adopted.");
         if (child.HasExited)
             throw new InvalidOperationException("Independent target cleanup ignored a mismatched process identity.");
         // The child predates this adapter; a claimed process event must not adopt it.

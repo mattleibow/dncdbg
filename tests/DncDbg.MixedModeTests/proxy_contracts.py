@@ -1326,9 +1326,10 @@ def orphan_target_contract(adapter, reverse=False, attached=False, detached=Fals
     print("PASS adapter-exit target ownership: " + mode + (" attached" if attached else ""), flush=True)
 
 
-def slow_terminal_output_contract(adapter):
-    with (OUT / "slow-terminal-output.stderr").open("wb") as errors:
-        process = subprocess.Popen([adapter, *arguments("dap", "slow-terminal-output")],
+def slow_terminal_output_contract(adapter, frames=1):
+    mode = "three-slow-terminal-outputs" if frames == 3 else "slow-terminal-output"
+    with (OUT / (mode + ".stderr")).open("wb") as errors:
+        process = subprocess.Popen([adapter, *arguments("dap", mode)],
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors)
         seq = 0
         def send(command, args=None):
@@ -1348,6 +1349,8 @@ def slow_terminal_output_contract(adapter):
                     break
                 if line.lower().startswith(b"content-length:"):
                     length = int(line.split(b":", 1)[1])
+            if length > 1000000:
+                time.sleep(3)
             body = process.stdout.read(length)
             check(len(body) == length, "Slow terminal output was truncated: " + str(len(body)) + "/" + str(length))
             return json.loads(body)
@@ -1365,21 +1368,48 @@ def slow_terminal_output_contract(adapter):
             request("configurationDone")
             started = time.monotonic()
             request("disconnect", dict(terminateDebuggee=True))
-            time.sleep(3)
             messages = []
             while (message := read()) is not None:
                 messages.append(message)
             process.wait(timeout=8)
             output = [m["body"]["output"] for m in messages if m.get("event") == "output"]
-            check(output == ["x" * (2 * 1024 * 1024)], "Slow but responsive client did not receive its full valid output event")
+            check(output == ["x" * (2 * 1024 * 1024)] * frames, "Slow but responsive client did not receive its full valid output events")
             check([m["event"] for m in messages if m.get("event") in ("exited", "terminated")] == ["exited", "terminated"],
                   "Slow output lost/reordered terminal events")
-            check(process.returncode == 0 and time.monotonic() - started < 12, "Slow terminal drain did not bound shutdown")
+            check(process.returncode == 0 and time.monotonic() - started < 18, "Slow terminal drain did not bound shutdown")
         finally:
             if process.poll() is None:
                 process.kill()
             process.wait(timeout=5)
-    print("PASS three-second client pause preserves complete 2MiB terminal output and ordered exit events", flush=True)
+    print("PASS three-second pause per frame preserves " + str(frames) + " complete 2MiB outputs and ordered exit events", flush=True)
+
+
+def unrelated_target_event_contract(adapter, start_method="attach"):
+    gate = OUT / ("external-sibling-" + start_method)
+    gate.unlink(missing_ok=True)
+    with Dap(adapter, gate.name, arguments("dap", "unrelated-event")) as peer:
+        peer.request("initialize", dict(adapterID="dncdbg"))
+        # This child deliberately starts AFTER adapter initialization; chronology
+        # alone is not evidence that this backend launched it.
+        sibling = subprocess.Popen([sys.executable, str(FAKE), "--target-gate", str(gate)],
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            peer.request("launch", dict(program="owned-test-target", reportedPid=sibling.pid,
+                                        reportedStartMethod=start_method), success=False)
+            peer.process.stdin.close()
+            peer.disconnected = True
+            peer.process.wait(timeout=15)
+            check(peer.process.returncode == 0 and sibling.poll() is None,
+                  "Uncorroborated " + start_method + " process event authorized killing an external sibling")
+            gate.write_text("release")
+            check(sibling.wait(timeout=5) == 0, "Preserved external sibling did not exit normally")
+        finally:
+            gate.write_text("release")
+            if sibling.poll() is None:
+                sibling.kill()
+                sibling.wait(timeout=5)
+            gate.unlink(missing_ok=True)
+    print("PASS launch provenance rejects external sibling process event: startMethod=" + start_method, flush=True)
 
 
 def hybrid_backend_eof_contract(adapter):
@@ -1628,6 +1658,9 @@ if __name__ == "__main__":
     orphan_target_contract(options.adapter, attached=True)
     orphan_target_contract(options.adapter, detached=True)
     slow_terminal_output_contract(options.adapter)
+    slow_terminal_output_contract(options.adapter, frames=3)
+    unrelated_target_event_contract(options.adapter)
+    unrelated_target_event_contract(options.adapter, start_method="launch")
     hybrid_backend_eof_contract(options.adapter)
     inherited_stdout_contract(options.adapter)
     inherited_stdout_contract(options.adapter, attach=True)

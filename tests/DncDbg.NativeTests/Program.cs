@@ -6,6 +6,34 @@ if (args.Length is < 2 or > 3)
     throw new ArgumentException("Supply the public Python executable and fake_native_adapter.py test peer.");
 string python = args[0], fake = args[1];
 
+if (args.Length == 3 && args[2] == "pid-reuse-worker")
+{
+    if (!OperatingSystem.IsLinux())
+        throw new PlatformNotSupportedException("The forced-reuse worker requires a private Linux PID namespace.");
+    // Warm process metadata before the supervisor attempts equal-clock-tick reuse.
+    using (var self = System.Diagnostics.Process.GetCurrentProcess())
+        _ = self.StartTime;
+    Console.WriteLine("READY");
+    while (Console.ReadLine() is { } command && command != "EXIT")
+    {
+        int pid = int.Parse(command.Split(' ')[0], System.Globalization.CultureInfo.InvariantCulture);
+        using var process = System.Diagnostics.Process.GetProcessById(pid);
+        using var target = new OwnedLocalTarget(process, process.StartTime.ToUniversalTime());
+        target.Terminate(message =>
+        {
+            Console.Error.WriteLine(message);
+            if (message.StartsWith("Terminating retained", StringComparison.Ordinal))
+            {
+                Console.WriteLine("VALIDATED");
+                if (Console.ReadLine() != "RELEASE")
+                    throw new InvalidOperationException("Invalid forced-reuse signal barrier");
+            }
+        });
+        Console.WriteLine("DONE");
+    }
+    return;
+}
+
 if (args.Length == 2 || args[2] is "reverse-completed-cancel" or "reverse-queued-refusal")
 foreach (string mode in args.Length == 2 ? new[] { "reverse-completed-cancel", "reverse-queued-refusal" } : [args[2]])
 {

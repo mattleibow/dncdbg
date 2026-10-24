@@ -208,6 +208,11 @@ while True:
                 time.sleep(0.01)
     elif command in ("launch", "attach"):
         launch_count += 1
+        if options.mode == "unrelated-event":
+            event("process", dict(systemProcessId=args["reportedPid"], name="external-sibling", isLocalProcess=True,
+                                  startMethod=args.get("reportedStartMethod", "attach")))
+            response(request, success=False, message="Test launch failed after an uncorroborated process event")
+            os._exit(0)
         if options.mode == "startup-preinitialized":
             continue
         if options.mode == "startup-postconfig-retry":
@@ -380,9 +385,10 @@ while True:
             response(request)
             event("terminated")
             break
-        if options.mode == "slow-terminal-output":
+        if options.mode in ("slow-terminal-output", "three-slow-terminal-outputs"):
             response(request)
-            event("output", dict(category="stdout", output="x" * (2 * 1024 * 1024)))
+            for _ in range(3 if options.mode == "three-slow-terminal-outputs" else 1):
+                event("output", dict(category="stdout", output="x" * (2 * 1024 * 1024)))
             event("exited", dict(exitCode=0))
             event("terminated")
             break

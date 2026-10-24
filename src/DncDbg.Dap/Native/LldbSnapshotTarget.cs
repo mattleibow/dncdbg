@@ -184,9 +184,17 @@ internal sealed partial class LldbSnapshotTarget(
                         value.ContextFlags &= ~(ContextFlags)4;
                 if (((uint)requestedFlags & 8) != 0)
                 {
-                    for (int i = 0; i < 16; i++)
-                        Vector(registers, "xmm" + i).CopyTo(bytes[(0x1a0 + i * 16)..]);
-                    BinaryPrimitives.WriteUInt32LittleEndian(bytes[0x34..], checked((uint)Number(registers, "mxcsr")));
+                    if (registers.ContainsKey("mxcsr"))
+                    {
+                        for (int i = 0; i < 16; i++)
+                            Vector(registers, "xmm" + i).CopyTo(bytes[(0x1a0 + i * 16)..]);
+                        BinaryPrimitives.WriteUInt32LittleEndian(bytes[0x34..], checked((uint)Number(registers, "mxcsr")));
+                    }
+                    else
+                    {
+                        value.ContextFlags &= ~(ContextFlags)8;
+                        log("Native backend omitted MXCSR; the floating-point context bank is unavailable.");
+                    }
                 }
                 BinaryPrimitives.WriteUInt32LittleEndian(bytes[0x30..], (uint)value.ContextFlags);
             }
@@ -212,18 +220,18 @@ internal sealed partial class LldbSnapshotTarget(
         JsonElement frames = Request("stackTrace", new { threadId, levels = 1 }).GetProperty("stackFrames");
         if (frames.GetArrayLength() == 0)
             throw new DebuggerException("LLDB did not expose the requested OS thread's context.");
-        int frameId = frames[0].GetProperty("id").GetInt32();
+        long frameId = frames[0].GetProperty("id").GetInt64();
         JsonElement scope = Request("scopes", new { frameId }).GetProperty("scopes").EnumerateArray()
             .FirstOrDefault(s => s.TryGetProperty("presentationHint", out var hint) && hint.GetString() == "registers"
                 || s.GetProperty("name").GetString() == "Registers");
         if (scope.ValueKind != JsonValueKind.Object)
             throw new DebuggerException("The native backend did not expose a DAP register scope.");
         var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        Add(scope.GetProperty("variablesReference").GetInt32(), 0);
+        Add(scope.GetProperty("variablesReference").GetInt64(), 0);
         _registers.Add(threadId, values);
         return values;
 
-        void Add(int reference, int depth)
+        void Add(long reference, int depth)
         {
             if (depth > 4)
                 throw new DebuggerException("Native register scopes exceeded the nesting limit.");
@@ -234,7 +242,7 @@ internal sealed partial class LldbSnapshotTarget(
                 string value = item.GetProperty("value").GetString()!;
                 if (!string.IsNullOrEmpty(value))
                     values.TryAdd(name, value);
-                else if (item.GetProperty("variablesReference").GetInt32() is > 0 and var child)
+                else if (item.GetProperty("variablesReference").GetInt64() is > 0 and var child)
                     Add(child, depth + 1);
             }
         }
@@ -255,10 +263,12 @@ internal sealed partial class LldbSnapshotTarget(
 
     private static ulong Number(Dictionary<string, string> values, string name)
     {
-        Match number = Regex.Match(values[name], @"^0x([0-9a-fA-F]+)", RegexOptions.CultureInvariant);
+        Match number = Regex.Match(values[name], @"^0([xXbB])([0-9a-fA-F]+)", RegexOptions.CultureInvariant);
         if (!number.Success)
-            throw new DebuggerException($"Native register '{name}' was not hexadecimal.");
-        return ulong.Parse(number.Groups[1].Value, NumberStyles.HexNumber, CultureInfo.InvariantCulture);
+            throw new DebuggerException($"Native register '{name}' was not hexadecimal or binary.");
+        return number.Groups[1].Value is "b" or "B"
+            ? Convert.ToUInt64(number.Groups[2].Value, 2)
+            : ulong.Parse(number.Groups[2].Value, NumberStyles.HexNumber, CultureInfo.InvariantCulture);
     }
 
     private static byte[] Vector(Dictionary<string, string> values, string name)

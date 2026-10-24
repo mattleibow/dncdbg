@@ -81,10 +81,10 @@ internal static class NativeAdapterLocator
         string? expectedVersion = null;
         if (Directory.Exists(path))
         {
-            string root = System.IO.Path.GetFullPath(path);
+            string root = Canonical(path);
             try
             {
-                using JsonDocument manifest = JsonDocument.Parse(File.ReadAllText(System.IO.Path.Combine(root, "native-adapter.json")));
+                using JsonDocument manifest = JsonDocument.Parse(File.ReadAllText(Under(root, "native-adapter.json")));
                 JsonElement entry = manifest.RootElement;
                 if (entry.GetProperty("provider").GetString() != "llvm"
                     || entry.GetProperty("licenseExpression").GetString() != "Apache-2.0 WITH LLVM-exception")
@@ -179,10 +179,29 @@ internal static class NativeAdapterLocator
     private static string Under(string root, string relative)
     {
         string path = System.IO.Path.GetFullPath(System.IO.Path.Combine(root, relative));
-        if (System.IO.Path.IsPathRooted(relative) || !path.StartsWith(root + System.IO.Path.DirectorySeparatorChar,
-                OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+        string prefix = System.IO.Path.EndsInDirectorySeparator(root) ? root : root + System.IO.Path.DirectorySeparatorChar;
+        StringComparison comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        if (System.IO.Path.IsPathRooted(relative) || !path.StartsWith(prefix, comparison)
+            || !Canonical(path).StartsWith(prefix, comparison))
             throw new ArgumentException("Error: Native debugger bundle paths must stay inside the bundle.");
         return path;
+    }
+
+    private static string Canonical(string path)
+    {
+        string full = System.IO.Path.GetFullPath(path);
+        string root = System.IO.Path.GetPathRoot(full)!;
+        string current = root;
+        foreach (string segment in System.IO.Path.GetRelativePath(root, full).Split(
+            [System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = System.IO.Path.Combine(current, segment);
+            FileSystemInfo entry = Directory.Exists(current) ? new DirectoryInfo(current) : new FileInfo(current);
+            if (entry.LinkTarget != null)
+                current = entry.ResolveLinkTarget(returnFinalTarget: true)?.FullName
+                    ?? throw new IOException("The native bundle contains an unresolved symbolic link.");
+        }
+        return System.IO.Path.TrimEndingDirectorySeparator(current);
     }
 
     private static string Executable(string name) => OperatingSystem.IsWindows() ? name + ".exe" : name;

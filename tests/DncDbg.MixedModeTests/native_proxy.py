@@ -4,6 +4,7 @@
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 import runpy
 import shutil
@@ -108,8 +109,9 @@ def scenario(adapter, lldb, managed, finish):
             native_ref, native = locals_for(session, stack[0]["id"])
             if visit == 1:
                 check(native["left"] == "19" and native["right"] == "23", str(native))
-                check(session.request("evaluate", dict(frameId=stack[0]["id"], expression="left + right", context="watch"))["result"] == "42",
-                      "Native C expression evaluation was not delegated")
+                evaluation = session.request("evaluate", dict(frameId=stack[0]["id"], expression="left + right", context="repl"))
+                check(evaluation["type"] == "int" and re.fullmatch(r"(?:\(int\) \$\d+ = )?42", evaluation["result"]),
+                      "Native C expression evaluation did not return int 42: " + str(evaluation))
                 if managed and not EXPECT_UNAVAILABLE:
                     invalidated = session.event("invalidated")
                     check(set(invalidated["areas"]) >= {"stacks", "variables"},

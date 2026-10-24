@@ -30,6 +30,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
     private CancellationTokenSource _snapshotCancellation = new();
     private CancellationTokenSource _sessionCancellation = new();
     private CancellationTokenSource? _operation;
+    private CancellationTokenSource? _startupDeadline;
     private NativeAdapterSession? _native;
     private CoreClrInspection? _inspection;
     private long _session, _stop, _inspectionEpoch, _viewEpoch = -1, _snapshotSerial;
@@ -38,9 +39,12 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
     private bool _activeInspection, _started;
     private bool _linesStartAt1 = true, _columnsStartAt1 = true;
     private bool _supportsInvalidated;
+    private bool _supportsMemory;
+    private bool _supportsConfiguration;
     private string? _runtimeDirectory;
     private Exception? _backendFailure;
     private int? _targetPid;
+    private (long Frame, long Stop)? _selectedNativeFrame;
     private Thread? _worker, _eventWorker;
     private volatile bool _stopping, _disconnecting;
     private bool _disconnectResponded, _disposed;
@@ -75,7 +79,6 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
                     if (message.Command is "continue" or "next" or "stepIn" or "stepOut" or "launch" or "attach")
                     {
                         _operation?.Cancel();
-                        Invalidate(execution: true, stopped: false, cancelOperation: true);
                     }
                     else if (message.Command is "pause" or "terminate" or "initialize")
                     {
@@ -196,11 +199,13 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
             ? _references.ResolveFrame(frameValue.GetValue<int>(), stop, inspection) : null;
         VariableReference? variable = arguments["variablesReference"] is JsonValue variableValue
             ? _references.ResolveVariable(variableValue.GetValue<int>(), stop, inspection) : null;
+        if (frame is { NativeId: > 0 })
+            _selectedNativeFrame = (frame.NativeId, stop);
         if (frame?.ManagedId is { } managedFrame || variable?.Managed == true)
         {
             lock (_state) { _activeInspection = true; }
             RequireStop(work);
-            int id = frame?.ManagedId ?? variable!.Id;
+            int id = frame?.ManagedId ?? checked((int)variable!.Id);
             CoreClrInspection view = Inspection();
             object body = command switch
             {
@@ -225,25 +230,47 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         }
         if (frame != null)
             arguments["frameId"] = frame.NativeId;
+        else if (command == "evaluate" && _selectedNativeFrame is { } selected && selected.Stop == stop)
+            arguments["frameId"] = selected.Frame;
         if (variable != null)
             arguments["variablesReference"] = variable.Id;
-        int? nativeFrameContext = frame?.NativeId ?? variable?.NativeFrame;
+        long? nativeFrameContext = frame?.NativeId ?? variable?.NativeFrame
+            ?? (command == "evaluate" ? arguments["frameId"]?.GetValue<long>() : null);
         if (variable?.NativeFrame is { } owningFrame)
             LldbSnapshotTarget.Body(native.Request("scopes", new { frameId = owningFrame }, OperationToken()));
-        Transform(arguments, "sourceReference", id => _references.ResolveSource(id, session));
-        if (command is not ("stackTrace" or "dotnet/nativeStackTrace" or "scopes" or "variables" or "threads"
-            or "readMemory" or "modules" or "loadedSources" or "source" or "breakpointLocations" or "disassemble" or "exceptionInfo"))
+        Transform(arguments, "sourceReference", id => _references.ResolveSource(checked((int)id), session));
+        bool executionControl = command is "continue" or "next" or "stepIn" or "stepOut";
+        bool readOnlyEvaluation = command == "evaluate" && descriptor.Kind == "lldb"
+            && arguments["context"]?.GetValue<string>() is "watch" or "hover";
+        if (readOnlyEvaluation)
+            arguments["context"] = "hover";
+        bool mutation = !executionControl && !readOnlyEvaluation && command is not ("stackTrace" or "dotnet/nativeStackTrace" or "scopes" or "variables" or "threads"
+            or "readMemory" or "modules" or "loadedSources" or "source" or "breakpointLocations" or "disassemble" or "exceptionInfo");
+        if (mutation)
         {
             if (_managed && _inspection != null && !_supportsInvalidated)
                 throw new DebuggerException("Native mutation would invalidate managed inspection references. Advertise supportsInvalidatedEvent or use native-only mode.");
-            Invalidate(execution: false, stopped: null, cancelOperation: false);
-            CloseView();
         }
 
         string backendCommand = command == "dotnet/nativeStackTrace" ? "stackTrace" : command;
-        DapMessage response = native.Request(backendCommand, arguments, OperationToken());
+        if (command == "configurationDone")
+            lock (_state) { _startupDeadline?.CancelAfter(TimeSpan.FromSeconds(30)); }
+        DapMessage response;
+        try { response = native.Request(backendCommand, arguments, OperationToken()); }
+        catch
+        {
+            if (executionControl && work.Stop == StopEpoch())
+                Invalidate(execution: true, stopped: false, cancelOperation: false);
+            throw;
+        }
         if (response.Success == true)
         {
+            if (executionControl && work.Stop == StopEpoch())
+                Invalidate(execution: true, stopped: false, cancelOperation: false);
+            else if (mutation)
+                Invalidate(execution: false, stopped: null, cancelOperation: false);
+            if (executionControl || mutation)
+                CloseView();
             JsonObject body = Object(response.Body);
             if (backendCommand == "stackTrace")
             {
@@ -276,9 +303,11 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         _native = null;
         _initialized = false;
         _managed = false;
+        _supportsMemory = false;
         _started = false;
         _ownsTarget = true;
         _targetPid = null;
+        _selectedNativeFrame = null;
         _targetEnded = false;
         _backendFailure = null;
         _disconnecting = _disconnectResponded = false;
@@ -294,6 +323,8 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         if (response.Success == true)
         {
             JsonObject capabilities = Object(response.Body);
+            _supportsMemory = capabilities["supportsReadMemoryRequest"]?.GetValue<bool>() == true;
+            _supportsConfiguration = capabilities["supportsConfigurationDoneRequest"]?.GetValue<bool>() == true;
             string? reported = descriptor.Kind == "lldb"
                 ? NativeAdapterLocator.DapVersion(_native, JsonSerializer.SerializeToElement(capabilities, DapJson.Options), OperationToken()) : null;
             if (descriptor.Version != null && reported != null && reported != descriptor.Version)
@@ -316,37 +347,48 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
     private void Start(DapMessage request, JsonObject arguments, NativeAdapterSession native)
     {
         if (_started && !_targetEnded)
-            throw new DebuggerException("A native target is already active. Reinitialize or use the native backend's restart request.");
+            throw new DebuggerException("A native target is already active or its startup outcome is unknown. Disconnect and reinitialize before another startup.");
         if (arguments["nativeDebugging"]?.GetValue<bool>() == true)
             throw new DebuggerException("The direct nativeDebugging flag is retired. Native proxy mode already has one native execution owner.");
-        _ownsTarget = request.Command == "launch";
         JsonNode? option = arguments["managedInspection"];
         if (option != null && option is not JsonObject
             && (option is not JsonValue scalar || !scalar.TryGetValue<bool>(out _)))
             throw new DebuggerException("managedInspection must be a Boolean or a CoreCLR options object.");
-        _managed = option is JsonObject || option is JsonValue value && value.TryGetValue<bool>(out bool enabled) && enabled;
-        _runtimeDirectory = (option as JsonObject)?["runtimeDirectory"]?.GetValue<string>();
+        bool managed = option is JsonObject || option is JsonValue value && value.TryGetValue<bool>(out bool enabled) && enabled;
         if (option is JsonObject settings && settings["runtime"]?.GetValue<string>() is { } runtime && runtime != "coreclr")
             throw new DebuggerException("Only the read-only CoreCLR inspection provider is implemented.");
-        if (_managed && descriptor.Kind != "lldb")
+        if (managed && descriptor.Kind != "lldb")
             throw new DebuggerException("Managed inspection currently requires LLDB's OS-thread and register DAP contract.");
-        if (_managed && request.Command == "attach")
+        if (managed && request.Command == "attach")
             throw new DebuggerException("Attach with managed inspection is not supported: the real CoreCLR post-continue attach proof is not green. Use a native-owned launch.");
-        if (_managed && new[] { "attachCommands", "launchCommands", "initCommands", "platformName", "coreFile" }.Any(arguments.ContainsKey))
+        if (managed && (new[] { "attachCommands", "launchCommands", "initCommands", "preInitCommands",
+                "postRunCommands", "stopCommands", "exitCommands", "terminateCommands", "platformName", "coreFile",
+                "targetTriple", "targetPlatform", "gdbRemotePort", "gdbRemoteHostname", "processCreateCommands" }.Any(arguments.ContainsKey)
+            || arguments["preRunCommands"] is { } preRun && (preRun is not JsonArray commands || commands.Any(c =>
+                c is not JsonValue command || !command.TryGetValue<string>(out var text)
+                || !Regex.IsMatch(text, "^settings set target\\.(output|error)-path \"[^\"`\\r\\n]+\"$", RegexOptions.CultureInvariant)))))
             throw new DebuggerException("Managed inspection is currently local/matching-host only; use native-only mode for remote/device sessions.");
         arguments.Remove("managedInspection");
+        Invalidate(execution: true, stopped: false, cancelOperation: false);
+        CloseView();
+        _ownsTarget = request.Command == "launch";
+        _managed = managed;
+        _runtimeDirectory = (option as JsonObject)?["runtimeDirectory"]?.GetValue<string>();
         _targetEnded = false;
         _started = true;
         long session = Session();
         CancellationToken sessionToken;
         lock (_state) { sessionToken = _sessionCancellation.Token; }
         var startup = CancellationTokenSource.CreateLinkedTokenSource(sessionToken, _lifetime.Token);
-        startup.CancelAfter(TimeSpan.FromSeconds(30));
+        if (!_supportsConfiguration)
+            startup.CancelAfter(TimeSpan.FromSeconds(30));
+        lock (_state) { _startupDeadline = startup; }
         Task<DapMessage> pending;
         try { pending = native.SendAsync(request.Command!, arguments, startup.Token); }
         catch
         {
             startup.Dispose();
+            lock (_state) { if (_startupDeadline == startup) _startupDeadline = null; }
             throw;
         }
         // DAP permits launch/attach responses after configurationDone; never block configuration admission.
@@ -370,6 +412,10 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
                 if (!_stopping)
                     client.SendErrorResponse(request, "Native startup failed with unknown target outcome; disconnect or reinitialize before retrying: " + error.Message);
             }
+            finally
+            {
+                lock (_state) { if (_startupDeadline == startup) _startupDeadline = null; }
+            }
         });
         lock (_starts)
             _starts.Add(completion);
@@ -386,7 +432,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
                 managed = Inspection().GetStackTrace(thread);
                 body["dncdbgManagedInspection"] = new JsonObject { ["status"] = "read-only", ["snapshot"] = _snapshotSerial };
             }
-            catch (Exception error) when (error is DebuggerException or DebugException or PlatformNotSupportedException)
+            catch (Exception error) when (error is not (OperationCanceledException or OutOfMemoryException))
             {
                 log("Managed inspection unavailable: " + error);
                 CloseView();
@@ -398,15 +444,19 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         }
         VerifyStop(work);
         long stop = StopEpoch(), inspection = InspectionEpoch();
+        var nativePCs = frames.OfType<JsonObject>().Select(f => f["instructionPointerReference"] is JsonValue pc && pc.TryGetValue<string>(out var text)
+                && ulong.TryParse(text.AsSpan(text.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? 2 : 0),
+                    NumberStyles.HexNumber, CultureInfo.InvariantCulture, out ulong address) ? (ulong?)address : null)
+            .Where(pc => pc != null).GroupBy(pc => pc!.Value).ToDictionary(g => g.Key, g => g.Count());
         foreach (JsonNode? item in frames)
         {
             JsonObject frame = item as JsonObject ?? throw new DebuggerException("Invalid native stack frame.");
-            int nativeId = Integer(frame, "id");
+            long nativeId = frame["id"]?.GetValue<long>() ?? throw new DebuggerException("Missing native frame id.");
             string? pc = frame["instructionPointerReference"]?.GetValue<string>();
             ManagedInspectionFrame[] matches = pc != null && ulong.TryParse(pc.AsSpan(pc.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? 2 : 0),
                 NumberStyles.HexNumber, CultureInfo.InvariantCulture, out ulong address)
                 ? managed.Where(f => f.InstructionPointer == address).ToArray() : [];
-            ManagedInspectionFrame? match = matches.Length == 1 ? matches[0] : null;
+            ManagedInspectionFrame? match = matches.Length == 1 && nativePCs[matches[0].InstructionPointer] == 1 ? matches[0] : null;
             if (match != null)
             {
                 FrameInfo source = match.Frame;
@@ -429,6 +479,8 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
     {
         if (!_managed)
             throw new DebuggerException("Enable managedInspection for read-only CoreCLR inspection.");
+        if (!_supportsMemory)
+            throw new DebuggerException("The native backend does not advertise supportsReadMemoryRequest; read-only CoreCLR inspection is unavailable.");
         lock (_state)
             if (!_stopped || !_allStopped || _targetEnded)
                 throw new DebuggerException("Managed inspection requires a live all-threads-stopped native session.");
@@ -657,12 +709,12 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
     private static EvaluateResponseBody Evaluation(VariableInfo variable) =>
         new() { Result = variable.Value, Type = variable.Type, VariablesReference = 0 };
 
-    private static void Transform(JsonNode? node, string property, Func<int, int> map)
+    private static void Transform(JsonNode? node, string property, Func<long, long> map)
     {
         if (node is JsonObject obj)
             foreach (var pair in obj.ToArray())
                 if (pair.Key == property && pair.Value is JsonValue value)
-                    obj[pair.Key] = map(value.GetValue<int>());
+                    obj[pair.Key] = map(value.GetValue<long>());
                 else
                     Transform(pair.Value, property, map);
         else if (node is JsonArray array)
@@ -678,10 +730,13 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
 
     private bool RequestDisconnect(DapMessage request)
     {
-        _disconnecting = true;
         bool stopped, allStopped;
         lock (_state)
         {
+            _disconnecting = true;
+            _disconnectResponded = false;
+            if (request.GetArguments<DisconnectArguments>()?.TerminateDebuggee is { } terminate)
+                _ownsTarget = terminate;
             stopped = _stopped;
             allStopped = _allStopped;
             _operation?.Cancel();
@@ -689,7 +744,9 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         Invalidate(true, false, true);
         var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         _requests.Add(new Work(request, StopEpoch(), completion, stopped, allStopped));
-        return completion.Task.WaitAsync(TimeSpan.FromSeconds(35)).GetAwaiter().GetResult();
+        // Native requests and interrupted writes have their own bounds. Do not let
+        // an unrelated admission timer throw out of Run and escalate cleanup intent.
+        return completion.Task.GetAwaiter().GetResult();
     }
 
     private void Disconnect(Work work)

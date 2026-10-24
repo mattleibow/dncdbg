@@ -43,7 +43,9 @@ CLR Continue is used in this mode. The data target exposes no write/control
 interface. Releasing a virtual view is not detaching the native debugger.
 
 Managed frames are matched to native frames only by **exact instruction-pointer
-identity on the same OS thread**. Unmatched native/JIT frames stay native; the
+identity on the same OS thread, unique on both sides**. Ambiguous recursive or
+duplicate PCs stay native rather than being assigned another frame's locals.
+Unmatched native/JIT frames stay native; the
 proxy does not append invented frames or guess their order. `[Managed]` frames
 can expose portable-PDB source and primitive argument/local values. C/C++
 variables and expressions remain native-backend operations.
@@ -53,6 +55,11 @@ lifetimes. Frame/variable IDs are not reused across native stops; managed
 references additionally belong to a specific inspection generation. Source
 references belong to one backend session. Reverse requests such as
 `runInTerminal` retain their backend request identity through the proxy.
+Remote frame, variable and source IDs are stored as signed 64-bit values;
+client-facing IDs remain separate proxy-owned 32-bit values. Rejected launch,
+attach or continue/step requests preserve the live stop epoch and references.
+Resume epochs advance only after accepted control, a native event, or an
+uncertain execution outcome, not merely when a request enters the queue.
 Replies are bound to their originating backend generation. A client timeout or
 failure produces a failed reply to that backend, never to its replacement.
 Each native request has its own cancellation/timeout registration; one timeout
@@ -65,6 +72,11 @@ An unsupported restart is rejected without expiring the unchanged stop/frames.
 An unanswered startup retains admission, even without target evidence: process,
 initialized or stopped events can precede its missing response. Disconnect or
 reinitialize to reconcile the session before another launch.
+The startup response deadline begins at `configurationDone`, not during IDE
+breakpoint/configuration setup. An explicit failed startup response permits a
+retry; a timeout does not establish absence of a target.
+For backends that do not advertise `configurationDone`, the deadline starts
+with startup instead, so the absence of that optional phase cannot hang launch.
 
 Writes use a cancellable async serialization gate and bounded async pipe
 write/flush awaits. Cancellation while waiting for the gate does not affect
@@ -138,6 +150,9 @@ The RID, executable version, contained paths, license declaration and license
 file are checked. These are packaging checks, not a legal audit of arbitrary
 third-party contents. Do **not** label/repackage Xcode as an upstream LLVM bundle.
 Xcode is discovered and executed in place under its own distribution terms.
+Bundle roots are normalized without trailing separators. Manifest, executable
+and license paths are checked after resolving file and ancestor-directory
+symlinks; they must remain inside the resolved bundle root.
 
 LLVM/LLDB is **Apache-2.0 WITH LLVM-exception**. Existing ClrDebug and DbgShim
 dependencies remain MIT. Native mode adds no native debugger NuGet package and
@@ -166,6 +181,11 @@ Use the native adapter's ordinary source/function/instruction breakpoints.
 a scalar local/argument name use the read-only view for those frames.
 Calls, arithmetic C# expressions, properties and managed mutation fail with a
 read-only diagnostic. Native-frame evaluation is forwarded to the native engine.
+For LLDB, `watch` and `hover` use its read-only **hover** variable-path lookup
+(`eDynamicDontRunTarget`), never its fallback expression parser. They preserve
+managed references and do not produce an invalidation/IDE refresh loop. Use an
+explicit native REPL evaluation for arbitrary expressions or commands; those
+can execute/mutate the native target and invalidate managed inspection.
 
 `dotnet/nativeStackTrace` returns the un-enriched native view.
 `dotnet/managedStackTrace` requests strict read-only managed inspection.
@@ -178,6 +198,12 @@ PID, stop generation and managed snapshot serial. If optional enrichment is
 unavailable, native frames remain usable but the response includes
 `dncdbgManagedInspection.status:"unavailable"` and a visible diagnostic; it is
 not a successful managed-debugging result.
+The backend must advertise `supportsReadMemoryRequest` before any CoreCLR
+module/DAC lookup. Older adapters without memory reads remain native-only;
+the proxy must not send them an unknown `readMemory` request. Malformed,
+missing or incompatible inspection metadata produces explicit
+`status:"unavailable"` while preserving native stack frames. Cancellation
+still rejects the request instead of returning a stale stack.
 
 The CLR view requires an all-threads-stopped, matching-host, little-endian,
 64-bit CoreCLR target. A module image/header check guards OS/CPU/endianness.
@@ -201,12 +227,17 @@ banks are not required. Requested-but-missing registers fail inspection instead
 of supplying invented zero values. Partial memory reads retain their valid
 prefix when the next page is unmapped.
 
-Native evaluation or breakpoint mutation at a stop expires the managed view.
+Native REPL evaluation or successful breakpoint mutation at a stop expires the managed view.
 Clients must advertise `supportsInvalidatedEvent` to mutate an active managed
 view; the proxy sends stacks/variables invalidation and the client refreshes.
 Backend frame-scoped invalidation is broadened to stacks/variables instead of
 leaking backend frame IDs. Unsupported cancel/restart capabilities stay masked
 on both initialize and later capability events.
+Frame-less native evaluation restores the last explicit client frame, rather
+than inheriting an internal register read's selected frame. Binary-formatted
+x64 EFLAGS is supported. If the backend omits optional MXCSR, integer/control
+context remains usable but the floating-point validity flag is cleared and a
+diagnostic is emitted; no floating-point bank is fabricated.
 
 ### Execution versus inspection matrix
 
@@ -267,6 +298,11 @@ No private Apple debugger component is downloaded or bundled.
 Native `initCommands`, `preRunCommands`, `launchCommands`, `attachCommands` and
 other backend arguments are forwarded rather than implemented here. Remote or
 custom launch commands cannot opt into the current local CoreCLR provider.
+The managed provider rejects pre/post/stop/exit/terminate commands, alternate
+triples/platforms and remote launch vectors. The only pre-run command exception
+is a literal `settings set target.output-path "..."` or
+`settings set target.error-path "..."` to give detached target I/O an independent
+file lifetime; embedded command/expression text is not allowed.
 This is an extensible native backend architecture, **not** a claim that
 Android/iOS deployment or Mono/AOT managed debugging is validated.
 
@@ -340,7 +376,7 @@ The new timeout/control regressions were red before their production fixes:
 | Contract | Exact pre-fix failure | Post-fix result |
 | --- | --- | --- |
 | One native request times out while another is pending | `TaskCanceledException: A task was canceled.` on the unrelated task | Unrelated request completes after its own reply |
-| Startup timeout, then retry launch | `A native target is already active. Reinitialize or use the native backend's restart request.` | Second launch admitted |
+| Startup timeout, then retry launch | `A native target is already active. Reinitialize or use the native backend's restart request.` | Superseded by review: only explicit startup failure releases admission; timeout requires reconciliation |
 | Client does not answer reverse request | `Reverse timeout left the originating backend unanswered: None` | Origin receives failed `request_seq:500` response |
 | Continue refused at partial stop | Inspection reaches CoreCLR lookup instead of the `all-threads-stopped` guard | Prior partial-stop state preserved |
 | Managed attach before proof | `success:True` | Explicit unsupported attach error; restart is also rejected |
@@ -349,6 +385,14 @@ Exact transcripts are retained in `evidence/proxy-lifecycle-red-green.txt`
 under `tests/DncDbg.MixedModeTests`; complete protocol captures and prior reds
 remain under ignored `build/validation/mixed-mode/`. No prior red evidence or
 managed assertion was replaced by a weaker assertion.
+The workflow also emits a notice, job summary and `proof-disposition.json`
+artifact distinguishing overlay **SKIP** from native-only success.
+
+The expanded review's register test was red on both public Linux and Windows
+x64 in [run 40090679373](https://github.com/mattleibow/dncdbg/actions/runs/40090679373):
+`An absent optional MXCSR lost the valid integer/control context.` This was a
+test-only commit before the register fix. Additional exact red/green excerpts
+are committed in `evidence/expanded-proxy-review-red-green.txt`.
 
 Real attach reached SIGSTOP with a verified native checkpoint breakpoint, but
 did not reach the checkpoint after continue. The current Xcode adapter also
@@ -374,6 +418,8 @@ Missing/nonnamable PE metadata is not silently claimed as named-source support.
 
 - [LLDB DAP distribution/configuration](https://lldb.llvm.org/use/lldbdap.html)
   and [public DAP extensions](https://lldb.llvm.org/resources/lldbdap-extensions.html).
+- [Public LLDB hover evaluation](https://github.com/llvm/llvm-project/blob/llvmorg-18.1.8/lldb/tools/lldb-dap/lldb-dap.cpp#L1316-L1330):
+  variable-path lookup with `eDynamicDontRunTarget`; no expression-parser fallback for hover.
 - [LLDB remote platforms/server architecture](https://lldb.llvm.org/use/remote.html).
 - [Android NDK native debugging](https://developer.android.com/ndk/guides/debug).
 - [ICLRDebugging.OpenVirtualProcess](https://learn.microsoft.com/dotnet/framework/unmanaged-api/debugging/iclrdebugging-openvirtualprocess-method)

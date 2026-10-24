@@ -118,6 +118,7 @@ jobs:
             Tee-Object build/validation/mixed-mode/backend-contracts.log
           exit $LASTEXITCODE
       - name: Validate native-only LLDB relay and lifecycle
+        id: nativeproof
         shell: pwsh
         run: |
           $adapter = if ($IsWindows) { "bin/dncdbg-dap.exe" } else { "bin/dncdbg-dap" }
@@ -150,6 +151,7 @@ jobs:
             Write-Output 'Managed overlay unavailable on this unproven CI configuration; native-only results are separate.'
           }
       - name: Validate unchanged strict overlay assertions on proven configuration
+        id: overlayproof
         if: steps.overlay.outputs.supported == 'true'
         shell: pwsh
         run: |
@@ -160,6 +162,23 @@ jobs:
           python tests/DncDbg.MixedModeTests/proxy_contracts.py --adapter $adapter --lldb-dap $env:LLDB_DAP 2>&1 |
             Tee-Object build/validation/mixed-mode/managed-overlay-failures.log
           exit $LASTEXITCODE
+      - name: Record separate native and managed-overlay proof disposition
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force build/validation/mixed-mode | Out-Null
+          $eligible = '${{ steps.overlay.outputs.supported }}' -eq 'true'
+          $native = '${{ steps.nativeproof.outcome }}'
+          $overlay = '${{ steps.overlayproof.outcome }}'
+          $message = if (-not $eligible) {
+            'SKIP: hosted managed overlay is unproven on this configuration; not a managed-inspection pass.'
+          } else { "Strict managed overlay: $overlay" }
+          if (-not $eligible) { Write-Output "::notice title=Managed overlay proof SKIP::$message" }
+          @("## Experimental native proxy proof", "", "Native-only LLDB relay/lifecycle: $native", "", $message,
+            "", 'No managed source breakpoints, stepping, exception control, func-eval or device parity claimed.') |
+            Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          @{ nativeOnly = $native; managedOverlayEligible = $eligible; managedOverlay = $overlay; note = $message } |
+            ConvertTo-Json | Out-File build/validation/mixed-mode/proof-disposition.json -Encoding utf8
       - name: Verify unchanged managed debugger regressions
         shell: pwsh
         run: |

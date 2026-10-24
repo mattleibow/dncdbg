@@ -1,0 +1,172 @@
+Expanded review baselines: fbf177cc/853df5a8, before the corresponding fixes.
+Tests were added first; traceback paths/lines are the captured pre-fix values.
+The optional MXCSR regression was separately proven red on public x64 CI at
+test-only commit dab7287bbf6460bbd3d22fc57d1c57451a6bcb3d:
+https://github.com/mattleibow/dncdbg/actions/runs/40090679373
+
+=== review-capability-red.log ===
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "tests/DncDbg.MixedModeTests/proxy_contracts.py", line 464, in inspection_capability_contract
+    check("supportsReadMemoryRequest" in status["message"]
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+          and peer.request("ownershipStatus")["moduleReads"] == 0, "Unsupported memory inspection reached module/DAC reads: " + str(status))
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "tests/DncDbg.MixedModeTests/run.py", line 23, in check
+    raise AssertionError(message)
+AssertionError: Unsupported memory inspection reached module/DAC reads: {'status': 'unavailable', 'message': 'A separately loaded CoreCLR runtime module is unavailable. Single-file/static runtime images, Mono/NativeAOT and not-yet-loaded runtimes are not supported by this inspection provider.'}
+
+=== review-malformed-module-red.log ===
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "tests/DncDbg.MixedModeTests/proxy_contracts.py", line 459, in inspection_capability_contract
+    body = peer.request("stackTrace", dict(threadId=7))
+  File "tests/DncDbg.MixedModeTests/run.py", line 103, in request
+    return self.response(self.send(command, arguments), success)
+           ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "tests/DncDbg.MixedModeTests/run.py", line 97, in response
+    check(response.get("success") == success, str(response))
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "tests/DncDbg.MixedModeTests/run.py", line 23, in check
+    raise AssertionError(message)
+AssertionError: {'seq': 6, 'type': 'response', 'command': 'stackTrace', 'request_seq': 4, 'success': False, 'message': "The requested operation requires an element of type 'String', but the target element has type 'Number'.", 'body': {'error': {'id': 1, 'format': "The requested operation requires an element of type 'String', but the target element has type 'Number'."}}}
+
+=== review-wide-ids-red.log ===
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "tests/DncDbg.MixedModeTests/proxy_contracts.py", line 477, in wide_reference_contract
+    frame = peer.request("stackTrace", dict(threadId=7))["stackFrames"][0]
+            ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "tests/DncDbg.MixedModeTests/run.py", line 103, in request
+    return self.response(self.send(command, arguments), success)
+           ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "tests/DncDbg.MixedModeTests/run.py", line 97, in response
+    check(response.get("success") == success, str(response))
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "tests/DncDbg.MixedModeTests/run.py", line 23, in check
+    raise AssertionError(message)
+AssertionError: {'seq': 6, 'type': 'response', 'command': 'stackTrace', 'request_seq': 4, 'success': False, 'message': "An element of type 'Number' cannot be converted to a 'System.Int32'.", 'body': {'error': {'id': 1, 'format': "An element of type 'Number' cannot be converted to a 'System.Int32'."}}}
+
+=== review-refused-admission-red.log ===
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "tests/DncDbg.MixedModeTests/proxy_contracts.py", line 501, in refused_admission_contract
+    peer.request("scopes", dict(frameId=frame["id"]))
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "tests/DncDbg.MixedModeTests/run.py", line 103, in request
+    return self.response(self.send(command, arguments), success)
+           ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "tests/DncDbg.MixedModeTests/run.py", line 97, in response
+    check(response.get("success") == success, str(response))
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "tests/DncDbg.MixedModeTests/run.py", line 23, in check
+    raise AssertionError(message)
+AssertionError: {'seq': 9, 'type': 'response', 'command': 'scopes', 'request_seq': 7, 'success': False, 'message': 'The frame reference is stale or unknown.', 'body': {'error': {'id': 1, 'format': 'The frame reference is stale or unknown.'}}}
+
+=== review-watch-red.log ===
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "tests/DncDbg.MixedModeTests/proxy_contracts.py", line 585, in native_watch_contract
+    peer.request("evaluate", dict(frameId=frames[0]["id"], expression="phase", context=context))
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "tests/DncDbg.MixedModeTests/run.py", line 103, in request
+    return self.response(self.send(command, arguments), success)
+           ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "tests/DncDbg.MixedModeTests/run.py", line 97, in response
+    check(response.get("success") == success, str(response))
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "tests/DncDbg.MixedModeTests/run.py", line 23, in check
+    raise AssertionError(message)
+AssertionError: {'seq': 411, 'type': 'response', 'command': 'evaluate', 'request_seq': 6, 'success': False, 'message': 'Native mutation would invalidate managed inspection references. Advertise supportsInvalidatedEvent or use native-only mode.', 'body': {'error': {'id': 1, 'format': 'Native mutation would invalidate managed inspection references. Advertise supportsInvalidatedEvent or use native-only mode.'}}}
+
+=== review-frameless-eval-red.log ===
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "tests/DncDbg.MixedModeTests/proxy_contracts.py", line 606, in frameless_evaluation_contract
+    check(peer.request("evaluate", dict(expression="value", context="hover"))["result"] == "1",
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+          "Frame-less evaluate observed internal/backend frame selection instead of client frame")
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "tests/DncDbg.MixedModeTests/run.py", line 23, in check
+    raise AssertionError(message)
+AssertionError: Frame-less evaluate observed internal/backend frame selection instead of client frame
+
+=== review-launch-scope-red.log ===
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "tests/DncDbg.MixedModeTests/proxy_contracts.py", line 638, in managed_launch_scope_contract
+    check(not response["success"] and "local" in response["message"].lower(),
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+          "Managed launch accepted custom execution vector " + key + ": " + str(response))
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "tests/DncDbg.MixedModeTests/run.py", line 23, in check
+    raise AssertionError(message)
+AssertionError: Managed launch accepted custom execution vector preRunCommands: {'seq': 2, 'type': 'response', 'command': 'launch', 'request_seq': 2, 'success': True}
+
+=== review-duplicate-native-pc-red.log ===
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "tests/DncDbg.MixedModeTests/proxy_contracts.py", line 624, in duplicate_native_pc_contract
+    check(not any("[Managed]" in f["name"] for f in frames), "Ambiguous duplicate native PCs were enriched as unique managed frames")
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "tests/DncDbg.MixedModeTests/run.py", line 23, in check
+    raise AssertionError(message)
+AssertionError: Ambiguous duplicate native PCs were enriched as unique managed frames
+
+=== review-startup-configuration-red.log ===
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "tests/DncDbg.MixedModeTests/proxy_contracts.py", line 405, in startup_configuration_contract
+    raise AssertionError("Launch deadline expired before configurationDone: " + str(response))
+AssertionError: Launch deadline expired before configurationDone: {'seq': 3, 'type': 'response', 'command': 'launch', 'request_seq': 2, 'success': False, 'message': 'Native startup failed with unknown target outcome; disconnect or reinitialize before retrying: A task was canceled.', 'body': {'error': {'id': 1, 'format': 'Native startup failed with unknown target outcome; disconnect or reinitialize before retrying: A task was canceled.'}}}
+
+=== review-bundle-trailing-red.log (terminal assertion) ===
+AssertionError: Valid bundle with trailing separator was rejected: Error: Native debugger bundle paths must stay inside the bundle.
+
+=== review-bundle-symlink-red.log ===
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "tests/DncDbg.MixedModeTests/proxy_contracts.py", line 171, in bundle_links_contract
+    check(result.returncode == 1 and "inside the bundle" in result.stderr.lower(),
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+          "Symlinked " + key + " escaped the bundle: " + result.stdout + result.stderr)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "tests/DncDbg.MixedModeTests/run.py", line 23, in check
+    raise AssertionError(message)
+AssertionError: Symlinked executable escaped the bundle: {"kind":"dap","path":"/Users/matthew/.copilot/repos/copilot-worktrees/dncdbg/mattleibow-fantastic-guide/build/validation/mixed-mode/bundle-links/adapter","arguments":[],"source":"upstream LLVM bundle (manifest declaration)","rid":"osx-arm64","warnings":[]}
+
+=== Public x64 NativeTests red, run 40090679373 ===
+Linux:
+Managed snapshot context for OS thread 7 failed: The given key 'mxcsr' was not present in the dictionary.
+Unhandled exception. System.InvalidOperationException: An absent optional MXCSR lost the valid integer/control context.
+   at Program.<Main>$(String[] args) in /home/runner/work/dncdbg/dncdbg/tests/DncDbg.NativeTests/Program.cs:line 86
+   at Program.<Main>(String[] args)
+Windows:
+Managed snapshot context for OS thread 7 failed: The given key 'mxcsr' was not present in the dictionary.
+Unhandled exception. System.InvalidOperationException: An absent optional MXCSR lost the valid integer/control context.
+   at Program.<Main>$(String[] args) in D:\a\dncdbg\dncdbg\tests\DncDbg.NativeTests\Program.cs:line 86
+   at Program.<Main>(String[] args)
+
+=== Post-fix local tests, same contracts ===
+PASS unsupported memory and malformed managed metadata degrade to explicit native-only stacks
+PASS 64-bit native frame/variable/source identities stay opaque behind client int IDs
+PASS rejected startup and refused native control preserve the live stop and references
+PASS frame-less evaluation restores the client-selected native frame
+PASS managed launch rejects custom command/triple/remote execution vectors
+PASS bundle canonical path validation covers trailing separators, file links and ancestor links
+PASS startup response deadline begins at configurationDone, not preconfiguration setup
+PASS native watch/hover preserves managed handles without unsolicited invalidation; client=False
+PASS native watch/hover preserves managed handles without unsolicited invalidation; client=True
+PASS managed overlay requires native as well as managed PC uniqueness
+PASS native binary-formatted EFLAGS
+
+The native C expression assertion still requires int 42. It now uses explicit
+REPL context to distinguish intentional native execution from read-only hover,
+and accepts only 42 or LLDB's documented "(int) $<number> = 42" presentation.
+
+=== Additional startup-deadline regression, before fixing optional-phase handling ===
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "tests/DncDbg.MixedModeTests/proxy_contracts.py", line 476, in startup_without_configuration_contract
+    raise AssertionError("A backend without configurationDone has no bounded startup deadline") from None
+AssertionError: A backend without configurationDone has no bounded startup deadline

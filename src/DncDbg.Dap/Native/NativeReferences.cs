@@ -2,8 +2,8 @@ using DncDbg.Engine;
 
 namespace DncDbg.Dap.Native;
 
-internal sealed record FrameReference(int NativeId, int? ManagedId, long Stop, long Inspection);
-internal sealed record VariableReference(int Id, bool Managed, long Stop, long Inspection, int? NativeFrame);
+internal sealed record FrameReference(long NativeId, int? ManagedId, long Stop, long Inspection);
+internal sealed record VariableReference(long Id, bool Managed, long Stop, long Inspection, long? NativeFrame);
 
 /// <summary>Client frame/variable identities are never reused or shared between native and managed owners.</summary>
 internal sealed class NativeReferences
@@ -12,12 +12,12 @@ internal sealed class NativeReferences
     private readonly Dictionary<FrameReference, int> _frameIds = [];
     private readonly Dictionary<int, VariableReference> _variables = [];
     private readonly Dictionary<VariableReference, int> _variableIds = [];
-    private readonly Dictionary<int, (int Native, long Session)> _sources = [];
-    private readonly Dictionary<(int Native, long Session), int> _sourceIds = [];
+    private readonly Dictionary<int, (long Native, long Session)> _sources = [];
+    private readonly Dictionary<(long Native, long Session), int> _sourceIds = [];
     private readonly object _gate = new();
     private int _next;
 
-    public int Frame(int nativeId, int? managedId, long stop, long inspection)
+    public int Frame(long nativeId, int? managedId, long stop, long inspection)
     {
         lock (_gate)
         {
@@ -31,7 +31,7 @@ internal sealed class NativeReferences
         }
     }
 
-    public int Variable(int remoteId, bool managed, long stop, long inspection, int? nativeFrame = null)
+    public int Variable(long remoteId, bool managed, long stop, long inspection, long? nativeFrame = null)
     {
         if (remoteId == 0 && !managed)
             return 0;
@@ -47,7 +47,7 @@ internal sealed class NativeReferences
         }
     }
 
-    public int Source(int nativeId, long session)
+    public int Source(long nativeId, long session)
     {
         if (nativeId == 0)
             return 0;
@@ -78,7 +78,7 @@ internal sealed class NativeReferences
                 : throw new DebuggerException("The variables reference is stale or unknown.");
     }
 
-    public int ResolveSource(int id, long session)
+    public long ResolveSource(int id, long session)
     {
         if (id == 0)
             return 0;

@@ -80,6 +80,10 @@ if options.lldb:
                     address = module.get("addressRange", "")
                     if address.startswith("0x"):
                         module["addressRange"] = str(int(address.split("-")[0].strip(), 16))
+            if options.mode == "duplicate-native-pc" and message.get("command") == "stackTrace":
+                frames = message.get("body", {}).get("stackFrames", [])
+                copies = [dict(frame, id=frame["id"] + 100000000) for frame in frames]
+                frames.extend(copies)
             write(sys.stdout.buffer, message)
 
     receiver = threading.Thread(target=receive, daemon=True)
@@ -165,7 +169,7 @@ while True:
             sys.stdout.buffer.write(b"Content-Length: 15\r\n\r\n{\"success\": []}")
             sys.stdout.buffer.flush()
             break
-        response(request, dict(supportsConfigurationDoneRequest=True, supportsReadMemoryRequest=options.mode != "no-memory",
+        response(request, dict(supportsConfigurationDoneRequest=options.mode != "startup-no-configuration", supportsReadMemoryRequest=options.mode != "no-memory",
                                supportsModulesRequest=True, supportsCancelRequest=True,
                                **{"$__lldb_version": "lldb version " + ("99.0.0" if options.mode == "version-mismatch" else "21.1.8")}))
         if options.mode == "blocked-writes":
@@ -179,7 +183,11 @@ while True:
                 time.sleep(0.01)
     elif command in ("launch", "attach"):
         launch_count += 1
-        if options.mode == "startup-timeout" and launch_count == 1:
+        if options.mode in ("startup-timeout", "startup-no-configuration") and launch_count == 1:
+            continue
+        if options.mode == "startup-config" and launch_count == 1:
+            deferred = request
+            event("initialized")
             continue
         if options.mode == "startup-evidence" and launch_count == 1:
             event("process", dict(systemProcessId=os.getpid(), name="test-target-evidence", isLocalProcess=True))
@@ -189,7 +197,7 @@ while True:
         if options.mode == "startup-failure" and launch_count == 1:
             response(request, success=False, message="Explicit startup rejection")
             continue
-        if options.mode in ("detach-stall", "detach-refused"):
+        if options.mode in ("detach-stall", "detach-refused", "dead-disconnect"):
             owned_target = subprocess.Popen([sys.executable, __file__, "--target-gate", str(options.barrier)],
                                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             event("process", dict(systemProcessId=owned_target.pid, name="owned-test-target", isLocalProcess=True))
@@ -197,6 +205,8 @@ while True:
         event("initialized")
     elif command == "configurationDone":
         response(request)
+        if options.mode == "startup-config":
+            response(deferred)
         event("stopped", dict(reason="breakpoint", threadId=7, allThreadsStopped=options.mode != "refused-control"))
     elif command == "stackTrace":
         response(request, dict(totalFrames=2, stackFrames=[dict(id=1, name="native", line=3, column=1,
@@ -244,6 +254,9 @@ while True:
     elif command == "threads":
         response(request, dict(threads=[dict(id=7, name="Native")]))
     elif command == "evaluate":
+        if options.mode == "selected-frame" and "frameId" not in args:
+            response(request, dict(result=str(selected_frame), variablesReference=0))
+            continue
         response(request, dict(result=str(args.get("frameId", selected_frame)) if options.mode == "selected-frame" else "42",
                                variablesReference=1), success=args.get("frameId", selected_frame) in (1, 2))
     elif command == "reverse":
@@ -292,6 +305,12 @@ while True:
                                if options.mode == "malformed-module" else []))
     elif command == "ownershipStatus":
         response(request, dict(launches=launch_count, disconnects=disconnects, moduleReads=module_reads))
+    elif command == "selectOtherFrame":
+        selected_frame = 2
+        response(request)
+    elif command == "die":
+        response(request)
+        os._exit(0)
     elif command == "readMemory" and options.mode == "partial-memory":
         address = int(args["memoryReference"], 16)
         if address == 0x1000:

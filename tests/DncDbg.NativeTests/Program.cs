@@ -6,14 +6,15 @@ if (args.Length is < 2 or > 3)
     throw new ArgumentException("Supply the public Python executable and fake_native_adapter.py test peer.");
 string python = args[0], fake = args[1];
 
-if (args.Length == 3 && args[2] == "binary-flags")
+if (args.Length == 2 || args[2] == "binary-flags")
 {
     var method = typeof(LldbSnapshotTarget).GetMethod("Number", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
     ulong value = (ulong)method.Invoke(null, [new Dictionary<string, string> { ["eflags"] = "0b0000001000000010 [ IF ]" }, "eflags"])!;
     if (value != 0x202)
         throw new InvalidOperationException("Binary EFLAGS was misparsed.");
     Console.WriteLine("PASS native binary-formatted EFLAGS");
-    return;
+    if (args.Length == 3)
+        return;
 }
 
 if (args.Length == 2 || args[2] == "timeout")

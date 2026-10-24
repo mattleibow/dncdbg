@@ -294,6 +294,16 @@ How to read the blocks below:
 ✅  filterOptions?: ExceptionFilterOptions[];
 ❌  exceptionOptions?: ExceptionOptions[];
 ```
+The `all`, `user-unhandled`, and `unhandled` filters accept comma/whitespace-separated
+exception type conditions. Each `!TypeName` excludes only that type; it does not
+enable other types. Matching exclusions override positive or unconditional
+entries across both `filters` and `filterOptions`, regardless of their order.
+A lone `!` token is ignored. Entries without any remaining condition cover all
+types. Unhandled exceptions stop by default even when the filter is omitted or
+has only nonmatching positive conditions; only a matching exclusion on the
+`unhandled` filter suppresses that stop. Exclusions on `all` or `user-unhandled`
+do not suppress the final unhandled stop.
+
 #### SetExceptionBreakpointsResponse
 ```text
 ✅  breakpoints?: Breakpoint[];

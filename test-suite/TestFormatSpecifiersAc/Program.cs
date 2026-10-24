@@ -25,6 +25,11 @@ class TestClass2
     public static int sj = 7;
 }
 
+class NoStaticConstructor
+{
+    public static int Value;
+}
+
 class Program
 {
     static void Main(string[] args)
@@ -46,6 +51,7 @@ class Program
                 Context.Continue(@"__FILE__:__LINE__");
             });
 
+        NoStaticConstructor noStaticConstructor = new NoStaticConstructor();
         int i = 1;                                                Label.Breakpoint("bp1");
 
         Label.Checkpoint("teststatic", "testspecifiers",
@@ -55,6 +61,7 @@ class Program
                 Context.WasBreakpointHit(@"__FILE__:__LINE__", "bp1");
                 Int64 frameId = Context.DetectFrameId(@"__FILE__:__LINE__", "bp1");
 
+                Context.GetAndCheckValue(@"__FILE__:__LINE__", frameId, "0", "int", "NoStaticConstructor.Value");
                 int variablesReference_testClass1 = Context.GetExpressionEvaluationReference(@"__FILE__:__LINE__", frameId, "testClass1");
                 int setStaticReference = Context.GetChildVariablesReference(@"__FILE__:__LINE__", variablesReference_testClass1, "Static members");
                 Context.EvalVariable(@"__FILE__:__LINE__", setStaticReference, "", "si", "<error>");

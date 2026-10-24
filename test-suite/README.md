@@ -66,9 +66,9 @@ suite. A surviving detached fixture is explicitly cleaned up by the smoke runner
 Run the same tests against either adapter without changing the debuggee or assertions:
 
 ```powershell
-pwsh ./test-suite/run_tests.ps1 TestHitConditionSyntax TestContinueResponse TestUnhandledExceptionCondition
+pwsh ./test-suite/run_tests.ps1 TestHitConditionSyntax TestContinueResponse TestUnhandledExceptionCondition TestExceptionConditionMatching TestUnhandledExceptionFilter
 $env:DNCDBG = "/absolute/path/to/another/debugger"
-pwsh ./test-suite/run_tests.ps1 TestHitConditionSyntax TestContinueResponse TestUnhandledExceptionCondition
+pwsh ./test-suite/run_tests.ps1 TestHitConditionSyntax TestContinueResponse TestUnhandledExceptionCondition TestExceptionConditionMatching TestUnhandledExceptionFilter
 ```
 
 These tests preserve observable native behavior, not assumptions about DAP syntax:
@@ -77,9 +77,19 @@ These tests preserve observable native behavior, not assumptions about DAP synta
 | --- | --- |
 | `TestHitConditionSyntax` | Across seven visits to each source breakpoint, `5` stops on visits 6 and 7. `==5`, `>=5`, and `%5` each stop on visits 1 through 7 and emit exactly one stderr diagnostic identifying the hit condition and saying it will be removed. All four stop sequences and diagnostic counts are collected before comparison. Native evaluates `hitCount > <hitCondition>`; this does not establish support for equality, greater-or-equal, or modulo syntax. |
 | `TestContinueResponse` | The continue response body contains a Boolean `allThreadsContinued`: `true` for explicit `singleThread:false` and for an omitted `singleThread`, and `false` for `singleThread:true`. This tests the response, not multi-thread scheduling. All threads are resumed before process shutdown. |
-| `TestUnhandledExceptionCondition` | With `!System.InvalidOperationException` on both native-supported exception filters (`all` and `user-unhandled`), a caught exception does not stop execution. An uncaught exception of the same type still stops at the throw line, with `exceptionInfo.breakMode == "unhandled"`, `exceptionId == "CLR/System.InvalidOperationException"`, and the matching full type name. Native does not expose a separately configurable `unhandled` filter. |
+| `TestUnhandledExceptionCondition` | With `!System.InvalidOperationException` on `all` and `user-unhandled`, a caught exception does not stop execution. An uncaught exception of the same type still stops at the throw line, with `exceptionInfo.breakMode == "unhandled"`, `exceptionId == "CLR/System.InvalidOperationException"`, and the matching full type name. These two filters do not suppress the final unhandled stop. |
+| `TestExceptionConditionMatching` | Thirteen cases cover per-token negation, negative-only conditions, positive/negative order, exclusion priority, ignored lone `!`, empty conditions, additive unconditional entries, duplicate filter options, and comma/ASCII-whitespace separators (including form feed and vertical tab). Every stop and its exact exception details/source line is collected before comparing the complete matrix. |
+| `TestUnhandledExceptionFilter` | Eight sessions cover the default unhandled stop, nonmatching positive conditions, matching/nonmatching exclusions, conflicting conditions in both orders, unconditional entries, and lone `!`. The upstream exclusion scenario must exit without any stopped event, with a nonzero exit code and both exited/terminated events. |
 
 These are bounded scenarios, not full coverage of hit conditions or exception handling.
+The exception-condition matrices and updated upstream exception/stack-trace
+fixtures are proven against upstream native `53715b0e`; the historical native
+checkpoint predates per-type negation and the configurable `unhandled` filter.
+`TestFormatSpecifiersAc` also verifies that a loaded type without a static
+constructor can expose its default static field with implicit evaluation
+disabled, alongside its existing initialized/uninitialized constructor checks.
+This does not establish initialization observation for symbol-free/ReadyToRun
+types or constructors that completed before attach.
 
 # How to add a new test
 

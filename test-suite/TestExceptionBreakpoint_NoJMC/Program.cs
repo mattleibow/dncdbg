@@ -274,6 +274,7 @@ class Program
 
                 Context.ResetExceptionBreakpoints();
                 Context.AddExceptionBreakpointFilterAllWithOptions("!System.Exception");
+                Context.AddExceptionBreakpointFilterAll();
                 Context.SetExceptionBreakpoints(@"__FILE__:__LINE__");
 
                 Context.Continue(@"__FILE__:__LINE__");
@@ -472,6 +473,7 @@ class Program
 
                 Context.ResetExceptionBreakpoints();
                 Context.AddExceptionBreakpointFilterAllWithOptions("!System.NullReferenceException System.ArgumentNullException System.ArgumentOutOfRangeException");
+                Context.AddExceptionBreakpointFilterAll();
                 Context.AddExceptionBreakpointFilterUserUnhandledWithOptions("System.ArgumentNullException System.Exception System.ArgumentOutOfRangeException");
                 Context.SetExceptionBreakpoints(@"__FILE__:__LINE__");
 

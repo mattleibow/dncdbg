@@ -115,6 +115,44 @@ if (args.Length == 3 && args[2] == "pid-reuse-worker")
     return;
 }
 
+if ((args.Length == 2 || args[2] == "capture-failures") && (OperatingSystem.IsLinux() || OperatingSystem.IsWindows()))
+{
+    using var self = System.Diagnostics.Process.GetCurrentProcess();
+    var failures = new List<string>();
+    foreach (Exception injected in new Exception[] { new OverflowException("Test metadata overflow"), new DllNotFoundException("Test kernel binding unavailable") })
+    {
+        var start = new System.Diagnostics.ProcessStartInfo(python) { UseShellExecute = false };
+        start.ArgumentList.Add("-c");
+        start.ArgumentList.Add("import time; time.sleep(30)");
+        using var child = System.Diagnostics.Process.Start(start)!;
+        var messages = new List<string>();
+        try
+        {
+            using var target = OwnedLocalTarget.Capture(child.Id, self.Id, self.StartTime.ToUniversalTime(), message =>
+            {
+                if (message.StartsWith("Native launch ancestry edge ", StringComparison.Ordinal))
+                    throw injected;
+                messages.Add(message);
+            });
+            if (target != null || child.HasExited || !messages.Any(message => message.StartsWith("Cannot retain kernel-bound launch identity", StringComparison.Ordinal)))
+                throw new InvalidOperationException("Optional kernel identity failure did not reject and log retention.");
+        }
+        catch (Exception error) when (error is OverflowException or DllNotFoundException)
+        { failures.Add(error.GetType().Name); }
+        finally
+        {
+            if (!child.HasExited)
+                child.Kill();
+            child.WaitForExit(5000);
+        }
+    }
+    if (failures.Count != 0)
+        throw new InvalidOperationException("Optional kernel identity capture leaked failures: " + string.Join(", ", failures));
+    Console.WriteLine("PASS optional kernel identity capture rejects and logs overflow and missing kernel bindings");
+    if (args.Length == 3)
+        return;
+}
+
 if (args.Length == 2 || args[2] is "reverse-completed-cancel" or "reverse-queued-refusal")
 foreach (string mode in args.Length == 2 ? new[] { "reverse-completed-cancel", "reverse-queued-refusal" } : [args[2]])
 {

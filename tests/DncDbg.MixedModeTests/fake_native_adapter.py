@@ -215,11 +215,13 @@ while True:
                 time.sleep(0.01)
     elif command in ("launch", "attach"):
         launch_count += 1
-        if options.mode == "unrelated-event":
+        if options.mode in ("unrelated-event", "unrelated-event-live"):
             event("process", dict(systemProcessId=args["reportedPid"], name="external-sibling", isLocalProcess=True,
                                   startMethod=args.get("reportedStartMethod", "attach")))
             response(request, success=False, message="Test launch failed after an uncorroborated process event")
-            os._exit(0)
+            if options.mode == "unrelated-event":
+                os._exit(0)
+            continue
         if options.mode == "startup-preinitialized":
             continue
         if options.mode == "startup-postconfig-retry":

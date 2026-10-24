@@ -1391,9 +1391,11 @@ def slow_terminal_output_contract(adapter, frames=1):
 
 
 def unrelated_target_event_contract(adapter, start_method="attach"):
-    gate = OUT / ("external-sibling-" + start_method)
+    malformed = not isinstance(start_method, str)
+    label = type(start_method).__name__ if malformed else start_method
+    gate = OUT / ("external-sibling-" + label)
     gate.unlink(missing_ok=True)
-    with Dap(adapter, gate.name, arguments("dap", "unrelated-event")) as peer:
+    with Dap(adapter, gate.name, arguments("dap", "unrelated-event-live" if malformed else "unrelated-event")) as peer:
         peer.request("initialize", dict(adapterID="dncdbg"))
         # This child deliberately starts AFTER adapter initialization; chronology
         # alone is not evidence that this backend launched it.
@@ -1402,11 +1404,14 @@ def unrelated_target_event_contract(adapter, start_method="attach"):
         try:
             peer.request("launch", dict(program="owned-test-target", reportedPid=sibling.pid,
                                         reportedStartMethod=start_method), success=False)
+            if malformed:
+                check(peer.request("ownershipStatus")["launches"] == 1,
+                      "Malformed process startMethod killed the native event reader")
             peer.process.stdin.close()
             peer.disconnected = True
             peer.process.wait(timeout=15)
             check(peer.process.returncode == 0 and sibling.poll() is None,
-                  "Uncorroborated " + start_method + " process event authorized killing an external sibling")
+                  "Uncorroborated " + label + " process event authorized killing an external sibling")
             gate.write_text("release")
             check(sibling.wait(timeout=5) == 0, "Preserved external sibling did not exit normally")
         finally:
@@ -1415,7 +1420,7 @@ def unrelated_target_event_contract(adapter, start_method="attach"):
                 sibling.kill()
                 sibling.wait(timeout=5)
             gate.unlink(missing_ok=True)
-    print("PASS launch provenance rejects external sibling process event: startMethod=" + start_method, flush=True)
+    print("PASS launch provenance rejects external sibling process event: startMethod=" + label, flush=True)
 
 
 def hybrid_backend_eof_contract(adapter):
@@ -1689,6 +1694,8 @@ if __name__ == "__main__":
     slow_terminal_output_contract(options.adapter, frames=3)
     unrelated_target_event_contract(options.adapter)
     unrelated_target_event_contract(options.adapter, start_method="launch")
+    for start_method in (None, True, 17, [], {}):
+        unrelated_target_event_contract(options.adapter, start_method=start_method)
     hybrid_backend_eof_contract(options.adapter)
     inherited_stdout_contract(options.adapter)
     inherited_stdout_contract(options.adapter, attach=True)

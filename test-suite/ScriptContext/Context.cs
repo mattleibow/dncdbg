@@ -28,6 +28,7 @@ partial class Context
         ExceptionFilterUserUnhandled = false;
         ExceptionFilterAllOptions = null;
         ExceptionFilterUserUnhandledOptions = null;
+        ExceptionFilterUnhandledOptions = null;
 
         CurrentBpId = 0;
         SrcBreakpoints.Clear();
@@ -1191,12 +1192,20 @@ partial class Context
         ExceptionFilterUserUnhandledOptions.condition = options;
     }
 
+    public void AddExceptionBreakpointFilterUnhandledWithOptions(string options)
+    {
+        ExceptionFilterUnhandledOptions = new ExceptionFilterOptions();
+        ExceptionFilterUnhandledOptions.filterId = "unhandled";
+        ExceptionFilterUnhandledOptions.condition = options;
+    }
+
     public void ResetExceptionBreakpoints()
     {
         ExceptionFilterAll = false;
         ExceptionFilterUserUnhandled = false;
         ExceptionFilterAllOptions = null;
         ExceptionFilterUserUnhandledOptions = null;
+        ExceptionFilterUnhandledOptions = null;
     }
 
     public void SetExceptionBreakpoints(string caller_trace)
@@ -1207,12 +1216,14 @@ partial class Context
         if (ExceptionFilterUserUnhandled)
             setExceptionBreakpointsRequest.arguments.filters.Add("user-unhandled");
 
-        if (ExceptionFilterAllOptions != null || ExceptionFilterUserUnhandledOptions != null)
+        if (ExceptionFilterAllOptions != null || ExceptionFilterUserUnhandledOptions != null || ExceptionFilterUnhandledOptions != null)
             setExceptionBreakpointsRequest.arguments.filterOptions = new List<ExceptionFilterOptions>();
         if (ExceptionFilterAllOptions != null)
             setExceptionBreakpointsRequest.arguments.filterOptions.Add(ExceptionFilterAllOptions);
         if (ExceptionFilterUserUnhandledOptions != null)
             setExceptionBreakpointsRequest.arguments.filterOptions.Add(ExceptionFilterUserUnhandledOptions);
+        if (ExceptionFilterUnhandledOptions != null)
+            setExceptionBreakpointsRequest.arguments.filterOptions.Add(ExceptionFilterUnhandledOptions);
 
         Assert.True(DAPDebugger.Request(setExceptionBreakpointsRequest).Success,
                     @"__FILE__:__LINE__" + "\n" + caller_trace);
@@ -1683,6 +1694,7 @@ partial class Context
     bool ExceptionFilterUserUnhandled = false;
     ExceptionFilterOptions? ExceptionFilterAllOptions = null;
     ExceptionFilterOptions? ExceptionFilterUserUnhandledOptions = null;
+    ExceptionFilterOptions? ExceptionFilterUnhandledOptions = null;
 
     public int CurrentBpId = 0;
     // Note: SrcBreakpoints and SrcBreakpointIds must have the same order of elements, since we use indexes for mapping.

@@ -17,7 +17,9 @@ internal sealed class OwnedLocalTarget(Process process, DateTime started) : IDis
         {
             target = Process.GetProcessById(pid);
             DateTime started = target.StartTime.ToUniversalTime();
-            if (started < adapterStarted || target.HasExited)
+            bool createdDuringSession = started > adapterStarted
+                || started == adapterStarted && OperatingSystem.IsLinux() && DescendsFrom(pid, adapterPid);
+            if (!createdDuringSession || target.HasExited)
             {
                 log($"Native target {pid} is not a live process created during this adapter session; independent cleanup is not authorized.");
                 target.Dispose();
@@ -30,12 +32,32 @@ internal sealed class OwnedLocalTarget(Process process, DateTime started) : IDis
             target.EnableRaisingEvents = true;
             return new OwnedLocalTarget(target, started);
         }
-        catch (Exception error) when (error is ArgumentException or InvalidOperationException or Win32Exception or NotSupportedException)
+        catch (Exception error) when (error is ArgumentException or InvalidOperationException or Win32Exception or NotSupportedException
+            or IOException or UnauthorizedAccessException or FormatException)
         {
             target?.Dispose();
             log($"Cannot retain local native target {pid} for independent cleanup: {error.Message}");
             return null;
         }
+    }
+
+    private static bool DescendsFrom(int pid, int ancestor)
+    {
+        // Linux process start times have clock-tick granularity. Equal timestamps
+        // need ancestry proof; they must not authorize adoption of an older peer.
+        var seen = new HashSet<int>();
+        while (pid > 1 && seen.Add(pid))
+        {
+            string stat = File.ReadAllText($"/proc/{pid}/stat");
+            int end = stat.LastIndexOf(')');
+            if (end < 0)
+                throw new FormatException("Invalid Linux process identity record.");
+            pid = int.Parse(stat.AsSpan(end + 2).ToString().Split(' ', StringSplitOptions.RemoveEmptyEntries)[1],
+                System.Globalization.CultureInfo.InvariantCulture);
+            if (pid == ancestor)
+                return true;
+        }
+        return false;
     }
 
     public void Terminate(Action<string> log)

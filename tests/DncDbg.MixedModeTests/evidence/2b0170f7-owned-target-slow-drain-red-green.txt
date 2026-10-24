@@ -78,3 +78,19 @@ fallback records only explicit local process events for launch ownership;
 attached, non-local and relinquished targets are never independently adopted.
 Unix creation time is revalidated before signaling; this is not a claim of a
 kernel job/container or unlimited orphan-descendant tracking.
+
+=== Linux first candidate CI 40113683850, before equal-tick ancestry guard ===
+Candidate source: 5d5debf21e3c60ddfe82dfc8c6a7716be40cb330.
+The existing negative identity assertion was not weakened: it exposed Linux's
+coarse creation-time tick when a pre-existing child and later adapter shared
+the same reported time. Exact terminal excerpt:
+
+Native target 2659 identity changed or exited; refusing independent termination.
+Terminating retained owned local target 2659 independently of the native adapter.
+Unhandled exception. System.InvalidOperationException: Independent target cleanup adopted a process predating the adapter.
+   at Program.<Main>$(String[] args) in /home/runner/work/dncdbg/dncdbg/tests/DncDbg.NativeTests/Program.cs:line 70
+   at Program.<Main>(String[] args)
+
+Equal Linux timestamps now require actual /proc parent-chain proof. A missing,
+changed or unrelated identity is refused and logged instead of treating equality
+as proof of creation during this adapter session.

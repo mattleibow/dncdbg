@@ -378,6 +378,10 @@ retains the .NET `Process`/exit observation (and Windows process handle) plus
 creation time; it checks the live PID's creation time again before independent
 termination. A changed/missing identity is not signaled. This is a public
 process-identity guard, not a general cross-platform job/container abstraction.
+Linux creation times have clock-tick granularity. An equal adapter/target
+timestamp is ambiguous and requires `/proc` parent-chain proof; equality alone
+must not adopt an older unrelated process. Failure to establish that proof
+disables independent cleanup for the ambiguous identity.
 
 When normal adapter cleanup cannot kill its tree because the adapter is already
 gone, cleanup can terminate the retained owned local target itself within a

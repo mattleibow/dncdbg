@@ -8,6 +8,9 @@ $OutputEncoding = [console]::InputEncoding = [console]::OutputEncoding = New-Obj
 
 $ALL_TEST_NAMES = @(
     "TestBreakpoint"
+    "TestHitConditionSyntax"
+    "TestContinueResponse"
+    "TestUnhandledExceptionCondition"
     "TestBreakpoint_Release"
     "TestBreakpoint_NoJMC"
     "TestBreakpoint_NoJMC_Release"

@@ -13,7 +13,7 @@ using Newtonsoft.Json;
 
 namespace DbgTest.Script
 {
-class Context
+partial class Context
 {
     public void Initialize(string caller_trace, bool LinesStartAt1 = true, bool ColumnsStartAt1 = true, bool SupportsMemoryReferences = false)
     {
@@ -700,7 +700,7 @@ class Context
         Assert.Equal(ControlInfo.SourceFilesPath, stackTraceResponse.body.stackFrames[0].source!.path, @"__FILE__:__LINE__" + "\n" + caller_trace);
     }
 
-    public void Continue(string caller_trace, bool? SingleThread = null)
+    public void Continue(string caller_trace, bool? SingleThread = null, bool? ExpectedAllThreadsContinued = null)
     {
         ContinueRequest continueRequest = new ContinueRequest();
         continueRequest.arguments.threadId = threadId;
@@ -708,7 +708,18 @@ class Context
         {
             continueRequest.arguments.singleThread = SingleThread.Value;
         }
-        Assert.True(DAPDebugger.Request(continueRequest).Success, @"__FILE__:__LINE__" + "\n" + caller_trace);
+        var ret = DAPDebugger.Request(continueRequest);
+        Assert.True(ret.Success, @"__FILE__:__LINE__" + "\n" + caller_trace);
+        if (ExpectedAllThreadsContinued.HasValue)
+        {
+            var response = Newtonsoft.Json.Linq.JObject.Parse(ret.ResponseStr);
+            var allThreadsContinued = response["body"]?["allThreadsContinued"];
+            Assert.NotNull(allThreadsContinued, @"__FILE__:__LINE__" + "\n" + caller_trace);
+            Assert.Equal(Newtonsoft.Json.Linq.JTokenType.Boolean, allThreadsContinued!.Type,
+                         @"__FILE__:__LINE__" + "\n" + caller_trace);
+            Assert.Equal(ExpectedAllThreadsContinued.Value, allThreadsContinued.ToObject<bool>(),
+                         @"__FILE__:__LINE__" + "\n" + caller_trace);
+        }
     }
 
     public void Pause(string caller_trace)

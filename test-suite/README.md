@@ -20,6 +20,25 @@
 
 The target framework can be overridden with the `DNCDBG_TARGET_FRAMEWORK` environment variable (for example, `net8.0`); by default, the tests target `net10.0`.
 
+## Focused native migration contracts
+
+Run the same tests against either adapter without changing the debuggee or assertions:
+
+```sh
+./run_tests.sh TestHitConditionSyntax TestContinueResponse TestUnhandledExceptionCondition
+DNCDBG=/absolute/path/to/managed/dncdbg-dap ./run_tests.sh TestHitConditionSyntax TestContinueResponse TestUnhandledExceptionCondition
+```
+
+These tests preserve observable native behavior, not assumptions about DAP syntax:
+
+| Test | Exact contract |
+| --- | --- |
+| `TestHitConditionSyntax` | Across seven visits to each source breakpoint, `5` stops on visits 6 and 7. `==5`, `>=5`, and `%5` each stop on visits 1 through 7 and emit exactly one stderr diagnostic identifying the hit condition and saying it will be removed. All four stop sequences and diagnostic counts are collected before comparison. Native evaluates `hitCount > <hitCondition>`; this does not establish support for equality, greater-or-equal, or modulo syntax. |
+| `TestContinueResponse` | The continue response body contains a Boolean `allThreadsContinued`: `true` for explicit `singleThread:false` and for an omitted `singleThread`, and `false` for `singleThread:true`. This tests the response, not multi-thread scheduling. All threads are resumed before process shutdown. |
+| `TestUnhandledExceptionCondition` | With `!System.InvalidOperationException` on both native-supported exception filters (`all` and `user-unhandled`), a caught exception does not stop execution. An uncaught exception of the same type still stops at the throw line, with `exceptionInfo.breakMode == "unhandled"`, `exceptionId == "CLR/System.InvalidOperationException"`, and the matching full type name. Native does not expose a separately configurable `unhandled` filter. |
+
+These are bounded scenarios, not full coverage of hit conditions or exception handling.
+
 # How to add a new test
 
 - move to the test-suite directory;

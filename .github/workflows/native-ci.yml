@@ -1,0 +1,111 @@
+name: Native CI
+
+on:
+  push:
+    branches:
+      - mattleibow-native-parity-tests
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    name: Native (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+
+    env:
+      DOTNET_NOLOGO: true
+      DNCDBG_TARGET_FRAMEWORK: net10.0
+
+    steps:
+      - name: Check out native source
+        uses: actions/checkout@v4
+
+      - name: Install public .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Install Linux prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake clang llvm build-essential libcurl4-openssl-dev
+          # Attach tests run the adapter and debuggee as sibling processes.
+          sudo sysctl -w kernel.yama.ptrace_scope=0
+
+      - name: Configure native Release (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          CC=clang CXX=clang++ cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/bin"
+
+      - name: Configure native Release (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_BUILD_TYPE=Release `
+            "-DCMAKE_INSTALL_PREFIX=$env:GITHUB_WORKSPACE/bin"
+          exit $LASTEXITCODE
+
+      - name: Build and install native Release
+        shell: pwsh
+        run: |
+          cmake --build build --target install --config Release --parallel ([Environment]::ProcessorCount)
+          exit $LASTEXITCODE
+
+      - name: Run full historical suite (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        working-directory: test-suite
+        env:
+          DNCDBG: ${{ github.workspace }}/bin/dncdbg
+        run: |
+          set -o pipefail
+          ./run_tests.sh 2>&1 | tee "$RUNNER_TEMP/native-tests.log"
+
+      - name: Run full historical suite including WinForms (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: test-suite
+        run: |
+          $DNCDBG = Join-Path $env:GITHUB_WORKSPACE "bin/dncdbg.exe"
+          & ./run_tests.ps1 *>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP/native-tests.log"
+          exit $LASTEXITCODE
+
+      - name: Summarize native test results
+        if: always()
+        shell: pwsh
+        run: |
+          "## Native (${{ matrix.os }})" >> $env:GITHUB_STEP_SUMMARY
+          $log = Join-Path $env:RUNNER_TEMP "native-tests.log"
+          if (!(Test-Path $log)) {
+            "No test log: inspect prerequisite/configure/build steps; this is not a debugger test result." >> $env:GITHUB_STEP_SUMMARY
+            exit 0
+          }
+          $text = [IO.File]::ReadAllText($log).Replace("`0", "")
+          $results = $text -split "\r?\n" | Where-Object {
+            $_ -match '^Test\S+ \.\.\. ' -or $_ -match '^Total tests:'
+          }
+          '```text' >> $env:GITHUB_STEP_SUMMARY
+          $results >> $env:GITHUB_STEP_SUMMARY
+          '```' >> $env:GITHUB_STEP_SUMMARY
+          if ($text -notmatch 'Total tests:') {
+            "Suite did not finish; inspect the test step log for partial results." >> $env:GITHUB_STEP_SUMMARY
+          }

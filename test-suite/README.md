@@ -20,6 +20,20 @@
 
 The target framework can be overridden with the `DNCDBG_TARGET_FRAMEWORK` environment variable (for example, `net8.0`); by default, the tests target `net10.0`.
 
+## Public native CI
+
+The `Native CI` workflow on `mattleibow-native-parity-tests` builds and installs
+the historical native debugger in Release on Ubuntu, macOS, and Windows using
+the documented CMake flows and the public .NET 10 SDK. It runs every test in the
+platform's historical runner manifest, including the Windows-only WinForms case,
+the migration-contract tests, and `TestStringEscaping` copied unchanged from
+managed `main`. Linux disables the Yama sibling-process attach restriction for
+the attach tests.
+
+The full build and DAP/test output is retained in the Actions job logs. The job
+summary lists each test result and exact totals, or reports that setup/build
+prevented tests from running. Matrix jobs do not cancel one another on failure.
+
 ## Focused native migration contracts
 
 Run the same tests against either adapter without changing the debuggee or assertions:

@@ -5,6 +5,7 @@ ALL_TEST_NAMES=(
     "TestHitConditionSyntax"
     "TestContinueResponse"
     "TestUnhandledExceptionCondition"
+    "TestStringEscaping"
     "TestBreakpoint_Release"
     "TestBreakpoint_NoJMC"
     "TestBreakpoint_NoJMC_Release"

@@ -385,6 +385,7 @@ public sealed class StackFrame
     public int? EndLine { get; set; }
     public int? EndColumn { get; set; }
     public string? PresentationHint { get; set; }
+    public string? InstructionPointerReference { get; set; }
 }
 
 public sealed class StackTraceResponseBody

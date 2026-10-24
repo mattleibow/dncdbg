@@ -16,6 +16,7 @@ base = runpy.run_path(str(Path(__file__).with_name("run.py")))
 Dap, check, build, line = (base[n] for n in ("Dap", "check", "build", "line"))
 ROOT, OUT, DLL, FIXTURE = (base[n] for n in ("ROOT", "OUT", "DLL", "FIXTURE"))
 EXTRA_ENV = {}
+EXPECT_UNAVAILABLE = False
 
 
 def target(extra=()):
@@ -67,7 +68,8 @@ def scenario(adapter, lldb, managed, finish):
                  "--log=" + str(OUT / ("proxy-" + finish + ".engine.log"))]
     with Dap(adapter, "lldb-proxy-" + finish, arguments) as session:
         capabilities = session.request("initialize", dict(adapterID="dncdbg", pathFormat="path",
-                                                          linesStartAt1=True, columnsStartAt1=True))
+                                                          linesStartAt1=True, columnsStartAt1=True,
+                                                          supportsInvalidatedEvent=True))
         check(capabilities["dncdbg"]["executionOwner"] == "native-adapter", str(capabilities))
         program, arguments_to_target = target()
         launch = session.send("launch", dict(program=program, args=arguments_to_target,
@@ -93,7 +95,13 @@ def scenario(adapter, lldb, managed, finish):
             thread = stop["threadId"]
             pid = session.request("dotnet/info")["debuggeeProcessId"]
             check(isinstance(pid, int), "Native backend did not report its actual target PID")
-            stack = session.request("stackTrace", dict(threadId=thread))["stackFrames"]
+            stack_result = session.request("stackTrace", dict(threadId=thread))
+            stack = stack_result["stackFrames"]
+            if EXPECT_UNAVAILABLE:
+                check(stack_result["dncdbgManagedInspection"]["status"] == "unavailable", str(stack_result))
+                check(any(reason in stack_result["dncdbgManagedInspection"]["message"].lower()
+                          for reason in ("metadata", "single-file")), str(stack_result))
+                session.request("dotnet/managedStackTrace", dict(threadId=thread), success=False)
             check("native_checkpoint" in stack[0]["name"] if visit != 1 else "native_sum" in stack[0]["name"], str(stack[:3]))
             if visit != 1:
                 check(checkpoint_id in stop["hitBreakpointIds"], "Persistent checkpoint breakpoint identity changed")
@@ -102,11 +110,15 @@ def scenario(adapter, lldb, managed, finish):
                 check(native["left"] == "19" and native["right"] == "23", str(native))
                 check(session.request("evaluate", dict(frameId=stack[0]["id"], expression="left + right", context="watch"))["result"] == "42",
                       "Native C expression evaluation was not delegated")
+                if managed and not EXPECT_UNAVAILABLE:
+                    invalidated = session.event("invalidated")
+                    check(set(invalidated["areas"]) >= {"stacks", "variables"},
+                          "Native evaluation expired managed references without notifying the client")
                 stack = session.request("stackTrace", dict(threadId=thread))["stackFrames"]
                 native_ref, native = locals_for(session, stack[0]["id"])
             else:
                 check(native["phase"] == ("1" if visit == 0 else "2") and native["result"] == "42", str(native))
-            if managed:
+            if managed and not EXPECT_UNAVAILABLE:
                 caller = next(f for f in stack if "[Managed]" in f["name"] and "ManagedCall" in f["name"])
                 check(caller["source"]["path"].endswith("Program.cs") and caller["line"] > 0, str(caller))
                 raw = session.request("dotnet/nativeStackTrace", dict(threadId=thread))["stackFrames"]
@@ -181,7 +193,7 @@ def detach_scenario(adapter, lldb, managed):
             peer.response(launch)
             stop = peer.event("stopped")
             stack = peer.request("stackTrace", dict(threadId=stop["threadId"]))["stackFrames"]
-            if managed:
+            if managed and not EXPECT_UNAVAILABLE:
                 check(any("[Managed]" in f["name"] for f in stack), "No managed snapshot before detach")
             pid = peer.request("dotnet/info")["debuggeeProcessId"]
             peer.request("disconnect", dict(terminateDebuggee=False))
@@ -213,6 +225,7 @@ if __name__ == "__main__":
     parser.add_argument("--fixture", type=Path)
     parser.add_argument("--skip-build", action="store_true")
     parser.add_argument("--tiered-jit", choices=("0", "1"))
+    parser.add_argument("--expect-managed-unavailable", action="store_true")
     options = parser.parse_args()
     if not options.skip_build:
         build()
@@ -220,6 +233,7 @@ if __name__ == "__main__":
         DLL = options.fixture.resolve()
     if options.tiered_jit is not None:
         EXTRA_ENV["DOTNET_TieredCompilation"] = options.tiered_jit
+    EXPECT_UNAVAILABLE = options.expect_managed_unavailable
     info = subprocess.run([options.adapter, "--native-debugger=lldb", "--native-debugger-path=" + options.lldb_dap,
                            "--native-debugger-info"], capture_output=True, text=True)
     check(info.returncode == 0, info.stderr)

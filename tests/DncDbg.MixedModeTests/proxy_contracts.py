@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import queue
 import runpy
 import shutil
 import signal
@@ -88,7 +89,9 @@ def fake_contracts(adapter):
             if mode == "version-mismatch":
                 check("version mismatch" in message["message"].lower(), str(message))
             disconnected = peer.send("disconnect")
-            peer.receive(lambda m: m.get("type") == "response" and m.get("request_seq") == disconnected)
+            closed = peer.receive(lambda m: m.get("type") == "response" and m.get("request_seq") == disconnected)
+            if not closed["success"]:
+                peer.process.stdin.close()
             peer.process.wait(timeout=15)
     missing = subprocess.run([adapter, "--native-debugger=lldb", "--native-debugger-path=" + str(OUT / "missing-lldb-dap"),
                               "--native-debugger-info"], capture_output=True, text=True)
@@ -182,6 +185,169 @@ def detached_backend_stall(adapter):
         gate.unlink(missing_ok=True)
 
 
+def refused_detach(adapter):
+    gate = OUT / "refused-detach.release"
+    marker = Path(str(gate) + ".terminated")
+    gate.unlink(missing_ok=True)
+    marker.unlink(missing_ok=True)
+    pid = None
+    try:
+        with Dap(adapter, "refused-detach", arguments(mode="detach-refused", barrier=gate)) as peer:
+            peer.request("initialize", dict(adapterID="dncdbg"))
+            peer.request("launch", dict(program="owned-test-target"))
+            peer.event("initialized")
+            pid = peer.event("process")["systemProcessId"]
+            peer.request("configurationDone")
+            peer.event("stopped")
+            peer.request("disconnect", dict(terminateDebuggee=False), success=False)
+            time.sleep(0.05)
+            check(not marker.exists() and integration["alive"](pid), "Refused detach escalated to a terminating cleanup")
+            peer.request("threads")
+            check(integration["alive"](pid), "The live session was not preserved after detach refusal")
+            peer.request("disconnect", dict(terminateDebuggee=True))
+            peer.process.wait(timeout=15)
+            integration["exited"](pid)
+            pid = None
+        print("PASS refused detach stays non-terminating and preserves the session until explicit termination", flush=True)
+    finally:
+        if pid and integration["alive"](pid):
+            os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+            integration["exited"](pid)
+        gate.unlink(missing_ok=True)
+        marker.unlink(missing_ok=True)
+
+
+def reverse_generation(adapter):
+    with Dap(adapter, "reverse-generation", arguments()) as peer:
+        peer.request("initialize", dict(adapterID="dncdbg", supportsRunInTerminalRequest=True))
+        peer.request("reverse")
+        old = peer.receive(lambda m: m.get("type") == "request" and m.get("command") == "runInTerminal")
+        peer.request("initialize", dict(adapterID="dncdbg", supportsRunInTerminalRequest=True))
+        data = json.dumps(dict(seq=999, type="response", request_seq=old["seq"],
+                               command="runInTerminal", success=True, body=dict(processId=123))).encode()
+        peer.process.stdin.write(f"Content-Length: {len(data)}\r\n\r\n".encode() + data)
+        peer.process.stdin.flush()
+        time.sleep(0.05)
+        check(not peer.request("reverseStatus")["valid"], "An old reverse response was sent into the replacement native backend")
+        peer.request("disconnect")
+    print("PASS reverse requests are fenced to their original native backend generation", flush=True)
+
+
+def event_contracts(adapter):
+    with Dap(adapter, "native-event-ownership", arguments()) as peer:
+        peer.request("initialize", dict(adapterID="dncdbg", supportsInvalidatedEvent=True))
+        peer.request("launch", dict(program="owned-test-target"))
+        peer.event("initialized")
+        peer.request("configurationDone")
+        peer.event("stopped")
+        peer.request("stackTrace", dict(threadId=7))
+        peer.request("continue", dict(threadId=7))
+        peer.event("stopped")
+        new_frame = peer.request("stackTrace", dict(threadId=7))["stackFrames"][0]["id"]
+        check(new_frame != 1, "The test must distinguish raw backend and public frame identities")
+        peer.request("invalidate")
+        invalidated = peer.event("invalidated")
+        check("stackFrameId" not in invalidated and set(invalidated["areas"]) >= {"stacks", "variables"},
+              "Backend frame identity leaked through invalidation: " + str(invalidated))
+        peer.request("capabilityUpdate")
+        update = peer.event("capabilities")
+        check(update["capabilities"]["supportsCancelRequest"] is False,
+              "Backend capabilities re-enabled unsupported proxy cancellation")
+        peer.request("disconnect")
+    print("PASS native invalidation ownership and capability-update restrictions", flush=True)
+
+
+def capability_contract(adapter):
+    with Dap(adapter, "capability-ownership", arguments()) as peer:
+        peer.request("initialize", dict(adapterID="dncdbg"))
+        peer.request("capabilityUpdate")
+        update = peer.event("capabilities")
+        check(update["capabilities"]["supportsCancelRequest"] is False, "Backend capability update re-enabled unsupported cancellation")
+        peer.request("disconnect")
+    print("PASS all backend capability updates preserve proxy restrictions", flush=True)
+
+
+def version_stdin_contract(adapter):
+    with Dap(adapter, "version-stdin", arguments("lldb", "version-reads-stdin")) as peer:
+        initialized = peer.send("initialize", dict(adapterID="dncdbg"))
+        try:
+            response = peer.receive(lambda m: m.get("type") == "response" and m.get("request_seq") == initialized, timeout=3)
+        except queue.Empty:
+            raise AssertionError("The CLI version probe inherited and consumed the frontend DAP initialize stream") from None
+        check(response["success"], str(response))
+        peer.request("disconnect")
+    print("PASS version discovery cannot read the frontend's DAP stdin", flush=True)
+
+
+def selected_frame_contract(adapter):
+    with Dap(adapter, "selected-frame-variables", arguments(mode="selected-frame")) as peer:
+        peer.request("initialize", dict(adapterID="dncdbg"))
+        peer.request("launch", dict(program="owned-test-target"))
+        peer.event("initialized")
+        peer.request("configurationDone")
+        peer.event("stopped")
+        frames = peer.request("stackTrace", dict(threadId=7))["stackFrames"]
+        first = peer.request("scopes", dict(frameId=frames[0]["id"]))["scopes"][0]["variablesReference"]
+        second = peer.request("scopes", dict(frameId=frames[1]["id"]))["scopes"][0]["variablesReference"]
+        check(first != second, "Backend static locals references aliased two different frame owners")
+        check(peer.request("variables", dict(variablesReference=first))["variables"][0]["value"] == "1",
+              "The backend's selected frame corrupted a prior frame's locals")
+        check(peer.request("variables", dict(variablesReference=second))["variables"][0]["value"] == "2",
+              "Frame-specific native variable selection was not restored")
+        peer.request("disconnect")
+    print("PASS native variables retain their owning frame despite backend global selection", flush=True)
+
+
+def notification_contract(adapter, lldb):
+    with Dap(adapter, "managed-invalidation", ["--native-debugger=lldb", "--native-debugger-path=" + lldb]) as peer:
+        peer.request("initialize", dict(adapterID="dncdbg", pathFormat="path", linesStartAt1=True,
+                                        columnsStartAt1=True, supportsInvalidatedEvent=True))
+        launch = peer.send("launch", dict(program=shutil.which("dotnet"), args=[str(DLL)],
+                                          env=dict(DNCDBG_MIXED_CHECKPOINTS="1"), managedInspection=True))
+        peer.event("initialized")
+        peer.request("setBreakpoints", dict(source=dict(path=str(FIXTURE / "native.c")),
+                                           breakpoints=[dict(line=line(FIXTURE / "native.c", "NATIVE_CHECKPOINT"))]))
+        peer.request("configurationDone")
+        peer.response(launch)
+        stop = peer.event("stopped")
+        frames = peer.request("stackTrace", dict(threadId=stop["threadId"]))["stackFrames"]
+        managed = next(f for f in frames if "[Managed]" in f["name"] and "ManagedCall" in f["name"])
+        peer.request("evaluate", dict(frameId=frames[0]["id"], expression="phase + result", context="watch"))
+        try:
+            message = peer.receive(lambda m: m.get("event") == "invalidated", timeout=2)
+        except queue.Empty:
+            raise AssertionError("Native evaluation expired managed frame handles without an invalidation notification") from None
+        check(set(message["body"]["areas"]) >= {"stacks", "variables"}, str(message))
+        peer.request("scopes", dict(frameId=managed["id"]), success=False)
+        refreshed = peer.request("stackTrace", dict(threadId=stop["threadId"]))["stackFrames"]
+        current = next(f for f in refreshed if "[Managed]" in f["name"] and "ManagedCall" in f["name"])
+        peer.request("scopes", dict(frameId=current["id"]))
+        peer.request("disconnect", dict(terminateDebuggee=True))
+    print("PASS native mutation invalidation is visible and refreshes managed frame ownership", flush=True)
+
+
+def strict_managed_contract(adapter, lldb):
+    with Dap(adapter, "strict-managed-identities", ["--native-debugger=lldb", "--native-debugger-path=" + lldb]) as peer:
+        peer.request("initialize", dict(adapterID="dncdbg", pathFormat="path", linesStartAt1=True,
+                                        columnsStartAt1=True, supportsInvalidatedEvent=True))
+        launch = peer.send("launch", dict(program=shutil.which("dotnet"), args=[str(DLL)],
+                                          env=dict(DNCDBG_MIXED_CHECKPOINTS="1"), managedInspection=True))
+        peer.event("initialized")
+        peer.request("setBreakpoints", dict(source=dict(path=str(FIXTURE / "native.c")),
+                                           breakpoints=[dict(line=line(FIXTURE / "native.c", "NATIVE_CHECKPOINT"))]))
+        peer.request("configurationDone")
+        peer.response(launch)
+        stop = peer.event("stopped")
+        peer.request("stackTrace", dict(threadId=stop["threadId"]))
+        frames = peer.request("dotnet/managedStackTrace", dict(threadId=stop["threadId"]))["stackFrames"]
+        caller = next(f.get("frame", f) for f in frames if "ManagedCall" in f.get("frame", f)["name"])
+        _, values = integration["locals_for"](peer, caller["id"])
+        check(values.get("left") == "19" and values.get("right") == "23",
+              "Strict managed stack leaked inspection IDs into the native frame namespace: " + str(values))
+        peer.request("disconnect", dict(terminateDebuggee=True))
+    print("PASS strict managed stack returns owned frame references usable by scopes/variables", flush=True)
+
+
 def wait_file(path):
     deadline = time.monotonic() + 10
     while not path.exists():
@@ -220,6 +386,8 @@ def interrupted_read(adapter, lldb, mode):
         disconnected = peer.send("disconnect", dict(terminateDebuggee=True))
         response = peer.receive(lambda m: m.get("type") == "response" and m.get("request_seq") == disconnected)
         check(isinstance(response["success"], bool), "Shutdown did not complete")
+        if not response["success"]:
+            peer.process.stdin.close()
         peer.process.wait(timeout=15)
     barrier.with_suffix(".arm").unlink(missing_ok=True)
     barrier.with_suffix(".ready").unlink(missing_ok=True)
@@ -233,10 +401,18 @@ if __name__ == "__main__":
     options = parser.parse_args()
     OUT.mkdir(parents=True, exist_ok=True)
     fake_contracts(options.adapter)
+    refused_detach(options.adapter)
+    reverse_generation(options.adapter)
+    event_contracts(options.adapter)
+    capability_contract(options.adapter)
+    version_stdin_contract(options.adapter)
+    selected_frame_contract(options.adapter)
     bundle_contracts(options.adapter)
     detached_backend_stall(options.adapter)
     if options.lldb_dap:
         build()
+        strict_managed_contract(options.adapter, options.lldb_dap)
+        notification_contract(options.adapter, options.lldb_dap)
         for poison in (False, True):
             invalid_runtime(options.adapter, options.lldb_dap, poison)
         for mode in ("hold", "exit-during-read", "lost-server"):

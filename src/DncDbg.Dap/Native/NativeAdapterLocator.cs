@@ -206,11 +206,12 @@ internal static class NativeAdapterLocator
         {
             var start = new ProcessStartInfo(executable)
             {
-                RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false,
+                RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false,
             };
             foreach (string argument in arguments)
                 start.ArgumentList.Add(argument);
             using Process process = Process.Start(start) ?? throw new ArgumentException("Error: Cannot start " + executable);
+            process.StandardInput.Close();
             Task<string> output = process.StandardOutput.ReadToEndAsync();
             Task<string> error = process.StandardError.ReadToEndAsync();
             if (!process.WaitForExit(5000))

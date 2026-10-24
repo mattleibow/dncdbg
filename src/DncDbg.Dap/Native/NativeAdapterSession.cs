@@ -47,7 +47,8 @@ internal sealed class NativeAdapterSession : IDisposable
                         receive(message);
                 }
                 if (!_disposing && !_disconnected)
-                    failed(new IOException("The native debug adapter closed its DAP connection."));
+                    failed(new IOException("The native debug adapter closed its DAP connection."
+                        + (_process.HasExited ? $" Exit code: 0x{unchecked((uint)_process.ExitCode):X8}." : "")));
             }
             catch (Exception error) when (error is IOException or ObjectDisposedException or InvalidOperationException)
             {

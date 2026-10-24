@@ -8,6 +8,7 @@ on:
       - tests/DncDbg.MixedModeTests/**
       - tests/DncDbg.SmokeTests/**
       - tests/DncDbg.ProtocolTests/**
+      - tests/DncDbg.NativeTests/**
       - test-suite/**
       - .github/workflows/mixed-mode-proof.yml
       - global.json
@@ -61,6 +62,22 @@ jobs:
               if ($LASTEXITCODE) { exit $LASTEXITCODE }
               $lldb = $candidate
             }
+            $llvmDir = Split-Path $lldb
+            $readobj = Join-Path $llvmDir "llvm-readobj.exe"
+            $library = Join-Path $llvmDir "liblldb.dll"
+            if ((Test-Path $readobj) -and (Test-Path $library)) {
+              $imports = (& $readobj --coff-imports $library) -join "`n"
+              $imports | Out-File build/validation/mixed-mode/lldb-imports.txt
+              $pythonDll = [regex]::Match($imports, 'Name:\s+(python\d+\.dll)', 'IgnoreCase').Groups[1].Value
+              if ($pythonDll) {
+                $pythonRoot = Join-Path $env:AGENT_TOOLSDIRECTORY "Python"
+                $dependency = Get-ChildItem $pythonRoot -Filter $pythonDll -Recurse -Depth 3 |
+                  Select-Object -First 1
+                if (-not $dependency) { throw "Public LLVM requires missing host dependency $pythonDll" }
+                $env:PATH = "$($dependency.DirectoryName);$env:PATH"
+                $dependency.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+              }
+            }
           } else {
             foreach ($name in @("lldb-dap", "lldb-dap-21", "lldb-dap-20", "lldb-dap-19", "lldb-dap-18")) {
               $tool = Get-Command $name -ErrorAction SilentlyContinue
@@ -87,6 +104,9 @@ jobs:
           dotnet publish src/DncDbg.Dap -c Release -o bin --nologo
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           dotnet run --project tests/DncDbg.ProtocolTests -c Release
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $python = (Get-Command python).Source
+          dotnet run --project tests/DncDbg.NativeTests -c Release -- $python (Join-Path $PWD "tests/DncDbg.MixedModeTests/fake_native_adapter.py")
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           $adapter = if ($IsWindows) { "bin/dncdbg-dap.exe" } else { "bin/dncdbg-dap" }
           python tests/DncDbg.MixedModeTests/proxy_contracts.py --adapter $adapter 2>&1 |

@@ -48,7 +48,8 @@ internal sealed partial class LldbSnapshotTarget(
             int offset = (int)(current - page), take = Math.Min(count - read, 4096 - offset);
             if (!_pages.TryGetValue(page, out byte[]? bytes))
             {
-                bytes = Fetch(page, 4096);
+                try { bytes = Fetch(page, 4096); }
+                catch (DebuggerException) when (read > 0 && !cancellation.IsCancellationRequested) { break; }
                 _pages.Add(page, bytes);
             }
             if (offset >= bytes.Length)
@@ -143,12 +144,19 @@ internal sealed partial class LldbSnapshotTarget(
                 BinaryPrimitives.WriteUInt32LittleEndian(bytes[4..], checked((uint)Number(registers, "cpsr")));
                 for (int i = 0; i < 29; i++)
                     BinaryPrimitives.WriteUInt64LittleEndian(bytes[(8 + i * 8)..], Number(registers, "x" + i));
-                foreach (var (name, offset) in new[] { ("fp", 0xf0), ("lr", 0xf8), ("sp", 0x100), ("pc", 0x108) })
+                foreach (var (name, offset) in new[]
+                    {
+                        (registers.ContainsKey("fp") ? "fp" : "x29", 0xf0),
+                        (registers.ContainsKey("lr") ? "lr" : "x30", 0xf8), ("sp", 0x100), ("pc", 0x108),
+                    })
                     BinaryPrimitives.WriteUInt64LittleEndian(bytes[offset..], Number(registers, name));
-                for (int i = 0; i < 32; i++)
-                    Vector(registers, "v" + i).CopyTo(bytes[(0x110 + i * 16)..]);
-                BinaryPrimitives.WriteUInt32LittleEndian(bytes[0x310..], checked((uint)Number(registers, "fpcr")));
-                BinaryPrimitives.WriteUInt32LittleEndian(bytes[0x314..], checked((uint)Number(registers, "fpsr")));
+                if (((uint)requestedFlags & 4) != 0)
+                {
+                    for (int i = 0; i < 32; i++)
+                        Vector(registers, "v" + i).CopyTo(bytes[(0x110 + i * 16)..]);
+                    BinaryPrimitives.WriteUInt32LittleEndian(bytes[0x310..], checked((uint)Number(registers, "fpcr")));
+                    BinaryPrimitives.WriteUInt32LittleEndian(bytes[0x314..], checked((uint)Number(registers, "fpsr")));
+                }
             }
             else if (RuntimeInformation.ProcessArchitecture == Architecture.X64)
             {
@@ -174,9 +182,12 @@ internal sealed partial class LldbSnapshotTarget(
                         BinaryPrimitives.WriteUInt16LittleEndian(bytes[offset..], checked((ushort)Number(registers, name)));
                     else
                         value.ContextFlags &= ~(ContextFlags)4;
-                for (int i = 0; i < 16; i++)
-                    Vector(registers, "xmm" + i).CopyTo(bytes[(0x1a0 + i * 16)..]);
-                BinaryPrimitives.WriteUInt32LittleEndian(bytes[0x34..], checked((uint)Number(registers, "mxcsr")));
+                if (((uint)requestedFlags & 8) != 0)
+                {
+                    for (int i = 0; i < 16; i++)
+                        Vector(registers, "xmm" + i).CopyTo(bytes[(0x1a0 + i * 16)..]);
+                    BinaryPrimitives.WriteUInt32LittleEndian(bytes[0x34..], checked((uint)Number(registers, "mxcsr")));
+                }
                 BinaryPrimitives.WriteUInt32LittleEndian(bytes[0x30..], (uint)value.ContextFlags);
             }
             else
@@ -216,7 +227,8 @@ internal sealed partial class LldbSnapshotTarget(
         {
             if (depth > 4)
                 throw new DebuggerException("Native register scopes exceeded the nesting limit.");
-            foreach (JsonElement item in Request("variables", new { variablesReference = reference }).GetProperty("variables").EnumerateArray())
+            foreach (JsonElement item in Request("variables", new { variablesReference = reference, format = new { hex = true } })
+                .GetProperty("variables").EnumerateArray())
             {
                 string name = item.GetProperty("name").GetString()!;
                 string value = item.GetProperty("value").GetString()!;
@@ -252,14 +264,20 @@ internal sealed partial class LldbSnapshotTarget(
     private static byte[] Vector(Dictionary<string, string> values, string name)
     {
         string value = values[name];
-        MatchCollection bytes = Regex.Matches(value, @"0x([0-9a-fA-F]{2})(?![0-9a-fA-F])", RegexOptions.CultureInvariant);
-        if (bytes.Count == 16)
-            return bytes.Select(b => byte.Parse(b.Groups[1].Value, NumberStyles.HexNumber, CultureInfo.InvariantCulture)).ToArray();
-        Match integer = Regex.Match(value, @"^0x([0-9a-fA-F]{32})$", RegexOptions.CultureInvariant);
-        if (integer.Success)
+        MatchCollection lanes = Regex.Matches(value, @"0x([0-9a-fA-F]+)", RegexOptions.CultureInvariant);
+        if (lanes.Count is 1 or 2 or 4 or 8 or 16)
         {
-            byte[] result = Convert.FromHexString(integer.Groups[1].Value);
-            Array.Reverse(result);
+            int width = 16 / lanes.Count;
+            var result = new byte[16];
+            for (int i = 0; i < lanes.Count; i++)
+            {
+                string digits = lanes[i].Groups[1].Value;
+                if (digits.Length > width * 2)
+                    throw new DebuggerException($"Native register '{name}' has an oversized vector lane.");
+                byte[] lane = Convert.FromHexString(digits.PadLeft(width * 2, '0'));
+                Array.Reverse(lane);
+                lane.CopyTo(result, i * width);
+            }
             return result;
         }
         throw new DebuggerException($"Native register '{name}' was not a supported 128-bit vector representation.");

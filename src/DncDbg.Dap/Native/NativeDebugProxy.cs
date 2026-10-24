@@ -236,7 +236,8 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
             arguments["variablesReference"] = variable.Id;
         long? nativeFrameContext = frame?.NativeId ?? variable?.NativeFrame
             ?? (command == "evaluate" ? arguments["frameId"]?.GetValue<long>() : null);
-        if (variable?.NativeFrame is { } owningFrame)
+        long? restoreFrame = variable?.NativeFrame ?? (command == "evaluate" && frame == null ? nativeFrameContext : null);
+        if (restoreFrame is { } owningFrame)
             LldbSnapshotTarget.Body(native.Request("scopes", new { frameId = owningFrame }, OperationToken()));
         Transform(arguments, "sourceReference", id => _references.ResolveSource(checked((int)id), session));
         bool executionControl = command is "continue" or "next" or "stepIn" or "stepOut";

@@ -254,6 +254,9 @@ while True:
     elif command == "threads":
         response(request, dict(threads=[dict(id=7, name="Native")]))
     elif command == "evaluate":
+        if options.mode == "selected-repl":
+            response(request, dict(result=str(selected_frame), variablesReference=0))
+            continue
         if options.mode == "selected-frame" and "frameId" not in args:
             response(request, dict(result=str(selected_frame), variablesReference=0))
             continue

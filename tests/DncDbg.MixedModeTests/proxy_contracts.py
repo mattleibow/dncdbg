@@ -714,8 +714,8 @@ def native_watch_contract(adapter, lldb, invalidation=False):
     print("PASS native watch/hover preserves managed handles without unsolicited invalidation; client=" + str(invalidation), flush=True)
 
 
-def frameless_evaluation_contract(adapter):
-    with Dap(adapter, "frameless-native-evaluation", arguments("dap", "selected-frame")) as peer:
+def frameless_evaluation_contract(adapter, mode="selected-frame"):
+    with Dap(adapter, "frameless-native-evaluation-" + mode, arguments("dap", mode)) as peer:
         peer.request("initialize", dict(adapterID="dncdbg"))
         peer.request("launch", dict(program="owned-test-target"))
         peer.event("initialized")
@@ -724,7 +724,7 @@ def frameless_evaluation_contract(adapter):
         frames = peer.request("stackTrace", dict(threadId=7))["stackFrames"]
         peer.request("scopes", dict(frameId=frames[0]["id"]))
         peer.request("selectOtherFrame")
-        check(peer.request("evaluate", dict(expression="value", context="hover"))["result"] == "1",
+        check(peer.request("evaluate", dict(expression="value", context="repl" if mode == "selected-repl" else "hover"))["result"] == "1",
               "Frame-less evaluate observed internal/backend frame selection instead of client frame")
         peer.request("disconnect")
     print("PASS frame-less evaluation restores the client-selected native frame", flush=True)
@@ -917,6 +917,7 @@ if __name__ == "__main__":
     wide_reference_contract(options.adapter)
     refused_admission_contract(options.adapter)
     frameless_evaluation_contract(options.adapter)
+    frameless_evaluation_contract(options.adapter, mode="selected-repl")
     native_only_watch_contract(options.adapter)
     managed_launch_scope_contract(options.adapter)
     unsupported_overlay_controls(options.adapter)

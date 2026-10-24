@@ -91,6 +91,10 @@ Traceback (most recent call last):
     raise AssertionError(message)
 AssertionError: Frame-less evaluate observed internal/backend frame selection instead of client frame
 
+Post-fix, both selected-frame variable lookup and selected-repl global-command
+lookup use the identical contract:
+PASS frame-less evaluation restores the client-selected native frame
+
 === review-launch-scope-red.log ===
 Traceback (most recent call last):
   File "<stdin>", line 2, in <module>
@@ -186,3 +190,15 @@ PASS native-only watch expressions retain the backend's unmodified evaluation co
 PASS native watch/hover preserves managed handles without unsolicited invalidation; client=False
 PASS native watch/hover preserves managed handles without unsolicited invalidation; client=True
 PASS backend without configurationDone retains a bounded startup response deadline
+
+=== Frame-less REPL selection regression, before actual scopes restoration ===
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "tests/DncDbg.MixedModeTests/proxy_contracts.py", line 727, in frameless_evaluation_contract
+    check(peer.request("evaluate", dict(expression="value", context="repl" if mode == "selected-repl" else "hover"))["result"] == "1",
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+          "Frame-less evaluate observed internal/backend frame selection instead of client frame")
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "tests/DncDbg.MixedModeTests/run.py", line 23, in check
+    raise AssertionError(message)
+AssertionError: Frame-less evaluate observed internal/backend frame selection instead of client frame

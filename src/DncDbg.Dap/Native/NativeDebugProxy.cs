@@ -347,7 +347,6 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         catch
         {
             startup.Dispose();
-            _started = false;
             throw;
         }
         // DAP permits launch/attach responses after configurationDone; never block configuration admission.
@@ -368,10 +367,8 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
             }
             catch (Exception error) when (error is OperationCanceledException or TimeoutException or IOException)
             {
-                if (session == Session())
-                    _started = false;
                 if (!_stopping)
-                    client.SendErrorResponse(request, "Native startup failed: " + error.Message);
+                    client.SendErrorResponse(request, "Native startup failed with unknown target outcome; disconnect or reinitialize before retrying: " + error.Message);
             }
         });
         lock (_starts)
@@ -700,6 +697,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         DapMessage request = work.Request;
         CloseView();
         bool accepted = false;
+        bool refused = false;
         try
         {
             JsonObject arguments = Object(request.Arguments);
@@ -709,6 +707,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
             DapMessage response = _native?.Request("disconnect", arguments, OperationToken())
                 ?? new DapMessage { Success = true };
             accepted = response.Success == true;
+            refused = response.Success == false;
             ForwardResponse(request, response);
         }
         catch (Exception error) when (error is IOException or OperationCanceledException or TimeoutException)
@@ -724,7 +723,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
                 if (!accepted)
                 {
                     _disconnecting = false;
-                    if (_stop == work.Stop && !_targetEnded)
+                    if (refused && _stop == work.Stop && !_targetEnded)
                     {
                         _stopped = work.WasStopped;
                         _allStopped = work.AllStopped;
@@ -744,6 +743,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         _lifetime.Cancel();
         client.CancelPendingRequests();
         _requests.CompleteAdding();
+        _native?.StopTransport(terminateTarget: _ownsTarget);
         if (_worker != null && !_worker.Join(TimeSpan.FromSeconds(10)))
             throw new DebuggerException("Native/managed inspection did not drain during shutdown.");
     }

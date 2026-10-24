@@ -365,10 +365,87 @@ def startup_timeout_contract(adapter):
         first = peer.send("launch", dict(program="owned-test-target"))
         response = peer.receive(lambda m: m.get("type") == "response" and m.get("request_seq") == first, timeout=35)
         check(response["success"] is False and "startup failed" in response["message"].lower(), str(response))
+        peer.request("launch", dict(program="owned-test-target"), success=False)
+        check(peer.request("ownershipStatus")["launches"] == 1, "Unknown startup outcome admitted another launch")
+        peer.request("initialize", dict(adapterID="dncdbg"))
+        peer.request("disconnect")
+    with Dap(adapter, "startup-explicit-failure", arguments("dap", "startup-failure")) as peer:
+        peer.request("initialize", dict(adapterID="dncdbg"))
+        peer.request("launch", dict(program="owned-test-target"), success=False)
         peer.request("launch", dict(program="owned-test-target"))
         peer.event("initialized")
         peer.request("disconnect")
-    print("PASS failed native startup clears admission state and permits retry", flush=True)
+    print("PASS unknown startup requires reconciliation; explicit startup failure permits retry", flush=True)
+
+
+def startup_evidence_contract(adapter):
+    with Dap(adapter, "startup-evidence", arguments("dap", "startup-evidence")) as peer:
+        peer.request("initialize", dict(adapterID="dncdbg"))
+        first = peer.send("launch", dict(program="owned-test-target"))
+        peer.event("initialized")
+        peer.event("stopped")
+        peer.response(first, success=False, timeout=35)
+        retry = peer.send("launch", dict(program="second-test-target"))
+        response = peer.receive(lambda m: m.get("type") == "response" and m.get("request_seq") == retry)
+        check(not response["success"], "Startup timeout admitted a second launch despite process/all-stop evidence: " + str(response))
+        check(peer.request("ownershipStatus")["launches"] == 1, "Second startup reached the backend")
+        peer.request("disconnect")
+    print("PASS startup timeout with target evidence preserves admission until reconciliation", flush=True)
+
+
+def disconnect_timeout_contract(adapter):
+    with Dap(adapter, "disconnect-timeout", arguments("lldb", "disconnect-timeout")) as peer:
+        peer.request("initialize", dict(adapterID="dncdbg"))
+        peer.request("launch", dict(program="owned-test-target", managedInspection=True))
+        peer.event("initialized")
+        peer.request("configurationDone")
+        peer.event("stopped")
+        peer.response(peer.send("disconnect", dict(terminateDebuggee=False)), success=False, timeout=35)
+        request = peer.send("dotnet/managedStackTrace", dict(threadId=7))
+        response = peer.receive(lambda m: m.get("type") == "response" and m.get("request_seq") == request)
+        check(not response["success"] and "not stopped" in response["message"].lower(),
+              "Unanswered disconnect restored inspection without a fresh stop: " + str(response))
+        status = peer.request("ownershipStatus")
+        check(status["moduleReads"] == 0 and status["disconnects"] == [False],
+              "Unknown disconnect accessed modules/DAC or changed nontermination intent: " + str(status))
+        peer.request("disconnect")
+    print("PASS unanswered disconnect rejects inspection before module/DAC reads and keeps detach intent", flush=True)
+
+
+def blocked_write_contract(adapter, eof=False):
+    gate = OUT / ("blocked-write-eof" if eof else "blocked-write-timeout")
+    gate.unlink(missing_ok=True)
+    ready = gate.with_suffix(".ready")
+    ready.unlink(missing_ok=True)
+    with Dap(adapter, gate.name, arguments("dap", "blocked-writes", barrier=gate)) as peer:
+        try:
+            peer.request("initialize", dict(adapterID="dncdbg"))
+            request = peer.send("pipeFill", dict(payload="x" * (8 * 1024 * 1024)))
+            wait_file(ready)
+            if eof:
+                peer.process.stdin.close()
+                peer.disconnected = True
+                try:
+                    peer.process.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    raise AssertionError("Frontend EOF did not abort a pipe-filled backend write before worker join") from None
+                check(peer.process.returncode == 0, "Blocked-write EOF teardown failed: " + str(peer.process.returncode))
+            else:
+                try:
+                    peer.response(request, success=False, timeout=35)
+                except queue.Empty:
+                    raise AssertionError("Pipe-filled backend write exceeded the 30-second native request deadline") from None
+                peer.process.stdin.close()
+                peer.disconnected = True
+                peer.process.wait(timeout=15)
+                check(peer.process.returncode == 0, "Write-timeout teardown failed")
+            check(not integration["alive"](int(ready.read_text())), "Unread backend survived transport abort")
+        finally:
+            # Release only the test peer so red runs do not strand adapter processes.
+            gate.write_text("release")
+    gate.unlink(missing_ok=True)
+    ready.unlink(missing_ok=True)
+    print("PASS blocked backend writes: " + ("frontend EOF aborts before worker join" if eof else "request deadline is bounded"), flush=True)
 
 
 def unsupported_overlay_controls(adapter):
@@ -565,6 +642,10 @@ if __name__ == "__main__":
     rejected_restart_preserves_stop(options.adapter)
     reverse_timeout_contract(options.adapter)
     startup_timeout_contract(options.adapter)
+    startup_evidence_contract(options.adapter)
+    disconnect_timeout_contract(options.adapter)
+    blocked_write_contract(options.adapter)
+    blocked_write_contract(options.adapter, eof=True)
     unsupported_overlay_controls(options.adapter)
     bundle_contracts(options.adapter)
     detached_backend_stall(options.adapter)

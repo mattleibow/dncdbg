@@ -1,4 +1,7 @@
-# Native debugger backends and read-only CoreCLR inspection
+# Experimental native debugger backends and read-only CoreCLR inspection
+
+**Experimental branch, not merge-ready.** Native-only CI does not establish
+cross-platform managed-overlay support or resolve the remaining review gates.
 
 DNCDbg has two deliberately separate modes:
 
@@ -53,12 +56,23 @@ references belong to one backend session. Reverse requests such as
 Replies are bound to their originating backend generation. A client timeout or
 failure produces a failed reply to that backend, never to its replacement.
 Each native request has its own cancellation/timeout registration; one timeout
-does not cancel unrelated requests. Failed startup releases launch admission
+does not cancel unrelated requests. Explicitly failed startup releases launch admission
 and a refused continue restores the previous partial-stop/all-stop state rather
 than inventing an all-stop.
 A timeout/transport failure is not a confirmed refusal: execution state is
 unknown and managed inspection stays unavailable until a fresh stopped event.
 An unsupported restart is rejected without expiring the unchanged stop/frames.
+An unanswered startup retains admission, even without target evidence: process,
+initialized or stopped events can precede its missing response. Disconnect or
+reinitialize to reconcile the session before another launch.
+
+Writes use a cancellable async serialization gate and bounded async pipe
+write/flush awaits. Cancellation while waiting for the gate does not affect
+another request. Interruption after a frame starts makes that transport
+unusable; the proxy never appends a new frame to a potentially partial one.
+EOF cancels requests and stops/aborts the native transport **before** joining
+its request worker. The pipe-fill tests prove worker admission by consuming
+only the next header and one payload byte before the backend stops reading.
 
 ## Find an installed debugger
 
@@ -219,6 +233,9 @@ to detach; a launched target defaults to termination.
 Refused non-terminating detach keeps the session alive and its non-termination
 intent sticky. Cleanup must not reinterpret that refusal as permission to
 terminate the target.
+An unanswered disconnect has unknown outcome, not a confirmed refusal: it must
+not restore stopped/all-stop state or access modules/DAC without a fresh stopped
+event. Only an explicit failed response can restore the prior stop.
 
 For a launched inferior, give stdio an independent terminal/file before
 detaching. LLDB's internal-console pipes can otherwise close with the debugger
@@ -338,7 +355,8 @@ did not reach the checkpoint after continue. The current Xcode adapter also
 does not advertise restart. The strict, deliberately failing research gates
 remain available with `proxy_contracts.py --attach-restart-proof`; those
 operations are not supported merely because launch inspection works.
-Blocked-write shutdown, actual CoreCLR runtime unload/reload, recursive
+Blocked-write timeout/EOF shutdown now pass deterministic pipe-fill gates.
+Actual CoreCLR runtime unload/reload, recursive
 identical-PC overlay, malformed/missing metadata degradation, and real device
 sessions remain unproven merge gates. Generic transport fault tests do not
 substitute for those real-target proofs.

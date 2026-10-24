@@ -12,9 +12,13 @@ public sealed class DapConnection : IDisposable
 {
     private readonly Stream _input;
     private readonly Stream _output;
-    private readonly object _writeLock = new();
+    private readonly SemaphoreSlim _writeLock = new(1, 1);
+    private readonly CancellationTokenSource _writes = new();
     private readonly Dictionary<int, TaskCompletionSource<DapMessage>> _pendingRequests = [];
+    private Exception? _writeFailure;
     private int _seq;
+
+    public bool WriteFailed => Volatile.Read(ref _writeFailure) != null;
 
     /// <summary>Optional sink that receives every raw message ("-> " sent, "<- " received).</summary>
     public Action<string>? Trace { get; set; }
@@ -134,23 +138,18 @@ public sealed class DapConnection : IDisposable
     /// <summary>
     /// Sends a request whose response is delivered through <see cref="CompleteRequest"/> by whoever reads the stream.
     /// </summary>
-    public Task<DapMessage> SendRequestAsync(string command, object? arguments = null, CancellationToken cancellation = default)
+    public async Task<DapMessage> SendRequestAsync(string command, object? arguments = null, CancellationToken cancellation = default)
     {
         cancellation.ThrowIfCancellationRequested();
         var completion = new TaskCompletionSource<DapMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
-        int seq = Send(CreateRequest(command, arguments), completion);
-        return AwaitResponse();
-
-        async Task<DapMessage> AwaitResponse()
+        int seq = await SendAsync(CreateRequest(command, arguments), cancellation, completion).ConfigureAwait(false);
+        using CancellationTokenRegistration registration = cancellation.Register(() =>
         {
-            using CancellationTokenRegistration registration = cancellation.Register(() =>
-            {
-                lock (_pendingRequests)
-                    if (_pendingRequests.Remove(seq))
-                        completion.TrySetCanceled(cancellation);
-            });
-            return await completion.Task.ConfigureAwait(false);
-        }
+            lock (_pendingRequests)
+                if (_pendingRequests.Remove(seq))
+                    completion.TrySetCanceled(cancellation);
+        });
+        return await completion.Task.ConfigureAwait(false);
     }
 
     /// <returns>false if the response does not belong to a request sent with <see cref="SendRequestAsync"/>.</returns>
@@ -185,10 +184,22 @@ public sealed class DapConnection : IDisposable
 
     public int SendMessage(DapMessage message) => Send(message);
 
-    private int Send(DapMessage msg, TaskCompletionSource<DapMessage>? completion = null)
+    public Task<int> SendMessageAsync(DapMessage message, CancellationToken cancellation = default) =>
+        SendAsync(message, cancellation);
+
+    private int Send(DapMessage message) => SendAsync(message, CancellationToken.None).GetAwaiter().GetResult();
+
+    private async Task<int> SendAsync(DapMessage msg, CancellationToken cancellation,
+        TaskCompletionSource<DapMessage>? completion = null)
     {
-        lock (_writeLock)
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellation, _writes.Token);
+        await _writeLock.WaitAsync(linked.Token).ConfigureAwait(false);
+        bool exposed = false;
+        try
         {
+            if (WriteFailed)
+                throw new IOException("The DAP output transport failed during a previous write.", _writeFailure);
+            linked.Token.ThrowIfCancellationRequested();
             msg.Seq = checked(++_seq);
             // Register before writing: an in-process peer or fast pipe response can arrive during Flush.
             if (completion != null)
@@ -199,23 +210,35 @@ public sealed class DapConnection : IDisposable
                 byte[] payload = JsonSerializer.SerializeToUtf8Bytes(msg, DapJson.Options);
                 byte[] header = Encoding.ASCII.GetBytes($"Content-Length: {payload.Length}\r\n\r\n");
                 Trace?.Invoke("-> " + Encoding.UTF8.GetString(payload));
-                _output.Write(header);
-                _output.Write(payload);
-                _output.Flush();
+                linked.Token.ThrowIfCancellationRequested();
+                exposed = true;
+                // Some streams cannot cancel an already-started OS write. Bound the await
+                // too; the transport owner must abort the peer before disposing such a stream.
+                await _output.WriteAsync(header, linked.Token).AsTask().WaitAsync(linked.Token).ConfigureAwait(false);
+                await _output.WriteAsync(payload, linked.Token).AsTask().WaitAsync(linked.Token).ConfigureAwait(false);
+                await _output.FlushAsync(linked.Token).WaitAsync(linked.Token).ConfigureAwait(false);
             }
-            catch
+            catch (Exception error)
             {
                 if (completion != null)
                     lock (_pendingRequests)
                         _pendingRequests.Remove(msg.Seq);
+                if (exposed)
+                {
+                    Interlocked.CompareExchange(ref _writeFailure, error, null);
+                    _writes.Cancel();
+                    CancelPendingRequests();
+                }
                 throw;
             }
             return msg.Seq;
         }
+        finally { _writeLock.Release(); }
     }
 
     public void Dispose()
     {
+        _writes.Cancel();
         CancelPendingRequests();
         _input.Dispose();
         _output.Dispose();

@@ -13,6 +13,8 @@ internal sealed class NativeAdapterSession : IDisposable
     private readonly Task _stderr;
     private volatile bool _disposing;
     private bool _disconnected;
+    private bool _transportStopped;
+    private readonly Action<Exception> _failed;
 
     public int ProcessId => _process.Id;
     public bool IsAlive => !_process.HasExited;
@@ -21,6 +23,7 @@ internal sealed class NativeAdapterSession : IDisposable
         Action<Exception> failed, Action<string> log)
     {
         _log = log;
+        _failed = failed;
         var start = new ProcessStartInfo(descriptor.Path)
         {
             RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true,
@@ -59,8 +62,16 @@ internal sealed class NativeAdapterSession : IDisposable
         });
     }
 
-    public Task<DapMessage> SendAsync(string command, object? arguments, CancellationToken cancellation = default) =>
-        _connection.SendRequestAsync(command, arguments, cancellation);
+    public async Task<DapMessage> SendAsync(string command, object? arguments, CancellationToken cancellation = default)
+    {
+        try { return await _connection.SendRequestAsync(command, arguments, cancellation).ConfigureAwait(false); }
+        catch (Exception error) when (error is OperationCanceledException or IOException or ObjectDisposedException)
+        {
+            if (_connection.WriteFailed && !_disposing)
+                _failed(new IOException("The native DAP write did not complete; the transport is unusable.", error));
+            throw;
+        }
+    }
 
     public DapMessage Request(string command, object? arguments, CancellationToken cancellation = default)
     {
@@ -78,11 +89,15 @@ internal sealed class NativeAdapterSession : IDisposable
         }
     }
 
-    public void SendMessage(DapMessage message) => _connection.SendMessage(message);
-
-    public void Dispose(bool terminateTarget)
+    public void SendMessage(DapMessage message)
     {
-        if (_disposing)
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        _connection.SendMessageAsync(message, timeout.Token).GetAwaiter().GetResult();
+    }
+
+    public void StopTransport(bool terminateTarget)
+    {
+        if (_transportStopped)
             return;
         _disposing = true;
         try
@@ -109,11 +124,13 @@ internal sealed class NativeAdapterSession : IDisposable
             _reader.Wait(TimeSpan.FromSeconds(5));
             _stderr.Wait(TimeSpan.FromSeconds(5));
         }
-        finally
-        {
-            _connection.Dispose();
-            _process.Dispose();
-        }
+        finally { _connection.Dispose(); _transportStopped = true; }
+    }
+
+    public void Dispose(bool terminateTarget)
+    {
+        StopTransport(terminateTarget);
+        _process.Dispose();
     }
 
     public void Dispose() => Dispose(terminateTarget: true);

@@ -114,6 +114,8 @@ owned_target = None
 selected_frame = 1
 launch_count = 0
 deferred = None
+disconnects = []
+module_reads = 0
 
 
 def response(request, body=None, success=True, message=None):
@@ -145,9 +147,26 @@ while True:
         response(request, dict(supportsConfigurationDoneRequest=True, supportsReadMemoryRequest=True,
                                supportsModulesRequest=True, supportsCancelRequest=True,
                                **{"$__lldb_version": "lldb version " + ("99.0.0" if options.mode == "version-mismatch" else "21.1.8")}))
+        if options.mode == "blocked-writes":
+            # Admit a header and one payload byte, then stop draining the pipe.
+            # This proves the proxy worker entered the write before frontend EOF.
+            while sys.stdin.buffer.readline() not in (b"\r\n", b"\n"):
+                pass
+            sys.stdin.buffer.read(1)
+            options.barrier.with_suffix(".ready").write_text(str(os.getpid()))
+            while not options.barrier.exists():
+                time.sleep(0.01)
     elif command in ("launch", "attach"):
         launch_count += 1
         if options.mode == "startup-timeout" and launch_count == 1:
+            continue
+        if options.mode == "startup-evidence" and launch_count == 1:
+            event("process", dict(systemProcessId=os.getpid(), name="test-target-evidence", isLocalProcess=True))
+            event("initialized")
+            event("stopped", dict(reason="breakpoint", threadId=7, allThreadsStopped=True))
+            continue
+        if options.mode == "startup-failure" and launch_count == 1:
+            response(request, success=False, message="Explicit startup rejection")
             continue
         if options.mode in ("detach-stall", "detach-refused"):
             owned_target = subprocess.Popen([sys.executable, __file__, "--target-gate", str(options.barrier)],
@@ -223,6 +242,12 @@ while True:
         response(request)
         event("capabilities", dict(capabilities=dict(supportsCancelRequest=True)))
     elif command == "disconnect":
+        disconnects.append(args.get("terminateDebuggee"))
+        if options.mode == "disconnect-timeout" and len(disconnects) == 1:
+            continue
+        if options.mode == "disconnect-timeout" and args.get("terminateDebuggee") is not False:
+            response(request, success=False, message="Unknown detach escalated into termination")
+            continue
         if options.mode == "detach-refused" and args.get("terminateDebuggee") is False:
             response(request, success=False, message="Test backend refused detach")
             continue
@@ -238,7 +263,10 @@ while True:
             owned_target.wait(timeout=5)
         break
     elif command == "modules":
+        module_reads += 1
         response(request, dict(modules=[]))
+    elif command == "ownershipStatus":
+        response(request, dict(launches=launch_count, disconnects=disconnects, moduleReads=module_reads))
     elif command == "readMemory" and options.mode == "partial-memory":
         address = int(args["memoryReference"], 16)
         if address == 0x1000:

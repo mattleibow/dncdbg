@@ -1,0 +1,54 @@
+Production baseline: fbf177cc47388ca730c711abd612537d9f3b8998.
+All tests were added and run before these production fixes. Full protocol
+captures remain under ignored build/validation/mixed-mode/.
+
+=== review-blocked-write-timeout-red.log ===
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "tests/DncDbg.MixedModeTests/proxy_contracts.py", line 429, in blocked_write_contract
+    raise AssertionError("Pipe-filled backend write exceeded the 30-second native request deadline") from None
+AssertionError: Pipe-filled backend write exceeded the 30-second native request deadline
+
+=== review-blocked-write-eof-red.log ===
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "tests/DncDbg.MixedModeTests/proxy_contracts.py", line 431, in blocked_write_contract
+    raise AssertionError("Frontend EOF did not abort a pipe-filled backend write before worker join") from None
+AssertionError: Frontend EOF did not abort a pipe-filled backend write before worker join
+
+=== review-disconnect-timeout-red.log ===
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "tests/DncDbg.MixedModeTests/proxy_contracts.py", line 399, in disconnect_timeout_contract
+    check(not response["success"] and "not stopped" in response["message"].lower(),
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+          "Unanswered disconnect restored inspection without a fresh stop: " + str(response))
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "tests/DncDbg.MixedModeTests/run.py", line 23, in check
+    raise AssertionError(message)
+AssertionError: Unanswered disconnect restored inspection without a fresh stop: {'seq': 7, 'type': 'response', 'command': 'dotnet/managedStackTrace', 'request_seq': 5, 'success': False, 'message': 'A separately loaded CoreCLR runtime module is unavailable. Single-file/static runtime images, Mono/NativeAOT and not-yet-loaded runtimes are not supported by this inspection provider.', 'body': {'error': {'id': 1, 'format': 'A separately loaded CoreCLR runtime module is unavailable. Single-file/static runtime images, Mono/NativeAOT and not-yet-loaded runtimes are not supported by this inspection provider.'}}}
+
+=== review-startup-evidence-red.log ===
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "tests/DncDbg.MixedModeTests/proxy_contracts.py", line 383, in startup_evidence_contract
+    check(not response["success"], "Startup timeout admitted a second launch despite process/all-stop evidence: " + str(response))
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "tests/DncDbg.MixedModeTests/run.py", line 23, in check
+    raise AssertionError(message)
+AssertionError: Startup timeout admitted a second launch despite process/all-stop evidence: {'seq': 6, 'type': 'response', 'command': 'launch', 'request_seq': 3, 'success': True}
+
+=== review-blocked-write-cleanup-green.log ===
+PASS blocked backend writes: request deadline is bounded
+PASS blocked backend writes: frontend EOF aborts before worker join
+
+=== review-disconnect-timeout-green.log ===
+PASS unanswered disconnect rejects inspection before module/DAC reads and keeps detach intent
+
+=== review-startup-evidence-green.log ===
+PASS startup timeout with target evidence preserves admission until reconciliation
+PASS unknown startup requires reconciliation; explicit startup failure permits retry
+
+=== ProtocolTests additions ===
+PASS DAP interrupted writes are bounded and invalidate partial transport
+PASS DAP queued cancellation preserves unrelated active writes

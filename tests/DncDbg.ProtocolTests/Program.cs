@@ -25,7 +25,51 @@ if (cancelledConnection.CompleteRequest(new DapMessage { Type = "response", Requ
     throw new InvalidOperationException("A late response completed a cancelled request.");
 Console.WriteLine("PASS DAP immediate response registration and cancelled/late response ownership");
 
-sealed class ImmediatePeer : MemoryStream
+using (var blockedWriter = new BlockingPeer())
+using (var blockedConnection = new DapConnection(Stream.Null, blockedWriter))
+using (var blockedCancellation = new CancellationTokenSource())
+{
+    blockedWriter.Connection = blockedConnection;
+    Task<DapMessage> blocked = blockedConnection.SendRequestAsync("blocked", cancellation: blockedCancellation.Token);
+    await blockedWriter.Entered.Task.WaitAsync(TimeSpan.FromSeconds(1));
+    blockedCancellation.Cancel();
+    try
+    {
+        await blocked.WaitAsync(TimeSpan.FromSeconds(1));
+        throw new InvalidOperationException("A noncancellable underlying write escaped the request deadline.");
+    }
+    catch (OperationCanceledException) { }
+    if (!blockedConnection.WriteFailed)
+        throw new InvalidOperationException("An interrupted frame did not invalidate the output transport.");
+    blockedWriter.Release.TrySetResult();
+    await blockedWriter.Drained.Task.WaitAsync(TimeSpan.FromSeconds(1));
+}
+Console.WriteLine("PASS DAP interrupted writes are bounded and invalidate partial transport");
+
+using (var queuedWriter = new BlockingPeer())
+using (var queuedConnection = new DapConnection(Stream.Null, queuedWriter))
+using (var queuedCancellation = new CancellationTokenSource())
+{
+    queuedWriter.Connection = queuedConnection;
+    Task<DapMessage> first = queuedConnection.SendRequestAsync("first");
+    await queuedWriter.Entered.Task.WaitAsync(TimeSpan.FromSeconds(1));
+    Task<DapMessage> queued = queuedConnection.SendRequestAsync("queued", cancellation: queuedCancellation.Token);
+    queuedCancellation.Cancel();
+    try
+    {
+        await queued.WaitAsync(TimeSpan.FromSeconds(1));
+        throw new InvalidOperationException("Cancellation did not interrupt the output queue.");
+    }
+    catch (OperationCanceledException) { }
+    if (queuedConnection.WriteFailed)
+        throw new InvalidOperationException("Cancellation before writing corrupted an unrelated frame.");
+    queuedWriter.Release.TrySetResult();
+    if ((await first.WaitAsync(TimeSpan.FromSeconds(1))).Success != true)
+        throw new InvalidOperationException("An unrelated queued-write cancellation lost the active request.");
+}
+Console.WriteLine("PASS DAP queued cancellation preserves unrelated active writes");
+
+class ImmediatePeer : MemoryStream
 {
     public DapConnection? Connection { get; set; }
     public bool Recognized { get; private set; }
@@ -39,5 +83,27 @@ sealed class ImmediatePeer : MemoryStream
         {
             Type = "response", RequestSeq = request.Seq, Command = request.Command, Success = true,
         });
+    }
+
+    public override Task FlushAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        Flush();
+        return Task.CompletedTask;
+    }
+}
+
+sealed class BlockingPeer : ImmediatePeer
+{
+    public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource Drained { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
+    {
+        Entered.TrySetResult();
+        await Release.Task;
+        await base.WriteAsync(buffer, CancellationToken.None);
+        Drained.TrySetResult();
     }
 }

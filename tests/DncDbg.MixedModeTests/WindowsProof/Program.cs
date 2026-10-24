@@ -23,6 +23,7 @@ internal sealed class InteropProof(string fixture, string sourceDirectory)
     private CorDebugProcess? _process;
     private int _managedStops;
     private int _nativeStops;
+    private int _nativeSteps;
     private ulong _nativeAddress;
     private IntPtr _symbolHandle;
     private int _pid;
@@ -43,6 +44,7 @@ internal sealed class InteropProof(string fixture, string sourceDirectory)
         });
         var launched = shim.CreateProcessForLaunch($"dotnet \"{fixture}\" --preload", true);
         _pid = launched.ProcessId;
+        using Process target = Process.GetProcessById(_pid);
         Console.WriteLine($"Created suspended target {_pid}; host={RuntimeInformation.RuntimeIdentifier}");
         IntPtr registration = IntPtr.Zero;
         try
@@ -65,11 +67,10 @@ internal sealed class InteropProof(string fixture, string sourceDirectory)
             }));
             shim.ResumeProcess(launched.ResumeHandle);
             await _completed.Task.WaitAsync(TimeSpan.FromSeconds(60));
-            using Process target = Process.GetProcessById(_pid);
             await target.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15));
             Require(target.ExitCode == 0, $"Target exit code: {target.ExitCode}");
-            Require(_managedStops == 2 && _nativeStops == 1,
-                $"Incomplete scenario: managed={_managedStops}, native={_nativeStops}");
+            Require(_managedStops == 2 && _nativeStops == 1 && _nativeSteps == 1,
+                $"Incomplete scenario: managed={_managedStops}, native={_nativeStops}, native steps={_nativeSteps}");
             Console.WriteLine("PASS public ICorDebug interop launch: managed -> native -> managed, result 42, clean exit");
         }
         finally
@@ -79,16 +80,23 @@ internal sealed class InteropProof(string fixture, string sourceDirectory)
             shim.CloseResumeHandle(launched.ResumeHandle);
             try
             {
-                using Process target = Process.GetProcessById(_pid);
                 if (!target.HasExited)
+                {
                     target.Kill();
+                    await target.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+                }
             }
             catch (ArgumentException) { }
             _events.CompleteAdding();
             await worker.WaitAsync(TimeSpan.FromSeconds(10));
             if (_symbolHandle != IntPtr.Zero)
                 NativeSymbols.Cleanup(_symbolHandle);
-            _debugger?.Terminate();
+            if (_debugger is { } debugger)
+            {
+                HRESULT cleanup = debugger.TryTerminate();
+                if (cleanup != HRESULT.S_OK)
+                    Console.Error.WriteLine($"ICorDebug cleanup after proof: {cleanup}");
+            }
             GC.KeepAlive(_managed);
             GC.KeepAlive(_unmanaged);
         }
@@ -146,6 +154,8 @@ internal sealed class InteropProof(string fixture, string sourceDirectory)
         ((CorDebugGenericValue)frame.GetArgument(0)).GetValue((IntPtr)(&left));
         ((CorDebugGenericValue)frame.GetArgument(1)).GetValue((IntPtr)(&right));
         Require(left == 19 && right == 23, $"Managed arguments: {left}, {right}");
+        int managedFrames = thread.Chains.SelectMany(c => c.Frames).Count(f => f is CorDebugILFrame);
+        Require(managedFrames >= 2, $"Managed stack has only {managedFrames} IL frames.");
         Console.WriteLine($"PASS managed stop {_managedStops}: thread={thread.Id}, token={frame.Function.Token}, IL={frame.IP.pnOffset}, args={left},{right}");
         if (_managedStops == 1)
             BindNative();
@@ -198,13 +208,28 @@ internal sealed class InteropProof(string fixture, string sourceDirectory)
             if (address == _nativeAddress && _nativeAddress != 0)
             {
                 _nativeStops++;
-                var context = new AMD64_CONTEXT { ContextFlags = ContextFlags.AMD64ContextFull };
-                process.GetThreadContext(e.dwThreadId, sizeof(AMD64_CONTEXT), (IntPtr)(&context));
-                Console.WriteLine($"PASS native source stop: RIP={context.Rip:x}, RCX={context.Rcx}, RDX={context.Rdx}, RSP={context.Rsp:x}");
-                Require(context.Rcx == 19 && context.Rdx == 23, "Native x64 argument registers must contain 19 and 23.");
-                process.ClearUnmanagedBreakpoint(new CORDB_ADDRESS(_nativeAddress));
+                var context = (AMD64_CONTEXT*)NativeMemory.AlignedAlloc((nuint)sizeof(AMD64_CONTEXT), 16);
+                try
+                {
+                    *context = new AMD64_CONTEXT { ContextFlags = ContextFlags.AMD64ContextFull };
+                    process.GetThreadContext(e.dwThreadId, sizeof(AMD64_CONTEXT), (IntPtr)context);
+                    Console.WriteLine($"PASS native source stop: RIP={context->Rip:x}, RCX={context->Rcx}, RDX={context->Rdx}, RSP={context->Rsp:x}");
+                    Require(context->Rcx == 19 && context->Rdx == 23, "Native x64 argument registers must contain 19 and 23.");
+                    NativeSymbols.RequireNativeStack(_symbolHandle, e.dwThreadId, *context);
+                    process.ClearUnmanagedBreakpoint(new CORDB_ADDRESS(_nativeAddress));
+                    context->EFlags |= (X86_CONTEXT_FLAGS)0x100;
+                    process.SetThreadContext(e.dwThreadId, sizeof(AMD64_CONTEXT), (IntPtr)context);
+                }
+                finally { NativeMemory.AlignedFree(context); }
             }
             process.ClearCurrentException(e.dwThreadId);
+        }
+        else if (e.dwDebugEventCode == DebugEventType.EXCEPTION_DEBUG_EVENT
+            && (uint)e.u.Exception.ExceptionRecord.ExceptionCode == 0x80000004 && _nativeStops == 1)
+        {
+            _nativeSteps++;
+            process.ClearCurrentException(e.dwThreadId);
+            Console.WriteLine("PASS native instruction single-step");
         }
         process.Continue(false);
     }

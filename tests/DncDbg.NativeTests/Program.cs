@@ -26,7 +26,8 @@ if (args.Length == 2 || args[2] == "version-probe-descriptors")
     }
     try
     {
-        _ = NativeAdapterLocator.Resolve("lldb", probePath, probeArguments);
+        for (int warmup = 0; warmup < 5; warmup++)
+            _ = NativeAdapterLocator.Resolve("lldb", probePath, probeArguments);
         GC.Collect();
         GC.WaitForPendingFinalizers();
         GC.Collect();

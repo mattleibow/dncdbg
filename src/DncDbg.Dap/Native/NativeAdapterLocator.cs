@@ -260,15 +260,16 @@ internal static class NativeAdapterLocator
             throw new System.ComponentModel.Win32Exception(assignError);
         }
         process.StandardInput.Dispose();
+        (string Text, bool Complete) outResult = ("", false), errResult = ("", false);
         using var readersDone = new CountdownEvent(2);
-        Task<(string Text, bool Complete)> output = Task.Run(() =>
+        _ = System.Threading.ThreadPool.QueueUserWorkItem(_ =>
         {
-            try { return ReadPipe(process.StandardOutput.BaseStream, deadline.Token); }
+            try { outResult = ReadPipe(process.StandardOutput.BaseStream, deadline.Token); }
             finally { readersDone.Signal(); }
         });
-        Task<(string Text, bool Complete)> error = Task.Run(() =>
+        _ = System.Threading.ThreadPool.QueueUserWorkItem(_ =>
         {
-            try { return ReadPipe(process.StandardError.BaseStream, deadline.Token); }
+            try { errResult = ReadPipe(process.StandardError.BaseStream, deadline.Token); }
             finally { readersDone.Signal(); }
         });
         try
@@ -283,8 +284,6 @@ internal static class NativeAdapterLocator
             readersDone.Wait(TimeSpan.FromSeconds(1));
             if (!GetExitCodeProcess(processHandle, out uint rawExitCode))
                 throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
-            (string Text, bool Complete) outResult = output.IsCompletedSuccessfully ? output.Result : ("", false);
-            (string Text, bool Complete) errResult = error.IsCompletedSuccessfully ? error.Result : ("", false);
             bool complete = outResult.Complete && errResult.Complete;
             return (unchecked((int)rawExitCode), CompleteLines(outResult.Text, complete) + CompleteLines(errResult.Text, complete), complete);
         }
@@ -324,15 +323,16 @@ internal static class NativeAdapterLocator
         stdout.DisposeLocalCopyOfClientHandle();
         stderr.DisposeLocalCopyOfClientHandle();
         var timer = Stopwatch.StartNew();
+        (string Text, bool Complete) outResult = ("", false), errResult = ("", false);
         using var readersDone = new CountdownEvent(2);
-        Task<(string Text, bool Complete)> output = Task.Run(() =>
+        _ = System.Threading.ThreadPool.QueueUserWorkItem(_ =>
         {
-            try { return ReadPipe(stdout, deadline.Token); }
+            try { outResult = ReadPipe(stdout, deadline.Token); }
             finally { readersDone.Signal(); }
         });
-        Task<(string Text, bool Complete)> error = Task.Run(() =>
+        _ = System.Threading.ThreadPool.QueueUserWorkItem(_ =>
         {
-            try { return ReadPipe(stderr, deadline.Token); }
+            try { errResult = ReadPipe(stderr, deadline.Token); }
             finally { readersDone.Signal(); }
         });
         int status = 0;
@@ -348,8 +348,6 @@ internal static class NativeAdapterLocator
             readersDone.Wait(TimeSpan.FromSeconds(1));
             _ = kill(-pid, 9);
             reaped = ReapUnix(pid, out status);
-            (string Text, bool Complete) outResult = output.IsCompletedSuccessfully ? output.Result : ("", false);
-            (string Text, bool Complete) errResult = error.IsCompletedSuccessfully ? error.Result : ("", false);
             bool complete = outResult.Complete && errResult.Complete;
             int exitCode = reaped && (status & 0x7f) == 0 ? (status >> 8) & 0xff : -1;
             return (exitCode, CompleteLines(outResult.Text, complete) + CompleteLines(errResult.Text, complete), complete);

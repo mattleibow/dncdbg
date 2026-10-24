@@ -75,6 +75,11 @@ if options.lldb:
                 os._exit(child.wait(timeout=5))
             if message.get("request_seq") == internal_seq:
                 continue
+            if options.mode == "decimal-modules" and message.get("command") == "modules":
+                for module in message.get("body", {}).get("modules", []):
+                    address = module.get("addressRange", "")
+                    if address.startswith("0x"):
+                        module["addressRange"] = str(int(address.split("-")[0].strip(), 16))
             write(sys.stdout.buffer, message)
 
     receiver = threading.Thread(target=receive, daemon=True)
@@ -107,6 +112,8 @@ if options.lldb:
 last_reverse_response = None
 owned_target = None
 selected_frame = 1
+launch_count = 0
+deferred = None
 
 
 def response(request, body=None, success=True, message=None):
@@ -139,6 +146,9 @@ while True:
                                supportsModulesRequest=True, supportsCancelRequest=True,
                                **{"$__lldb_version": "lldb version " + ("99.0.0" if options.mode == "version-mismatch" else "21.1.8")}))
     elif command in ("launch", "attach"):
+        launch_count += 1
+        if options.mode == "startup-timeout" and launch_count == 1:
+            continue
         if options.mode in ("detach-stall", "detach-refused"):
             owned_target = subprocess.Popen([sys.executable, __file__, "--target-gate", str(options.barrier)],
                                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -147,7 +157,7 @@ while True:
         event("initialized")
     elif command == "configurationDone":
         response(request)
-        event("stopped", dict(reason="breakpoint", threadId=7, allThreadsStopped=True))
+        event("stopped", dict(reason="breakpoint", threadId=7, allThreadsStopped=options.mode != "refused-control"))
     elif command == "stackTrace":
         response(request, dict(totalFrames=2, stackFrames=[dict(id=1, name="native", line=3, column=1,
                                                                instructionPointerReference="0x1000",
@@ -181,6 +191,9 @@ while True:
         source = args.get("source", {}).get("sourceReference", args.get("sourceReference"))
         response(request, dict(content="native source"), success=source == 1)
     elif command in ("continue", "next"):
+        if options.mode == "refused-control":
+            response(request, success=False, message="Test backend refused continuation")
+            continue
         response(request, dict(allThreadsContinued=True))
         event("continued", dict(threadId=7, allThreadsContinued=True))
         event("stopped", dict(reason="step", threadId=7, allThreadsStopped=True))
@@ -193,7 +206,14 @@ while True:
         response(request)
     elif command == "reverseStatus":
         response(request, dict(valid=last_reverse_response is not None and last_reverse_response["request_seq"] == 500
-                               and last_reverse_response.get("success") is True))
+                               and last_reverse_response.get("success") is True, response=last_reverse_response))
+    elif command == "deferred":
+        deferred = request
+    elif command == "timeout":
+        continue
+    elif command == "releaseDeferred":
+        response(deferred, dict(released=True))
+        response(request)
     elif command == "invalidate":
         response(request)
         event("invalidated", dict(areas=["variables"], threadId=7, stackFrameId=1))

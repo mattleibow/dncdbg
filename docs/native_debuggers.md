@@ -50,6 +50,12 @@ lifetimes. Frame/variable IDs are not reused across native stops; managed
 references additionally belong to a specific inspection generation. Source
 references belong to one backend session. Reverse requests such as
 `runInTerminal` retain their backend request identity through the proxy.
+Replies are bound to their originating backend generation. A client timeout or
+failure produces a failed reply to that backend, never to its replacement.
+Each native request has its own cancellation/timeout registration; one timeout
+does not cancel unrelated requests. Failed startup releases launch admission
+and a refused continue restores the previous partial-stop/all-stop state rather
+than inventing an all-stop.
 
 ## Find an installed debugger
 
@@ -80,6 +86,16 @@ not substituted for `lldb-dap`. Older toolchains may call the adapter
 The version probe distinguishes LLVM's adapter version from liblldb's runtime
 version (notably Xcode's `21.0.0` versus `2103...`). If DAP reports a different
 liblldb identity than the probe, initialization fails.
+The version subprocess has redirected, closed stdin and cannot consume the
+client's DAP initialize bytes. Adapters without CLI `--version` are probed by
+public DAP initialize/version instead. Candidates must actually execute; merely
+finding an executable is not a usable-toolchain check.
+
+The Windows runner's public LLVM imports `python310.dll`. Its CI lane installs
+public CPython 3.10 with `actions/setup-python`, checks `liblldb.dll` imports
+using `llvm-readobj`, and places the matching DLL directory on PATH. CPython's
+PSF-2.0 license and bundled notices apply; it is a host-tool dependency, not
+redistributed by DNCDbg. An incompatible Python ABI is not a substitute.
 
 ## Supply an upstream LLVM bundle
 
@@ -136,6 +152,10 @@ read-only diagnostic. Native-frame evaluation is forwarded to the native engine.
 
 `dotnet/nativeStackTrace` returns the un-enriched native view.
 `dotnet/managedStackTrace` requests strict read-only managed inspection.
+Its frame IDs use the same proxy-owned namespace as `stackTrace` and can be
+passed to `scopes`. Native locals references retain their owning frame: LLDB's
+static variables references and mutable selected frame must not alias another
+thread/frame selected during internal register inspection.
 `dotnet/info` reports the execution owner, native-adapter PID, actual debuggee
 PID, stop generation and managed snapshot serial. If optional enrichment is
 unavailable, native frames remain usable but the response includes
@@ -159,12 +179,25 @@ a result from an expired stop is rejected. No native/managed object heap
 enumeration or GC-suspension consistency is claimed: this provider exposes
 stack frames and primitive scalar values, not a general heap/func-eval engine.
 Hardware-debug/SVE register banks are not part of the managed inspection view.
+ARM64 `fp`/`lr` and `x29`/`x30` aliases are accepted; unrequested floating-point
+banks are not required. Requested-but-missing registers fail inspection instead
+of supplying invented zero values. Partial memory reads retain their valid
+prefix when the next page is unmapped.
+
+Native evaluation or breakpoint mutation at a stop expires the managed view.
+Clients must advertise `supportsInvalidatedEvent` to mutate an active managed
+view; the proxy sends stacks/variables invalidation and the client refreshes.
+Backend frame-scoped invalidation is broadened to stacks/variables instead of
+leaking backend frame IDs. Unsupported cancel/restart capabilities stay masked
+on both initialize and later capability events.
 
 ### Execution versus inspection matrix
 
 | Feature | Native mode |
 | --- | --- |
-| Native launch/attach, persistent native breakpoints, variables, C/C++ evaluation, stepping | Owned by the selected native adapter and its advertised capabilities |
+| Native launch, persistent native breakpoints, variables, C/C++ evaluation, stepping | Owned by the selected native adapter |
+| Native-only attach | Forwarded to the native adapter; real CoreCLR attach/continue is unproven, not supported as a mixed inspection result |
+| Attach with managed inspection; proxy restart | Explicitly rejected until real post-continue/restart contracts are green; disconnect/reinitialize instead |
 | Managed stack/source and primitive local/argument inspection | Optional read-only CoreCLR provider; matching local metadata/runtime required |
 | Native/managed frame correlation | Exact same-thread PC match only |
 | Managed source breakpoints, managed stepping, CLR exception filters, managed func-eval/mutation | **Not implemented**; use normal managed mode |
@@ -180,6 +213,9 @@ Native detach is passed to the backend. An accepted `terminateDebuggee:false`
 relinquishes ownership: even if the adapter then stalls, cleanup may kill only
 the adapter, not its detached target tree. Attach-session EOF similarly defaults
 to detach; a launched target defaults to termination.
+Refused non-terminating detach keeps the session alive and its non-termination
+intent sticky. Cleanup must not reinterpret that refusal as permission to
+terminate the target.
 
 For a launched inferior, give stdio an independent terminal/file before
 detaching. LLDB's internal-console pipes can otherwise close with the debugger
@@ -244,6 +280,62 @@ requests, reinitialization, missing/version-mismatched adapters, malformed DAP,
 pinned missing/poisoned DAC libraries, expired reads, target exit and lost
 backend connection. A held memory-read barrier is implemented only in a test
 relay, not as a production injection hook.
+
+### Proof scope and remaining merge gates
+
+The complete local JIT/scalar overlay has been proven on **macOS 27.0.1 arm64,
+CoreCLR 10.0.12, Xcode liblldb 2103.0.34.103**, using the fixture's cooperative
+native checkpoints. It is not a cross-platform managed execution claim.
+The active workflow gates native-only LLDB relay/lifecycle and generic ownership
+contracts separately on macOS, Linux and Windows. Strict managed-overlay
+assertions run only when that explicitly proven configuration matches; other
+runner configurations are reported unproven, not converted into managed passes.
+
+[Run 40085975520](https://github.com/mattleibow/dncdbg/actions/runs/40085975520)
+was red: macOS/Linux failed before DAC open because older LLDB serializes
+`Module.addressRange` in **decimal**, while the initial proxy required `0x`;
+Windows could not load `python310.dll`. Public
+[LLVM 18 JSONUtils.cpp](https://github.com/llvm/llvm-project/blob/llvmorg-18.1.8/lldb/tools/lldb-dap/JSONUtils.cpp#L492-L494)
+uses `std::to_string(GetObjectFileHeaderAddress().GetLoadAddress())`. A
+real-LLDB relay reproduced that decimal representation, failed with
+`The native adapter did not expose the CoreCLR module's load address.`, then
+passed strict managed frame/locals assertions after the parser fix. This
+addresses the known representation failure, not every DAC/ABI/stop combination
+on the previously red CI configurations.
+
+The new timeout/control regressions were red before their production fixes:
+
+| Contract | Exact pre-fix failure | Post-fix result |
+| --- | --- | --- |
+| One native request times out while another is pending | `TaskCanceledException: A task was canceled.` on the unrelated task | Unrelated request completes after its own reply |
+| Startup timeout, then retry launch | `A native target is already active. Reinitialize or use the native backend's restart request.` | Second launch admitted |
+| Client does not answer reverse request | `Reverse timeout left the originating backend unanswered: None` | Origin receives failed `request_seq:500` response |
+| Continue refused at partial stop | Inspection reaches CoreCLR lookup instead of the `all-threads-stopped` guard | Prior partial-stop state preserved |
+| Managed attach before proof | `success:True` | Explicit unsupported attach error; restart is also rejected |
+
+Exact transcripts are retained in `evidence/proxy-lifecycle-red-green.txt`
+under `tests/DncDbg.MixedModeTests`; complete protocol captures and prior reds
+remain under ignored `build/validation/mixed-mode/`. No prior red evidence or
+managed assertion was replaced by a weaker assertion.
+
+Real attach reached SIGSTOP with a verified native checkpoint breakpoint, but
+did not reach the checkpoint after continue. The current Xcode adapter also
+does not advertise restart. The strict, deliberately failing research gates
+remain available with `proxy_contracts.py --attach-restart-proof`; those
+operations are not supported merely because launch inspection works.
+Blocked-write shutdown, actual CoreCLR runtime unload/reload, recursive
+identical-PC overlay, malformed/missing metadata degradation, and real device
+sessions remain unproven merge gates. Generic transport fault tests do not
+substitute for those real-target proofs.
+
+ReadyToRun native-only relay passes locally, but named managed overlay is
+partial (the fixture's `ManagedCall` can be absent as an IL frame). The public
+`DOTNET_ReadyToRun=0` setting on the same artifact restores the JIT-only proof;
+it does not prove R2R parity. Tiering enabled/disabled launch configurations
+passed, not actual promotion/ReJIT/EnC notifications. Single-file native-only
+lifecycle passes; a statically linked/runtime-in-app image has no separately
+loaded CoreCLR module and managed inspection explicitly reports unavailable.
+Missing/nonnamable PE metadata is not silently claimed as named-source support.
 
 ### Public references
 

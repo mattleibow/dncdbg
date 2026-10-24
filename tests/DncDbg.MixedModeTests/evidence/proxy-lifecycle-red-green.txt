@@ -1,0 +1,72 @@
+Captured locally before each corresponding production fix.
+Timeout/control production baseline: 4a0e7101dc1ce94ceed5029777aeeee34a91d354.
+Tests were added before modifying production. Paths/line numbers below are
+the exact captured traceback, not regenerated after the fixes.
+
+=== refused-control-red.log ===
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "tests/DncDbg.MixedModeTests/proxy_contracts.py", line 313, in refused_control_contract
+    check(not error["success"] and "all-threads-stopped" in error["message"],
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+          "A refused control request fabricated an all-stop managed snapshot: " + str(error))
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "tests/DncDbg.MixedModeTests/run.py", line 23, in check
+    raise AssertionError(message)
+AssertionError: A refused control request fabricated an all-stop managed snapshot: {'seq': 8, 'type': 'response', 'command': 'dotnet/managedStackTrace', 'request_seq': 6, 'success': False, 'message': 'A separately loaded CoreCLR runtime module is unavailable. Single-file/static runtime images, Mono/NativeAOT and not-yet-loaded runtimes are not supported by this inspection provider.', 'body': {'error': {'id': 1, 'format': 'A separately loaded CoreCLR runtime module is unavailable. Single-file/static runtime images, Mono/NativeAOT and not-yet-loaded runtimes are not supported by this inspection provider.'}}}
+
+=== reverse-timeout-red.log ===
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "tests/DncDbg.MixedModeTests/proxy_contracts.py", line 326, in reverse_timeout_contract
+    check(response and response["success"] is False and response["request_seq"] == 500
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+          and "timed out" in response["message"].lower(), "Reverse timeout left the originating backend unanswered: " + str(response))
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "tests/DncDbg.MixedModeTests/run.py", line 23, in check
+    raise AssertionError(message)
+AssertionError: Reverse timeout left the originating backend unanswered: None
+
+=== startup-timeout-red.log ===
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "tests/DncDbg.MixedModeTests/proxy_contracts.py", line 338, in startup_timeout_contract
+    peer.request("launch", dict(program="owned-test-target"))
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "tests/DncDbg.MixedModeTests/run.py", line 103, in request
+    return self.response(self.send(command, arguments), success)
+           ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "tests/DncDbg.MixedModeTests/run.py", line 97, in response
+    check(response.get("success") == success, str(response))
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "tests/DncDbg.MixedModeTests/run.py", line 23, in check
+    raise AssertionError(message)
+AssertionError: {'seq': 3, 'type': 'response', 'command': 'launch', 'request_seq': 3, 'success': False, 'message': "A native target is already active. Reinitialize or use the native backend's restart request.", 'body': {'error': {'id': 1, 'format': "A native target is already active. Reinitialize or use the native backend's restart request."}}}
+
+=== request-timeout-red.log ===
+Unhandled exception. System.Threading.Tasks.TaskCanceledException: A task was canceled.
+   at DncDbg.Protocol.DapConnection.<>c__DisplayClass17_0.<<SendRequestAsync>g__AwaitResponse|0>d.MoveNext() in /Users/matthew/.copilot/repos/copilot-worktrees/dncdbg/mattleibow-fantastic-guide/src/DncDbg.Protocol/DapConnection.cs:line 152
+--- End of stack trace from previous location ---
+   at Program.<Main>$(String[] args) in /Users/matthew/.copilot/repos/copilot-worktrees/dncdbg/mattleibow-fantastic-guide/tests/DncDbg.NativeTests/Program.cs:line 20
+   at Program.<Main>(String[] args)
+
+=== control-timeouts-green.log (same tests, after production fixes) ===
+PASS refused native controls preserve the prior partial-stop/all-stop state
+PASS unanswered reverse requests fail explicitly to their originating backend
+PASS failed native startup clears admission state and permits retry
+PASS reverse requests are fenced to their original native backend generation
+
+=== request-timeout-green.log ===
+PASS native request timeout preserves unrelated pending requests
+
+=== decimal-modules-red.log (terminal assertion, before parser fix) ===
+AssertionError: {'seq': 412, 'type': 'response', 'command': 'dotnet/managedStackTrace', 'request_seq': 6, 'success': False, 'message': "The native adapter did not expose the CoreCLR module's load address.", 'body': {'error': {'id': 1, 'format': "The native adapter did not expose the CoreCLR module's load address."}}}
+
+=== decimal-modules-green.log (same real-LLDB relay, after parser fix) ===
+PASS strict managed stack returns owned frame references usable by scopes/variables (decimal-modules)
+
+=== unsupported-controls-red.log (terminal assertion, before explicit guards) ===
+AssertionError: Unproven control was not explicitly rejected: {'seq': 2, 'type': 'response', 'command': 'attach', 'request_seq': 2, 'success': True}
+
+=== unsupported-controls-green.log ===
+PASS unproven managed attach and proxy restart fail explicitly

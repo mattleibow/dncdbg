@@ -68,17 +68,23 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
                         return;
                     continue;
                 }
-                if (message.Command is "continue" or "next" or "stepIn" or "stepOut" or "restart" or "launch" or "attach")
+                Work work;
+                lock (_state)
                 {
-                    lock (_state) { _operation?.Cancel(); }
-                    Invalidate(execution: true, stopped: false, cancelOperation: true);
+                    bool stopped = _stopped, allStopped = _allStopped;
+                    if (message.Command is "continue" or "next" or "stepIn" or "stepOut" or "restart" or "launch" or "attach")
+                    {
+                        _operation?.Cancel();
+                        Invalidate(execution: true, stopped: false, cancelOperation: true);
+                    }
+                    else if (message.Command is "pause" or "terminate" or "initialize")
+                    {
+                        _operation?.Cancel();
+                        Invalidate(execution: false, stopped: null, cancelOperation: true);
+                    }
+                    work = new Work(message, _stop, WasStopped: stopped, AllStopped: allStopped);
                 }
-                else if (message.Command is "pause" or "terminate" or "initialize")
-                {
-                    lock (_state) { _operation?.Cancel(); }
-                    Invalidate(execution: false, stopped: null, cancelOperation: true);
-                }
-                _requests.Add(new Work(message, StopEpoch()));
+                _requests.Add(work);
             }
         }
         finally { Dispose(); }
@@ -97,9 +103,14 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
                     or "scopes" or "variables" or "readMemory";
             }
             try { Handle(work); }
-            catch (OperationCanceledException) { client.SendErrorResponse(work.Request, "cancelled: native stop or session changed"); }
+            catch (OperationCanceledException)
+            {
+                RestoreControlState(work);
+                client.SendErrorResponse(work.Request, "cancelled: native stop or session changed");
+            }
             catch (Exception error)
             {
+                RestoreControlState(work);
                 log($"Native proxy request '{work.Request.Command}' failed: {error}");
                 client.SendErrorResponse(work.Request, ErrorText.Describe(error));
             }
@@ -139,6 +150,8 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         }
         if (command == "cancel")
             throw new DebuggerException("DAP request-id cancellation is not supported by this native proxy; pause/disconnect still interrupt managed inspection.");
+        if (command == "restart")
+            throw new DebuggerException("Native proxy restart is not supported until target-generation and real-backend restart proofs are green. Disconnect and reinitialize instead.");
 
         long stop = StopEpoch(), inspection = InspectionEpoch(), session = Session();
         _references.Prune(stop, inspection, session);
@@ -245,13 +258,8 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
             Transform(body, "sourceReference", id => _references.Source(id, session));
             response.Body = body;
         }
-        else if (command is "continue" or "next" or "stepIn" or "stepOut" or "restart")
-        {
-            // A refused control request did not resume the target.
-            lock (_state)
-                if (_stop == work.Stop && !_targetEnded)
-                    _stopped = _allStopped = true;
-        }
+        else
+            RestoreControlState(work);
         ForwardResponse(request, response);
     }
 
@@ -293,6 +301,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
             if (descriptor.Version != null && reported != null && reported != descriptor.Version)
                 throw new DebuggerException("Native debugger version mismatch between discovery and DAP initialization.");
             capabilities["supportsCancelRequest"] = false;
+            capabilities["supportsRestartRequest"] = false;
             capabilities["dncdbg"] = JsonSerializer.SerializeToNode(new
             {
                 ExecutionOwner = "native-adapter", ManagedInspection = "optional-read-only-coreclr",
@@ -323,6 +332,8 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
             throw new DebuggerException("Only the read-only CoreCLR inspection provider is implemented.");
         if (_managed && descriptor.Kind != "lldb")
             throw new DebuggerException("Managed inspection currently requires LLDB's OS-thread and register DAP contract.");
+        if (_managed && request.Command == "attach")
+            throw new DebuggerException("Attach with managed inspection is not supported: the real CoreCLR post-continue attach proof is not green. Use a native-owned launch.");
         if (_managed && new[] { "attachCommands", "launchCommands", "initCommands", "platformName", "coreFile" }.Any(arguments.ContainsKey))
             throw new DebuggerException("Managed inspection is currently local/matching-host only; use native-only mode for remote/device sessions.");
         arguments.Remove("managedInspection");
@@ -331,13 +342,23 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         long session = Session();
         CancellationToken sessionToken;
         lock (_state) { sessionToken = _sessionCancellation.Token; }
-        Task<DapMessage> pending = native.SendAsync(request.Command!, arguments, sessionToken);
+        var startup = CancellationTokenSource.CreateLinkedTokenSource(sessionToken, _lifetime.Token);
+        startup.CancelAfter(TimeSpan.FromSeconds(30));
+        Task<DapMessage> pending;
+        try { pending = native.SendAsync(request.Command!, arguments, startup.Token); }
+        catch
+        {
+            startup.Dispose();
+            _started = false;
+            throw;
+        }
         // DAP permits launch/attach responses after configurationDone; never block configuration admission.
         Task completion = Task.Run(async () =>
         {
+            using (startup)
             try
             {
-                DapMessage response = await pending.WaitAsync(TimeSpan.FromSeconds(30), _lifetime.Token);
+                DapMessage response = await pending;
                 if (session != Session())
                     client.SendErrorResponse(request, "Native session was replaced.");
                 else if (!_stopping)
@@ -349,6 +370,8 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
             }
             catch (Exception error) when (error is OperationCanceledException or TimeoutException or IOException)
             {
+                if (session == Session())
+                    _started = false;
                 if (!_stopping)
                     client.SendErrorResponse(request, "Native startup failed: " + error.Message);
             }
@@ -424,10 +447,14 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
             && name.GetString() is "libcoreclr.dylib" or "libcoreclr.so" or "coreclr.dll");
         if (module.ValueKind != JsonValueKind.Object)
             throw new DebuggerException("A separately loaded CoreCLR runtime module is unavailable. Single-file/static runtime images, Mono/NativeAOT and not-yet-loaded runtimes are not supported by this inspection provider.");
-        Match start = Regex.Match(module.GetProperty("addressRange").GetString() ?? "", @"0x[0-9a-fA-F]+", RegexOptions.CultureInvariant);
-        if (!start.Success)
+        string range = module.GetProperty("addressRange").GetString() ?? "";
+        Match start = Regex.Match(range, @"0[xX][0-9a-fA-F]+", RegexOptions.CultureInvariant);
+        // Older upstream LLDB serializes the header load address with std::to_string (decimal).
+        bool validAddress = start.Success
+            ? ulong.TryParse(start.Value.AsSpan(2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out ulong address)
+            : ulong.TryParse(range, NumberStyles.None, CultureInfo.InvariantCulture, out address);
+        if (!validAddress || address is 0 or ulong.MaxValue)
             throw new DebuggerException("The native adapter did not expose the CoreCLR module's load address.");
-        ulong address = ulong.Parse(start.Value.AsSpan(2), NumberStyles.HexNumber, CultureInfo.InvariantCulture);
         CancellationToken token;
         lock (_state) { token = _snapshotCancellation.Token; }
         var target = new LldbSnapshotTarget(native, OperationToken, token, log);
@@ -499,22 +526,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
             {
                 if (message.Type == "request")
                 {
-                    NativeAdapterSession? origin;
-                    CancellationToken generation;
-                    lock (_state)
-                    {
-                        if (envelope.Session != _session)
-                            continue;
-                        origin = _native;
-                        generation = _sessionCancellation.Token;
-                    }
-                    using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(generation, _lifetime.Token);
-                    DapMessage response = client.SendRequestAsync(message.Command!, message.Arguments, cancellation.Token)
-                        .WaitAsync(TimeSpan.FromSeconds(30), cancellation.Token).GetAwaiter().GetResult();
-                    if (envelope.Session != Session() || cancellation.IsCancellationRequested)
-                        continue;
-                    origin?.SendMessage(new DapMessage { Type = "response", RequestSeq = message.Seq,
-                        Command = message.Command, Success = response.Success, Message = response.Message, Body = response.Body });
+                    ForwardReverse(envelope);
                     continue;
                 }
                 if (message.Type != "event")
@@ -526,7 +538,10 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
                     body["areas"] = new JsonArray("stacks", "variables");
                 }
                 else if (message.Event == "capabilities" && body["capabilities"] is JsonObject capabilities)
+                {
                     capabilities["supportsCancelRequest"] = false;
+                    capabilities["supportsRestartRequest"] = false;
+                }
                 Transform(body, "variablesReference", id => _references.Variable(id, false, envelope.Stop, 0));
                 Transform(body, "sourceReference", id => _references.Source(id, envelope.Session));
                 message.Body = body;
@@ -541,6 +556,37 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
                 or DebuggerException or ObjectDisposedException)
             { log("Native event forwarding failed: " + error.Message); }
         }
+    }
+
+    private void ForwardReverse(BackendMessage envelope)
+    {
+        NativeAdapterSession? origin;
+        CancellationToken generation;
+        lock (_state)
+        {
+            if (envelope.Session != _session)
+                return;
+            origin = _native;
+            generation = _sessionCancellation.Token;
+        }
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(generation, _lifetime.Token);
+        timeout.CancelAfter(TimeSpan.FromSeconds(30));
+        DapMessage request = envelope.Message, response;
+        try
+        {
+            response = client.SendRequestAsync(request.Command!, request.Arguments, timeout.Token).GetAwaiter().GetResult();
+        }
+        catch (Exception error) when (error is OperationCanceledException or IOException or ObjectDisposedException)
+        {
+            if (generation.IsCancellationRequested || _lifetime.IsCancellationRequested)
+                return;
+            response = new DapMessage { Success = false, Message = timeout.IsCancellationRequested
+                ? "Client reverse request timed out." : "Client reverse request failed: " + error.Message };
+        }
+        if (envelope.Session != Session() || generation.IsCancellationRequested || _lifetime.IsCancellationRequested)
+            return;
+        origin?.SendMessage(new DapMessage { Type = "response", RequestSeq = request.Seq,
+            Command = request.Command, Success = response.Success, Message = response.Message, Body = response.Body });
     }
 
     private void Invalidate(bool execution, bool? stopped, bool cancelOperation, bool notify = true)
@@ -576,6 +622,18 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         lock (_state)
             if (!_stopped || _targetEnded)
                 throw new DebuggerException("The native target is not stopped.");
+    }
+
+    private void RestoreControlState(Work work)
+    {
+        if (work.Request.Command is not ("continue" or "next" or "stepIn" or "stepOut" or "restart"))
+            return;
+        lock (_state)
+            if (_stop == work.Stop && !_targetEnded)
+            {
+                _stopped = work.WasStopped;
+                _allStopped = work.AllStopped;
+            }
     }
 
     private void VerifyStop(Work work)

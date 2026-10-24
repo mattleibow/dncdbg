@@ -6,6 +6,24 @@ if (args.Length is < 2 or > 3)
     throw new ArgumentException("Supply the public Python executable and fake_native_adapter.py test peer.");
 string python = args[0], fake = args[1];
 
+if (args.Length == 2 || args[2] == "timeout")
+{
+    using var backend = Session("request-timeout");
+    Task<DncDbg.Protocol.DapMessage> unrelated = backend.SendAsync("deferred", new { });
+    try
+    {
+        backend.Request("timeout", new { });
+        throw new InvalidOperationException("The intentionally unanswered request did not time out.");
+    }
+    catch (TimeoutException) { }
+    backend.Request("releaseDeferred", new { });
+    if ((await unrelated.WaitAsync(TimeSpan.FromSeconds(2))).Success != true)
+        throw new InvalidOperationException("An unrelated pending native request was lost.");
+    Console.WriteLine("PASS native request timeout preserves unrelated pending requests");
+    if (args.Length == 3)
+        return;
+}
+
 if (args.Length == 2)
 using (var backend = Session("partial-memory"))
 {

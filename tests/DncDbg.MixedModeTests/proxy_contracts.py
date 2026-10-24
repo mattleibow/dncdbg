@@ -298,6 +298,62 @@ def selected_frame_contract(adapter):
     print("PASS native variables retain their owning frame despite backend global selection", flush=True)
 
 
+def refused_control_contract(adapter):
+    with Dap(adapter, "refused-control", arguments("lldb", "refused-control")) as peer:
+        peer.request("initialize", dict(adapterID="dncdbg", supportsInvalidatedEvent=True))
+        peer.request("launch", dict(program="owned-test-target", managedInspection=True))
+        peer.event("initialized")
+        peer.request("configurationDone")
+        peer.event("stopped")
+        for after in (False, True):
+            if after:
+                peer.request("continue", dict(threadId=7), success=False)
+            request = peer.send("dotnet/managedStackTrace", dict(threadId=7))
+            error = peer.receive(lambda m: m.get("type") == "response" and m.get("request_seq") == request)
+            check(not error["success"] and "all-threads-stopped" in error["message"],
+                  "A refused control request fabricated an all-stop managed snapshot: " + str(error))
+        peer.request("disconnect")
+    print("PASS refused native controls preserve the prior partial-stop/all-stop state", flush=True)
+
+
+def reverse_timeout_contract(adapter):
+    with Dap(adapter, "reverse-timeout", arguments("dap")) as peer:
+        peer.request("initialize", dict(adapterID="dncdbg"))
+        peer.request("reverse")
+        peer.receive(lambda m: m.get("type") == "request" and m.get("command") == "runInTerminal")
+        time.sleep(31)
+        response = peer.request("reverseStatus").get("response")
+        check(response and response["success"] is False and response["request_seq"] == 500
+              and "timed out" in response["message"].lower(), "Reverse timeout left the originating backend unanswered: " + str(response))
+        peer.request("disconnect")
+    print("PASS unanswered reverse requests fail explicitly to their originating backend", flush=True)
+
+
+def startup_timeout_contract(adapter):
+    with Dap(adapter, "startup-timeout", arguments("dap", "startup-timeout")) as peer:
+        peer.request("initialize", dict(adapterID="dncdbg"))
+        first = peer.send("launch", dict(program="owned-test-target"))
+        response = peer.receive(lambda m: m.get("type") == "response" and m.get("request_seq") == first, timeout=35)
+        check(response["success"] is False and "startup failed" in response["message"].lower(), str(response))
+        peer.request("launch", dict(program="owned-test-target"))
+        peer.event("initialized")
+        peer.request("disconnect")
+    print("PASS failed native startup clears admission state and permits retry", flush=True)
+
+
+def unsupported_overlay_controls(adapter):
+    with Dap(adapter, "unsupported-overlay-controls", arguments("lldb")) as peer:
+        caps = peer.request("initialize", dict(adapterID="dncdbg"))
+        check(not caps.get("supportsRestartRequest", False), "Unproven proxy restart must not be advertised")
+        for command, args in (("attach", dict(pid=123, managedInspection=True)), ("restart", {})):
+            request = peer.send(command, args)
+            response = peer.receive(lambda m: m.get("type") == "response" and m.get("request_seq") == request)
+            check(response["success"] is False and "not supported" in response["message"].lower()
+                  and command in response["message"].lower(), "Unproven control was not explicitly rejected: " + str(response))
+        peer.request("disconnect")
+    print("PASS unproven managed attach and proxy restart fail explicitly", flush=True)
+
+
 def notification_contract(adapter, lldb):
     with Dap(adapter, "managed-invalidation", ["--native-debugger=lldb", "--native-debugger-path=" + lldb]) as peer:
         peer.request("initialize", dict(adapterID="dncdbg", pathFormat="path", linesStartAt1=True,
@@ -326,8 +382,9 @@ def notification_contract(adapter, lldb):
     print("PASS native mutation invalidation is visible and refreshes managed frame ownership", flush=True)
 
 
-def strict_managed_contract(adapter, lldb):
-    with Dap(adapter, "strict-managed-identities", ["--native-debugger=lldb", "--native-debugger-path=" + lldb]) as peer:
+def strict_managed_contract(adapter, lldb, mode=None):
+    backend = arguments("lldb", mode, lldb=lldb) if mode else ["--native-debugger=lldb", "--native-debugger-path=" + lldb]
+    with Dap(adapter, "strict-managed-identities" + ("-" + mode if mode else ""), backend) as peer:
         peer.request("initialize", dict(adapterID="dncdbg", pathFormat="path", linesStartAt1=True,
                                         columnsStartAt1=True, supportsInvalidatedEvent=True))
         launch = peer.send("launch", dict(program=shutil.which("dotnet"), args=[str(DLL)],
@@ -345,7 +402,71 @@ def strict_managed_contract(adapter, lldb):
         check(values.get("left") == "19" and values.get("right") == "23",
               "Strict managed stack leaked inspection IDs into the native frame namespace: " + str(values))
         peer.request("disconnect", dict(terminateDebuggee=True))
-    print("PASS strict managed stack returns owned frame references usable by scopes/variables", flush=True)
+    print("PASS strict managed stack returns owned frame references usable by scopes/variables" + (" (" + mode + ")" if mode else ""), flush=True)
+
+
+def real_restart_contract(adapter, lldb):
+    with Dap(adapter, "real-native-restart", ["--native-debugger=lldb", "--native-debugger-path=" + lldb]) as peer:
+        caps = peer.request("initialize", dict(adapterID="dncdbg", pathFormat="path", linesStartAt1=True,
+                                               columnsStartAt1=True, supportsInvalidatedEvent=True))
+        check(caps.get("supportsRestartRequest"), "Selected LLDB does not advertise restart")
+        launch = peer.send("launch", dict(program=shutil.which("dotnet"), args=[str(DLL)],
+                                          env=dict(DNCDBG_MIXED_CHECKPOINTS="1"), managedInspection=True))
+        peer.event("initialized")
+        peer.request("setBreakpoints", dict(source=dict(path=str(FIXTURE / "native.c")),
+                                           breakpoints=[dict(line=line(FIXTURE / "native.c", "NATIVE_CHECKPOINT"))]))
+        peer.request("configurationDone")
+        peer.response(launch)
+        stopped = peer.event("stopped")
+        before = peer.request("stackTrace", dict(threadId=stopped["threadId"]))["stackFrames"]
+        old = next(f["id"] for f in before if "[Managed]" in f["name"] and "ManagedCall" in f["name"])
+        pid = peer.request("dotnet/info")["debuggeeProcessId"]
+        peer.request("restart", {})
+        stopped = peer.event("stopped")
+        after = peer.request("stackTrace", dict(threadId=stopped["threadId"]))["stackFrames"]
+        check(any("[Managed]" in f["name"] and "ManagedCall" in f["name"] for f in after), "Restart lost the read-only overlay")
+        peer.request("scopes", dict(frameId=old), success=False)
+        integration["exited"](pid)
+        peer.request("disconnect", dict(terminateDebuggee=True))
+    print("PASS real LLDB restart refreshes target, snapshot and client references", flush=True)
+
+
+def real_attach_contract(adapter, lldb):
+    release = OUT / "native-attach.release"
+    release.unlink(missing_ok=True)
+    env = dict(os.environ, DNCDBG_MIXED_CHECKPOINTS="1")
+    with (OUT / "native-attach-target.log").open("w") as output:
+        child = subprocess.Popen([shutil.which("dotnet"), str(DLL), "--preload", "--wait-file", str(release)],
+                                 stdout=output, stderr=output, env=env)
+        try:
+            deadline = time.monotonic() + 10
+            log = OUT / "native-attach-target.log"
+            while "WAIT:" not in log.read_text():
+                check(child.poll() is None and time.monotonic() < deadline, "Attach fixture did not initialize")
+                time.sleep(0.01)
+            with Dap(adapter, "real-native-attach", ["--native-debugger=lldb", "--native-debugger-path=" + lldb]) as peer:
+                peer.request("initialize", dict(adapterID="dncdbg", pathFormat="path", linesStartAt1=True,
+                                                columnsStartAt1=True, supportsInvalidatedEvent=True))
+                attached = peer.send("attach", dict(pid=child.pid, stopOnEntry=True, managedInspection=True))
+                peer.event("initialized")
+                peer.request("setBreakpoints", dict(source=dict(path=str(FIXTURE / "native.c")),
+                                                   breakpoints=[dict(line=line(FIXTURE / "native.c", "NATIVE_CHECKPOINT"))]))
+                peer.request("configurationDone")
+                peer.response(attached)
+                stopped = peer.event("stopped")
+                release.write_text("release")
+                peer.request("continue", dict(threadId=stopped["threadId"]))
+                stopped = peer.receive(lambda m: m.get("event") == "stopped", timeout=5)["body"]
+                frames = peer.request("stackTrace", dict(threadId=stopped["threadId"]))["stackFrames"]
+                check(any("[Managed]" in f["name"] and "ManagedCall" in f["name"] for f in frames), "Attach could not inspect the managed caller")
+                peer.request("disconnect", dict(terminateDebuggee=True))
+            child.wait(timeout=10)
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=5)
+            release.unlink(missing_ok=True)
+    print("PASS real LLDB attach and sole-owner CoreCLR inspection", flush=True)
 
 
 def wait_file(path):
@@ -398,6 +519,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--adapter", required=True)
     parser.add_argument("--lldb-dap")
+    parser.add_argument("--attach-restart-proof", action="store_true",
+                        help="Run the still-unproven real attach/restart gates; failures are not skipped")
     options = parser.parse_args()
     OUT.mkdir(parents=True, exist_ok=True)
     fake_contracts(options.adapter)
@@ -407,11 +530,19 @@ if __name__ == "__main__":
     capability_contract(options.adapter)
     version_stdin_contract(options.adapter)
     selected_frame_contract(options.adapter)
+    refused_control_contract(options.adapter)
+    reverse_timeout_contract(options.adapter)
+    startup_timeout_contract(options.adapter)
+    unsupported_overlay_controls(options.adapter)
     bundle_contracts(options.adapter)
     detached_backend_stall(options.adapter)
     if options.lldb_dap:
         build()
         strict_managed_contract(options.adapter, options.lldb_dap)
+        strict_managed_contract(options.adapter, options.lldb_dap, "decimal-modules")
+        if options.attach_restart_proof:
+            real_restart_contract(options.adapter, options.lldb_dap)
+            real_attach_contract(options.adapter, options.lldb_dap)
         notification_contract(options.adapter, options.lldb_dap)
         for poison in (False, True):
             invalid_runtime(options.adapter, options.lldb_dap, poison)

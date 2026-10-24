@@ -64,16 +64,16 @@ internal sealed class NativeAdapterSession : IDisposable
 
     public DapMessage Request(string command, object? arguments, CancellationToken cancellation = default)
     {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+        timeout.CancelAfter(TimeSpan.FromSeconds(30));
         try
         {
-            DapMessage response = SendAsync(command, arguments, cancellation)
-                .WaitAsync(TimeSpan.FromSeconds(30), cancellation).GetAwaiter().GetResult();
+            DapMessage response = SendAsync(command, arguments, timeout.Token).GetAwaiter().GetResult();
             _disconnected |= command == "disconnect" && response.Success == true;
             return response;
         }
-        catch (TimeoutException)
+        catch (OperationCanceledException) when (!cancellation.IsCancellationRequested)
         {
-            _connection.CancelPendingRequests();
             throw new TimeoutException($"Native debug adapter timed out handling '{command}'.");
         }
     }

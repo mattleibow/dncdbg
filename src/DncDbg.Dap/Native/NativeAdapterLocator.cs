@@ -229,19 +229,55 @@ internal static class NativeAdapterLocator
             };
             foreach (string argument in arguments)
                 start.ArgumentList.Add(argument);
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
             using Process process = Process.Start(start) ?? throw new ArgumentException("Error: Cannot start " + executable);
             process.StandardInput.Close();
-            Task<string> output = process.StandardOutput.ReadToEndAsync();
-            Task<string> error = process.StandardError.ReadToEndAsync();
-            if (!process.WaitForExit(5000))
+            Task<string> output = Task.Run(() => ReadPipe(process.StandardOutput.BaseStream, deadline.Token));
+            Task<string> error = Task.Run(() => ReadPipe(process.StandardError.BaseStream, deadline.Token));
+            try
             {
-                process.Kill(entireProcessTree: true);
-                process.WaitForExit();
+                process.WaitForExitAsync(deadline.Token).GetAwaiter().GetResult();
+            }
+            catch (OperationCanceledException)
+            {
+                deadline.Cancel();
+                try
+                {
+                    process.Kill(entireProcessTree: true);
+                    process.WaitForExit(1000);
+                }
+                catch (Exception cleanupError) when (cleanupError is InvalidOperationException or System.ComponentModel.Win32Exception) { }
+                Task.WaitAll([output, error], TimeSpan.FromSeconds(1));
                 throw new ArgumentException("Error: Native debugger discovery/version probe timed out: " + executable);
             }
-            return (process.ExitCode, output.GetAwaiter().GetResult() + error.GetAwaiter().GetResult());
+            try
+            {
+                Task.WhenAll(output, error).WaitAsync(deadline.Token).GetAwaiter().GetResult();
+            }
+            catch (OperationCanceledException)
+            {
+                deadline.Cancel();
+                Task.WaitAll([output, error], TimeSpan.FromSeconds(1));
+            }
+            return (process.ExitCode, (output.IsCompletedSuccessfully ? output.Result : "")
+                + (error.IsCompletedSuccessfully ? error.Result : ""));
         }
         catch (System.ComponentModel.Win32Exception error)
         { throw new ArgumentException("Error: Cannot execute native debugger: " + error.Message, error); }
+    }
+
+    private static string ReadPipe(Stream stream, CancellationToken cancellation)
+    {
+        var input = new CancellablePipeInput(stream, cancellation);
+        using var bytes = new MemoryStream();
+        var buffer = new byte[1024];
+        try
+        {
+            int read;
+            while ((read = input.Read(buffer, 0, buffer.Length)) > 0)
+                bytes.Write(buffer, 0, read);
+        }
+        catch (Exception error) when (error is OperationCanceledException or IOException or ObjectDisposedException) { }
+        return System.Text.Encoding.UTF8.GetString(bytes.GetBuffer(), 0, (int)bytes.Length);
     }
 }

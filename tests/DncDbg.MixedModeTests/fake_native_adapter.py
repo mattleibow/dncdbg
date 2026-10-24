@@ -28,11 +28,15 @@ if options.target_gate:
 if options.version:
     if options.mode == "version-reads-stdin":
         sys.stdin.buffer.read(1)
+    if options.mode == "version-inherits-pipes":
+        holder = subprocess.Popen([sys.executable, __file__, "--target-gate", str(options.barrier)],
+                                  stdin=subprocess.DEVNULL, stdout=sys.stdout.buffer, stderr=sys.stderr.buffer)
+        options.barrier.with_suffix(".pid").write_text(str(holder.pid))
     if options.mode == "no-cli-version":
         sys.exit(1)
     if options.lldb:
         sys.exit(subprocess.run([options.lldb, "--version"]).returncode)
-    print("lldb version 21.1.8")
+    print("lldb version 21.1.8", flush=True)
     sys.exit(0)
 
 write_lock = threading.Lock()

@@ -196,7 +196,10 @@ The version probe distinguishes LLVM's adapter version from liblldb's runtime
 version (notably Xcode's `21.0.0` versus `2103...`). If DAP reports a different
 liblldb identity than the probe, initialization fails.
 The version subprocess has redirected, closed stdin and cannot consume the
-client's DAP initialize bytes. Adapters without CLI `--version` are probed by
+client's DAP initialize bytes. Its process wait and cancellable stdout/stderr
+collection share one five-second monotonic deadline, so a descendant that
+inherits the probe's pipes cannot hold discovery open after the probe exits.
+Adapters without CLI `--version` are probed by
 public DAP initialize/version instead. Candidates must actually execute; merely
 finding an executable is not a usable-toolchain check.
 

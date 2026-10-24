@@ -1,0 +1,19 @@
+Red-to-green evidence for review of f44c8836f3bec22a1ff0420ec9c8baa2316f46b2:
+NativeAdapterLocator.Run monotonic deadline across process exit and inherited stdout/stderr pipe collection
+
+1. Pre-fix RED at f44c8836f3bec22a1ff0420ec9c8baa2316f46b2:
+Command:
+  python3 -c "import runpy; n=runpy.run_path('tests/DncDbg.MixedModeTests/proxy_contracts.py'); n['version_pipe_inheritance_contract']('bin/dncdbg-dap')"
+Output:
+  Traceback (most recent call last):
+    File "<string>", line 1, in <module>
+    File "tests/DncDbg.MixedModeTests/proxy_contracts.py", line 347, in version_pipe_inheritance_contract
+      raise AssertionError("Version discovery hung on inherited stdout/stderr pipes after probe process exit") from None
+  AssertionError: Version discovery hung on inherited stdout/stderr pipes after probe process exit
+
+2. Post-fix GREEN with shared monotonic 5s deadline + CancellablePipeInput stream collection:
+Command:
+  python3 -c "import runpy; n=runpy.run_path('tests/DncDbg.MixedModeTests/proxy_contracts.py'); n['version_pipe_inheritance_contract']('bin/dncdbg-dap'); n['version_stdin_contract']('bin/dncdbg-dap')"
+Output:
+  PASS version discovery bounds inherited stdout/stderr pipe waits under one monotonic deadline
+  PASS version discovery cannot read the frontend's DAP stdin

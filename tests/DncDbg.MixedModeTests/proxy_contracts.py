@@ -333,6 +333,39 @@ def version_stdin_contract(adapter):
     print("PASS version discovery cannot read the frontend's DAP stdin", flush=True)
 
 
+def version_pipe_inheritance_contract(adapter):
+    gate = OUT / "version-inherited-pipes.release"
+    pid_file = gate.with_suffix(".pid")
+    gate.unlink(missing_ok=True)
+    pid_file.unlink(missing_ok=True)
+    try:
+        started = time.monotonic()
+        try:
+            probe = subprocess.run([adapter, *arguments("lldb", "version-inherits-pipes", barrier=gate),
+                                    "--native-debugger-info"], capture_output=True, text=True, timeout=8)
+        except subprocess.TimeoutExpired:
+            raise AssertionError("Version discovery hung on inherited stdout/stderr pipes after probe process exit") from None
+        elapsed = time.monotonic() - started
+        check(pid_file.exists() and integration["alive"](int(pid_file.read_text().strip())),
+              "Version-probe pipe holder exited before discovery returned")
+        check(elapsed < 7, f"Version discovery exceeded its bounded 5s probe deadline: {elapsed:.2f}s")
+        check(probe.returncode == 0 and json.loads(probe.stdout)["version"] == "21.1.8",
+              "Version probe with inherited pipes did not complete cleanly: " + probe.stdout + probe.stderr)
+    finally:
+        gate.write_text("release")
+        if pid_file.exists():
+            pid = int(pid_file.read_text().strip())
+            if integration["alive"](pid):
+                try:
+                    os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+                except ProcessLookupError:
+                    pass
+                integration["exited"](pid)
+        gate.unlink(missing_ok=True)
+        pid_file.unlink(missing_ok=True)
+    print("PASS version discovery bounds inherited stdout/stderr pipe waits under one monotonic deadline", flush=True)
+
+
 def selected_frame_contract(adapter):
     with Dap(adapter, "selected-frame-variables", arguments(mode="selected-frame")) as peer:
         peer.request("initialize", dict(adapterID="dncdbg"))
@@ -1658,6 +1691,7 @@ if __name__ == "__main__":
     event_contracts(options.adapter)
     capability_contract(options.adapter)
     version_stdin_contract(options.adapter)
+    version_pipe_inheritance_contract(options.adapter)
     selected_frame_contract(options.adapter)
     refused_control_contract(options.adapter)
     uncertain_control_contract(options.adapter)

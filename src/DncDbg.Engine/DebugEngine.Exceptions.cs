@@ -20,13 +20,7 @@ public sealed partial class DebugEngine
     private bool _diedOfUnhandledException;
 
     public void SetExceptionFilters(IReadOnlyCollection<string> filters)
-    {
-        lock (_lock)
-        {
-            _breakOnThrown = filters.Contains(FilterAll);
-            _breakOnUserUnhandled = filters.Contains(FilterUserUnhandled);
-        }
-    }
+        => SetExceptionFilters(filters.Select(filter => new ExceptionFilterRequest(filter)).ToArray());
 
     private EventAction OnException(Exception2CorDebugManagedCallbackEventArgs e)
     {
@@ -69,9 +63,7 @@ public sealed partial class DebugEngine
                 _firstChanceReported.Remove(threadId);
                 _passedUserCode.Remove(threadId);
                 _diedOfUnhandledException = true;
-                // Whatever the filters say: the process is about to die, and showing why is what a debugger is for.
-                // The "unhandled" filter only carries the type condition (a client that does not know the filter
-                // sends none, and gets every stop).
+                // Unhandled exceptions stop by default; only a matching negated unhandled condition suppresses them.
                 return MatchesExceptionCondition(FilterUnhandled, thread)
                     ? StopAtException(thread, "unhandled")
                     : EventAction.Continue;

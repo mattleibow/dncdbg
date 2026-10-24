@@ -2,12 +2,15 @@
 Upcoming changes compared to the previous version.
 
 #### DAP
+- Ported upstream per-type exception-condition negation and deterministic exclusion priority across additive filter entries. A lone `!` is ignored.
+- Unhandled exceptions stop by default unless a matching negated condition on the `unhandled` filter excludes the type; positive conditions do not narrow this default.
 - Added `linesStartAt1`, `columnsStartAt1` and `supportsMemoryReferences` support in Initialize Request.
 - Added ReadMemory Request and Response.
 - Added WriteMemory Request and Response.
 - Added `supportsReadMemoryRequest` and `supportsWriteMemoryRequest` support in Capabilities.
 
 #### Added
+- Added native-proven `TestExceptionConditionMatching` and `TestUnhandledExceptionFilter` acceptance coverage.
 - Added debugger configuration environment variable `DNCDBG_PDB_MMAP_POLICY`.
 - Added support for custom modifiers (`CustomMod*`) in literal field and local constant signatures.
 - Added stripped-down [base64](https://github.com/tobiaslocker/base64) sources (commit 8d96a2a).

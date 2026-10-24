@@ -7,7 +7,7 @@ namespace DncDbg.Engine;
 
 public sealed record GotoTargetInfo(int Id, string Label, int Line, int Column, int EndLine, int EndColumn);
 
-/// <param name="Condition">Comma separated exception type names; "!" excludes, "*" is a wildcard; base types match too.</param>
+/// <param name="Condition">Comma/whitespace-separated exception type names; "!" excludes one type, "*" is a wildcard.</param>
 public sealed record ExceptionFilterRequest(string Filter, string? Condition = null);
 
 public sealed partial class DebugEngine
@@ -190,21 +190,35 @@ public sealed partial class DebugEngine
     // ---------------------------------------------------------------- exception filter conditions
 
     private readonly Dictionary<string, List<(bool Exclude, Regex Pattern)>> _exceptionConditions = [];
+    private readonly HashSet<string> _unconditionalExceptionFilters = [];
 
     public void SetExceptionFilters(IReadOnlyCollection<ExceptionFilterRequest> filters)
     {
         lock (_lock)
         {
-            SetExceptionFilters(filters.Select(f => f.Filter).ToList());
+            _breakOnThrown = filters.Any(f => f.Filter == FilterAll);
+            _breakOnUserUnhandled = filters.Any(f => f.Filter == FilterUserUnhandled);
             _exceptionConditions.Clear();
-            foreach (ExceptionFilterRequest filter in filters.Where(f => !string.IsNullOrWhiteSpace(f.Condition)))
+            _unconditionalExceptionFilters.Clear();
+            foreach (ExceptionFilterRequest filter in filters)
             {
-                bool excludeList = filter.Condition!.TrimStart().StartsWith('!');
-                _exceptionConditions[filter.Filter] = filter.Condition!
+                string[] tokens = (filter.Condition ?? "")
                     .Split([' ', '\t', '\r', '\n', ','], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                    .Select(item => (Exclude: excludeList || item.StartsWith('!'), Name: item.TrimStart('!').Trim()))
-                    .Select(item => (item.Exclude, new Regex("^" + Regex.Escape(item.Name).Replace("\\*", ".*") + "$", RegexOptions.CultureInvariant)))
-                    .ToList();
+                    .Where(item => item != "!")
+                    .ToArray();
+                if (tokens.Length == 0)
+                {
+                    _unconditionalExceptionFilters.Add(filter.Filter);
+                    continue;
+                }
+                if (!_exceptionConditions.TryGetValue(filter.Filter, out var conditions))
+                    _exceptionConditions.Add(filter.Filter, conditions = []);
+                foreach (string token in tokens)
+                {
+                    bool exclude = token.StartsWith('!');
+                    string name = exclude ? token[1..] : token;
+                    conditions.Add((exclude, new Regex("^" + Regex.Escape(name).Replace("\\*", ".*") + "$", RegexOptions.CultureInvariant)));
+                }
             }
         }
     }
@@ -220,13 +234,15 @@ public sealed partial class DebugEngine
             CorDebugValue? unwrapped = exception == null ? null : ValueInspector.Unwrap(exception, out _);
             if (unwrapped == null)
                 return true;
-            List<string> names = [_values.GetTypeName(unwrapped)];
-            if (condition.Any(c => c.Exclude && names.Any(c.Pattern.IsMatch)))
+            string name = _values.GetTypeName(unwrapped);
+            if (condition.Any(c => c.Exclude && c.Pattern.IsMatch(name)))
                 return false;
-            return condition.All(c => c.Exclude) || condition.Any(c => !c.Exclude && names.Any(c.Pattern.IsMatch));
+            return filter == FilterUnhandled || _unconditionalExceptionFilters.Contains(filter)
+                || condition.Any(c => !c.Exclude && c.Pattern.IsMatch(name));
         }
-        catch (Exception)
+        catch (Exception e)
         {
+            Log?.Invoke("Failed to match the current exception condition: " + e.Message);
             return true;
         }
     }

@@ -258,7 +258,8 @@ while True:
             response(request, dict(result=str(selected_frame), variablesReference=0))
             continue
         response(request, dict(result=str(args.get("frameId", selected_frame)) if options.mode == "selected-frame" else "42",
-                               variablesReference=1), success=args.get("frameId", selected_frame) in (1, 2))
+                               variablesReference=1, context=args.get("context")),
+                 success=args.get("frameId", selected_frame) in (1, 2))
     elif command == "reverse":
         write(sys.stdout.buffer, dict(seq=500, type="request", command="runInTerminal", arguments=dict(args=["owned-fixture"])))
         response(request)

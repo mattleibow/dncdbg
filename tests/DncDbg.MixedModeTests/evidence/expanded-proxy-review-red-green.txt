@@ -170,3 +170,19 @@ Traceback (most recent call last):
   File "tests/DncDbg.MixedModeTests/proxy_contracts.py", line 476, in startup_without_configuration_contract
     raise AssertionError("A backend without configurationDone has no bounded startup deadline") from None
 AssertionError: A backend without configurationDone has no bounded startup deadline
+
+=== Native-only semantics regression found while scoping read-only overlay behavior ===
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "tests/DncDbg.MixedModeTests/proxy_contracts.py", line 742, in native_only_watch_contract
+    check(result["context"] == "watch", "Read-only overlay policy changed native-only backend watch semantics")
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "tests/DncDbg.MixedModeTests/run.py", line 23, in check
+    raise AssertionError(message)
+AssertionError: Read-only overlay policy changed native-only backend watch semantics
+
+=== Post-fix scope verification ===
+PASS native-only watch expressions retain the backend's unmodified evaluation context
+PASS native watch/hover preserves managed handles without unsolicited invalidation; client=False
+PASS native watch/hover preserves managed handles without unsolicited invalidation; client=True
+PASS backend without configurationDone retains a bounded startup response deadline

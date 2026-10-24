@@ -730,6 +730,20 @@ def frameless_evaluation_contract(adapter):
     print("PASS frame-less evaluation restores the client-selected native frame", flush=True)
 
 
+def native_only_watch_contract(adapter):
+    with Dap(adapter, "native-only-watch-semantics", arguments("lldb")) as peer:
+        peer.request("initialize", dict(adapterID="dncdbg"))
+        peer.request("launch", dict(program="owned-test-target"))
+        peer.event("initialized")
+        peer.request("configurationDone")
+        peer.event("stopped")
+        frame = peer.request("stackTrace", dict(threadId=7))["stackFrames"][0]
+        result = peer.request("evaluate", dict(frameId=frame["id"], expression="left + right", context="watch"))
+        check(result["context"] == "watch", "Read-only overlay policy changed native-only backend watch semantics")
+        peer.request("disconnect")
+    print("PASS native-only watch expressions retain the backend's unmodified evaluation context", flush=True)
+
+
 def duplicate_native_pc_contract(adapter, lldb):
     with Dap(adapter, "duplicate-native-pc", arguments("lldb", "duplicate-native-pc", lldb=lldb)) as peer:
         peer.request("initialize", dict(adapterID="dncdbg"))
@@ -903,6 +917,7 @@ if __name__ == "__main__":
     wide_reference_contract(options.adapter)
     refused_admission_contract(options.adapter)
     frameless_evaluation_contract(options.adapter)
+    native_only_watch_contract(options.adapter)
     managed_launch_scope_contract(options.adapter)
     unsupported_overlay_controls(options.adapter)
     bundle_contracts(options.adapter)

@@ -240,7 +240,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
             LldbSnapshotTarget.Body(native.Request("scopes", new { frameId = owningFrame }, OperationToken()));
         Transform(arguments, "sourceReference", id => _references.ResolveSource(checked((int)id), session));
         bool executionControl = command is "continue" or "next" or "stepIn" or "stepOut";
-        bool readOnlyEvaluation = command == "evaluate" && descriptor.Kind == "lldb"
+        bool readOnlyEvaluation = command == "evaluate" && _managed && descriptor.Kind == "lldb"
             && arguments["context"]?.GetValue<string>() is "watch" or "hover";
         if (readOnlyEvaluation)
             arguments["context"] = "hover";

@@ -181,11 +181,13 @@ Use the native adapter's ordinary source/function/instruction breakpoints.
 a scalar local/argument name use the read-only view for those frames.
 Calls, arithmetic C# expressions, properties and managed mutation fail with a
 read-only diagnostic. Native-frame evaluation is forwarded to the native engine.
-For LLDB, `watch` and `hover` use its read-only **hover** variable-path lookup
+With managed inspection enabled, LLDB `watch` and `hover` use its read-only **hover** variable-path lookup
 (`eDynamicDontRunTarget`), never its fallback expression parser. They preserve
 managed references and do not produce an invalidation/IDE refresh loop. Use an
 explicit native REPL evaluation for arbitrary expressions or commands; those
 can execute/mutate the native target and invalidate managed inspection.
+Native-only sessions retain the backend's original watch/expression semantics;
+the read-only managed-overlay policy must not narrow the native-only relay.
 
 `dotnet/nativeStackTrace` returns the un-enriched native view.
 `dotnet/managedStackTrace` requests strict read-only managed inspection.

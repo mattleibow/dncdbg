@@ -24,7 +24,8 @@ internal sealed partial class ModuleMetadata
 
     private Dictionary<string, int>? _typesByName;
 
-    public string GetParameterDisplay(int methodToken, IReadOnlyList<string?>? typeArguments = null)
+    public string GetParameterDisplay(int methodToken, IReadOnlyList<string?>? typeArguments = null,
+        IReadOnlyList<string?>? argumentTypes = null)
     {
         var handle = (MethodDefinitionHandle)MetadataTokens.Handle(methodToken);
         if (_pdb != null)
@@ -56,6 +57,8 @@ internal sealed partial class ModuleMetadata
             if (type.StartsWith("ref ", StringComparison.Ordinal))
                 type = ((parameter.Attributes & ParameterAttributes.Out) != 0 ? "out "
                     : (parameter.Attributes & ParameterAttributes.In) != 0 ? "in " : "ref ") + type[4..];
+            else if (argumentTypes != null && i < argumentTypes.Count && argumentTypes[i] is { } argumentType)
+                type = argumentType;
             return DisplayType(type) + " " + _md.GetString(parameter.Name);
         })) + ")";
     }

@@ -229,8 +229,9 @@ public sealed partial class DebugEngine
             return;
         }
 
-        string name = metadata?.GetMethodName(token, GetTypeArgumentNames(frame)) ?? $"<method 0x{token:X8}>";
-        name += metadata?.GetParameterDisplay(token, GetTypeArgumentNames(frame)) ?? "()";
+        List<string?>? typeArguments = GetTypeArgumentNames(frame);
+        string name = metadata?.GetMethodName(token, typeArguments) ?? $"<method 0x{token:X8}>";
+        name += metadata?.GetParameterDisplay(token, typeArguments, GetArgumentTypeNames(frame, metadata, token)) ?? "()";
         int id = ++_nextHandle;
         _frames[id] = frameRef;
         if (location is { } l)
@@ -258,6 +259,28 @@ public sealed partial class DebugEngine
                 string name = _values.TypeName(t);
                 return name == "System.__Canon" ? null : name;
             }).ToList();
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    private IReadOnlyList<string?>? GetArgumentTypeNames(CorDebugILFrame frame, ModuleMetadata? metadata, int methodToken)
+    {
+        if (metadata == null)
+            return null;
+        try
+        {
+            (bool isStatic, _) = metadata.GetMethodParameters(methodToken);
+            int firstParameter = isStatic ? 0 : 1;
+            var result = new List<string?>();
+            for (int i = firstParameter; i < frame.Arguments.Length; i++)
+            {
+                int argument = i;
+                result.Add(TryGet(() => _values.TypeName(frame.GetArgument(argument).ExactType)));
+            }
+            return result;
         }
         catch (Exception)
         {

@@ -40,10 +40,13 @@ internal static class ProcessLauncher
 
         var stdout = new AnonymousPipeServerStream(PipeDirection.In, HandleInheritability.Inheritable);
         var stderr = new AnonymousPipeServerStream(PipeDirection.In, HandleInheritability.Inheritable);
-        var stdin = new AnonymousPipeServerStream(PipeDirection.Out, HandleInheritability.Inheritable);
+        AnonymousPipeServerStream? stdin = OperatingSystem.IsWindows() || framework != null
+            ? new AnonymousPipeServerStream(PipeDirection.Out, HandleInheritability.Inheritable)
+            : null;
+        Stream? unixStdin = null;
         try
         {
-            IntPtr hIn = stdin.ClientSafePipeHandle.DangerousGetHandle();
+            IntPtr hIn = stdin?.ClientSafePipeHandle.DangerousGetHandle() ?? IntPtr.Zero;
             IntPtr hOut = stdout.ClientSafePipeHandle.DangerousGetHandle();
             IntPtr hErr = stderr.ClientSafePipeHandle.DangerousGetHandle();
 
@@ -52,9 +55,9 @@ internal static class ProcessLauncher
                 ? LaunchFramework(framework, string.Join(' ', argv.Select(QuoteArgument)), cwd, env, hIn, hOut, hErr, out process)
                 : OperatingSystem.IsWindows()
                     ? LaunchWindows(string.Join(' ', argv.Select(QuoteArgument)), cwd, env, hIn, hOut, hErr)
-                    : LaunchUnix(dbgShim, argv, cwd, env, (int)hIn, (int)hOut, (int)hErr, noDebug);
+                    : LaunchUnix(dbgShim, argv, cwd, env, (int)hOut, (int)hErr, noDebug, out unixStdin);
 
-            stdin.DisposeLocalCopyOfClientHandle();
+            stdin?.DisposeLocalCopyOfClientHandle();
             stdout.DisposeLocalCopyOfClientHandle();
             stderr.DisposeLocalCopyOfClientHandle();
             return new LaunchedProcess
@@ -63,7 +66,7 @@ internal static class ProcessLauncher
                 Resume = resume,
                 StdOut = stdout,
                 StdErr = stderr,
-                StdIn = stdin,
+                StdIn = unixStdin ?? stdin!,
                 ExitCode = exitCode,
                 Abandon = abandon,
                 CorDebugProcess = process,
@@ -71,7 +74,8 @@ internal static class ProcessLauncher
         }
         catch
         {
-            stdin.Dispose();
+            stdin?.Dispose();
+            unixStdin?.Dispose();
             stdout.Dispose();
             stderr.Dispose();
             throw;
@@ -290,10 +294,11 @@ internal static class ProcessLauncher
     // crashed with its IDE), and a debuggee nobody debugs any longer is killed. PR_SET_PDEATHSIG would do the same on
     // Linux only, and only for a direct child.
     private const string LaunchScript =
-        "ctl=\"$1\"; go=\"$2\"; alive=\"$3\"; shift 3\n" +
+        "ctl=\"$1\"; go=\"$2\"; alive=\"$3\"; input=\"$4\"; shift 4\n" +
         // In the background and waited for: a shell reports the death of a foreground command ("Killed") on stderr, which
-        // is the debuggee's stderr. A background command would get /dev/null as its stdin, hence "<&0".
-        "/bin/sh -c 'echo \"pid $$\" > \"$0\"; read line < \"$1\"; shift; exec \"$@\"' \"$ctl\" \"$go\" \"$@\" <&0 &\n" +
+        // is the debuggee's stderr. Use a named FIFO for stdin: relying on inherited fd 0 is not portable across PAL and
+        // Process.Start implementations.
+        "/bin/sh -c 'echo \"pid $$\" > \"$0\"; read line < \"$1\"; input=\"$2\"; shift 2; exec \"$@\" < \"$input\"' \"$ctl\" \"$go\" \"$input\" \"$@\" &\n" +
         "child=$!\n" +
         // the control FIFO goes first: without the debugger nobody reads it, and the report below would block forever
         "( exec >/dev/null 2>&1; verdict=; read verdict < \"$alive\"; if [ \"$verdict\" = detach ]; then echo detached > \"$ctl\"; else rm -f \"$ctl\"; kill -9 $child; fi ) &\n" +
@@ -307,25 +312,28 @@ internal static class ProcessLauncher
     // The PAL's CreateProcess forks with the parent's fds 0/1/2, so the pipes are
     // put in place of our own stdio for the duration of the call.
     private static (int, Action, Task<int?>?, Action?) LaunchUnix(DbgShim dbgShim, List<string> argv, string? cwd,
-        IReadOnlyDictionary<string, string?>? env, int fdIn, int fdOut, int fdErr, bool noDebug)
+        IReadOnlyDictionary<string, string?>? env, int fdOut, int fdErr, bool noDebug, out Stream stdin)
     {
         string directory = Directory.CreateTempSubdirectory("dncdbg-").FullName;
         string script = Path.Combine(directory, "launch.sh"), control = Path.Combine(directory, "ctl"), go = Path.Combine(directory, "go");
-        string alive = Path.Combine(directory, "alive");
-        FileStream? controlStream = null, goStream = null, aliveStream = null;
+        string alive = Path.Combine(directory, "alive"), input = Path.Combine(directory, "input");
+        FileStream? controlStream = null, goStream = null, aliveStream = null, inputStream = null;
+        stdin = Stream.Null;
         byte[] envBlock = Encoding.UTF8.GetBytes(string.Concat(BuildEnvironment(env).Select(e => e + "\0")) + "\0");
         GCHandle envHandle = GCHandle.Alloc(envBlock, GCHandleType.Pinned);
         try
         {
             File.WriteAllText(script, LaunchScript);
-            if (mkfifo(control, 0x180 /* 0600 */) != 0 || mkfifo(go, 0x180) != 0 || mkfifo(alive, 0x180) != 0)
+            if (mkfifo(control, 0x180 /* 0600 */) != 0 || mkfifo(go, 0x180) != 0 || mkfifo(alive, 0x180) != 0
+                || mkfifo(input, 0x180) != 0)
                 throw new DebuggerException($"Cannot create a FIFO in '{directory}' (errno {Marshal.GetLastPInvokeError()}).");
             // read+write: opening never blocks, and the reader sees no end of file between the two writers
             controlStream = new FileStream(control, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite, 1);
             goStream = new FileStream(go, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite, 1);
             aliveStream = new FileStream(alive, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite, 1);
+            inputStream = new FileStream(input, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite, 4096);
 
-            string commandLine = string.Join(' ', new[] { "/bin/sh", script, control, go, alive }.Concat(argv).Select(QuoteArgument));
+            string commandLine = string.Join(' ', new[] { "/bin/sh", script, control, go, alive, input }.Concat(argv).Select(QuoteArgument));
             CreateProcessForLaunchResult result = default;
             int managedShell = 0;
             lock (s_stdioSwapLock)
@@ -336,13 +344,12 @@ internal static class ProcessLauncher
                 fcntl(saved2, 2, 1);
                 try
                 {
-                    dup2(fdIn, 0);
                     dup2(fdOut, 1);
                     dup2(fdErr, 2);
                     if (noDebug)
                     {
                         var start = new System.Diagnostics.ProcessStartInfo("/bin/sh") { UseShellExecute = false };
-                        foreach (string argument in new[] { script, control, go, alive }.Concat(argv))
+                        foreach (string argument in new[] { script, control, go, alive, input }.Concat(argv))
                             start.ArgumentList.Add(argument);
                         if (!string.IsNullOrEmpty(cwd))
                             start.WorkingDirectory = cwd;
@@ -375,6 +382,7 @@ internal static class ProcessLauncher
                 throw new DebuggerException("The launcher shell did not report the process id" + (first.IsCompleted ? $": '{first.Result}'." : "."));
 
             FileStream controlOwned = controlStream, goOwned = goStream, aliveOwned = aliveStream;
+            stdin = inputStream;
             var detached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             int abandoned = 0;
             int shell = noDebug ? managedShell : result.ProcessId;
@@ -404,7 +412,7 @@ internal static class ProcessLauncher
                     TryDelete(directory);
                 }
             });
-            controlStream = goStream = aliveStream = null;
+            controlStream = goStream = aliveStream = inputStream = null;
             return (pid, () =>
             {
                 goOwned.Write("go\n"u8);
@@ -432,6 +440,7 @@ internal static class ProcessLauncher
             controlStream?.Dispose();
             goStream?.Dispose();
             aliveStream?.Dispose();
+            inputStream?.Dispose();
             TryDelete(directory);
             throw;
         }

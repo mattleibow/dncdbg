@@ -17,10 +17,24 @@ parser.add_argument("--lldb")
 parser.add_argument("--barrier", type=Path)
 parser.add_argument("--version", action="store_true")
 parser.add_argument("--target-gate", type=Path)
+parser.add_argument("--record-pid", action="store_true")
 parser.add_argument("--arch", default="arm64")
 options = parser.parse_args()
 
 if options.target_gate:
+    if options.record_pid:
+        options.target_gate.with_suffix(".pid").write_text(str(os.getpid()))
+    if options.mode in ("flood-stdout", "flood-stderr", "flood-both"):
+        chunk = b"x" * 8192
+        while not options.target_gate.exists():
+            try:
+                if options.mode in ("flood-stdout", "flood-both"):
+                    os.write(1, chunk)
+                if options.mode in ("flood-stderr", "flood-both"):
+                    os.write(2, chunk)
+            except OSError:
+                time.sleep(0.01)
+        sys.exit(0)
     if options.mode == "version-truncated-suffix":
         deadline = time.monotonic() + 5.5
         while time.monotonic() < deadline and not options.target_gate.exists():
@@ -30,6 +44,8 @@ if options.target_gate:
             sys.stdout.flush()
         except OSError:
             pass
+        while not options.target_gate.exists():
+            time.sleep(0.02)
         sys.exit(0)
     while not options.target_gate.exists():
         time.sleep(0.01)
@@ -44,6 +60,29 @@ if options.version:
         holder = subprocess.Popen([sys.executable, __file__, "--target-gate", str(options.barrier)],
                                   stdin=subprocess.DEVNULL, stdout=out_stream, stderr=err_stream)
         options.barrier.with_suffix(".pid").write_text(str(holder.pid))
+    if options.mode in ("version-flood-stdout", "version-flood-stderr", "version-flood-both"):
+        flood_mode = options.mode.replace("version-", "")
+        out_stream = sys.stdout.buffer if flood_mode != "flood-stderr" else subprocess.DEVNULL
+        err_stream = sys.stderr.buffer if flood_mode != "flood-stdout" else subprocess.DEVNULL
+        print("lldb version 21.1.8", flush=True)
+        holder = subprocess.Popen([sys.executable, __file__, "--mode=" + flood_mode, "--target-gate", str(options.barrier)],
+                                  stdin=subprocess.DEVNULL, stdout=out_stream, stderr=err_stream)
+        options.barrier.with_suffix(".pid").write_text(str(holder.pid))
+        sys.exit(0)
+    if options.mode == "version-no-newline-stdout-inherits-stderr":
+        holder = subprocess.Popen([sys.executable, __file__, "--target-gate", str(options.barrier)],
+                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=sys.stderr.buffer)
+        options.barrier.with_suffix(".pid").write_text(str(holder.pid))
+        sys.stdout.write("lldb version 21.1.8")
+        sys.stdout.flush()
+        sys.exit(0)
+    if options.mode == "version-no-newline-stderr-inherits-stdout":
+        holder = subprocess.Popen([sys.executable, __file__, "--target-gate", str(options.barrier)],
+                                  stdin=subprocess.DEVNULL, stdout=sys.stdout.buffer, stderr=subprocess.DEVNULL)
+        options.barrier.with_suffix(".pid").write_text(str(holder.pid))
+        sys.stderr.write("lldb version 21.1.8")
+        sys.stderr.flush()
+        sys.exit(0)
     if options.mode in ("version-truncated-pipe", "version-truncated-token"):
         prefix = "lldb version 21.1." if options.mode == "version-truncated-pipe" else "lldb version 21.1"
         sys.stdout.write(prefix)
@@ -53,11 +92,18 @@ if options.version:
                                   stdin=subprocess.DEVNULL, stdout=sys.stdout.buffer, stderr=sys.stderr.buffer)
         options.barrier.with_suffix(".pid").write_text(str(holder.pid))
         sys.exit(0)
-    if options.mode == "no-cli-version":
+    if options.mode in ("no-cli-version", "no-cli-version-inherits-pipes", "no-cli-version-failure-inherits-pipes"):
         sys.exit(1)
     if options.lldb:
         sys.exit(subprocess.run([options.lldb, "--version"]).returncode)
     print("lldb version 21.1.8", flush=True)
+    sys.exit(0)
+
+if options.mode in ("no-cli-version-inherits-pipes", "no-cli-version-failure-inherits-pipes"):
+    helper_mode = "dap-probe-helper-failure" if "failure" in options.mode else "dap-probe-helper-success"
+    holder = subprocess.Popen([sys.executable, __file__, "--mode=" + helper_mode, "--barrier", str(options.barrier)],
+                              stdin=sys.stdin.buffer, stdout=sys.stdout.buffer, stderr=sys.stderr.buffer)
+    options.barrier.with_suffix(".pid").write_text(str(holder.pid))
     sys.exit(0)
 
 write_lock = threading.Lock()
@@ -226,9 +272,18 @@ while True:
             sys.stdout.buffer.write(b"Content-Length: 15\r\n\r\n{\"success\": []}")
             sys.stdout.buffer.flush()
             break
+        if options.mode == "dap-probe-helper-failure":
+            response(request, success=False, message="DAP probe failed")
+            while not options.barrier.exists():
+                time.sleep(0.02)
+            sys.exit(0)
         response(request, dict(supportsConfigurationDoneRequest=options.mode != "startup-no-configuration", supportsReadMemoryRequest=options.mode != "no-memory",
                                supportsModulesRequest=True, supportsCancelRequest=True,
                                **{"$__lldb_version": "lldb version " + ("99.0.0" if options.mode == "version-mismatch" else "21.1.8")}))
+        if options.mode == "dap-probe-helper-success":
+            while not options.barrier.exists():
+                time.sleep(0.02)
+            sys.exit(0)
         if options.mode == "blocked-writes":
             # Admit a header and one payload byte, then stop draining the pipe.
             # This proves the proxy worker entered the write before frontend EOF.

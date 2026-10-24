@@ -196,19 +196,23 @@ The version probe distinguishes LLVM's adapter version from liblldb's runtime
 version (notably Xcode's `21.0.0` versus `2103...`). If DAP reports a different
 liblldb identity than the probe, initialization fails.
 The version subprocess has redirected, closed stdin and cannot consume the
-client's DAP initialize bytes. Its process wait and cancellable stdout/stderr
-collection share one five-second monotonic deadline, so a descendant that
-inherits the probe's pipes cannot hold discovery open after the probe exits.
-Cancelled streams retain only completed newline-terminated lines and complete
-version tokens; a truncated prefix whose suffix arrives after the deadline fails
-discovery rather than manufacturing a partial version. Probe pipe streams are
-explicitly disposed when bounded collection finishes, keeping file descriptors
-and handles stable without waiting for finalization. Each probe establishes
-launch-scoped cleanup ownership (a new Unix process group signaled before
-reaping its leader, or a Windows Job Object) and terminates any remaining
-descendants on every completion path.
-Adapters without CLI `--version` are probed by
-public DAP initialize/version instead. Candidates must actually execute; merely
+client's DAP initialize bytes. Its process wait and single-threaded stdout/stderr
+collection share one five-second monotonic deadline and a 64 KiB per-stream
+capture cap, so a descendant that inherits or continuously floods the probe's
+pipes cannot hold discovery open after the probe exits or grow memory without
+bound. Each stream tracks its own EOF completion independently; only incomplete
+or overflowed streams strip trailing non-newline-terminated text, while a
+completed stream without a trailing newline remains intact. Version parsing
+validates complete version tokens (including LLVM `git`, Apple four-component,
+and SemVer prerelease/build suffixes) and rejects malformed prefixes or
+trailing garbage. Probe pipe handles are explicitly disposed when bounded
+collection finishes, keeping file descriptors and handles stable in a no-GC
+region across both success and failure paths. Both CLI `--version` and DAP
+initialize/version fallback probes establish launch-scoped cleanup ownership
+(a new Unix process group via `posix_spawn`, or a Windows Job Object assigned
+while the process is created with `CREATE_SUSPENDED` before `ResumeThread`) and
+terminate any remaining descendants on every completion path. Candidates must
+actually execute; merely
 finding an executable is not a usable-toolchain check.
 
 The Windows runner's public LLVM imports `python310.dll`. Its CI lane installs

@@ -334,7 +334,9 @@ def version_stdin_contract(adapter):
 
 
 def version_pipe_inheritance_contract(adapter):
-    for mode in ("version-inherits-stdout", "version-inherits-stderr", "version-inherits-pipes"):
+    for mode in ("version-inherits-stdout", "version-inherits-stderr", "version-inherits-pipes",
+                 "version-no-newline-stdout-inherits-stderr", "version-no-newline-stderr-inherits-stdout",
+                 "version-flood-stdout", "version-flood-stderr", "version-flood-both"):
         gate = OUT / f"{mode}.release"
         pid_file = gate.with_suffix(".pid")
         gate.unlink(missing_ok=True)
@@ -360,7 +362,7 @@ def version_pipe_inheritance_contract(adapter):
             elapsed = time.monotonic() - started
             check(elapsed < 7, f"Version discovery ({mode}) exceeded its bounded 5s probe deadline: {elapsed:.2f}s")
             check(probe.returncode == 0 and json.loads(stdout)["version"] == "21.1.8",
-                  f"Version probe ({mode}) did not accept complete version line before cancellation: " + stdout + stderr)
+                  f"Version probe ({mode}) did not accept complete version record: " + stdout + stderr)
             deadline = time.monotonic() + 2
             while integration["alive"](holder_pid):
                 check(time.monotonic() < deadline,
@@ -387,21 +389,31 @@ def version_pipe_inheritance_contract(adapter):
         holder_pid = None
         try:
             started = time.monotonic()
-            probe = subprocess.run([adapter, *arguments("lldb", mode, barrier=gate), "--native-debugger-info"],
-                                   capture_output=True, text=True, timeout=8)
+            probe = subprocess.Popen([adapter, *arguments("lldb", mode, barrier=gate), "--native-debugger-info"],
+                                     stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            deadline = time.monotonic() + 3
+            while not pid_file.exists():
+                check(time.monotonic() < deadline and probe.poll() is None, f"{mode} did not record its pipe-holder PID")
+                time.sleep(0.01)
+            holder_pid = int(pid_file.read_text().strip())
+            time.sleep(0.3)
+            check(probe.poll() is None and integration["alive"](holder_pid),
+                  f"{mode} pipe holder was not alive during post-exit stream collection")
+            try:
+                stdout, stderr = probe.communicate(timeout=8)
+            except subprocess.TimeoutExpired:
+                probe.kill()
+                raise AssertionError(f"Truncated version probe ({mode}) hung on inherited pipes") from None
             elapsed = time.monotonic() - started
-            if pid_file.exists():
-                holder_pid = int(pid_file.read_text().strip())
             check(elapsed < 7, f"Truncated version probe ({mode}) exceeded bounded deadline: {elapsed:.2f}s")
             check(probe.returncode != 0,
-                  f"Truncated cancelled version output ({mode}) manufactured a valid version: " + probe.stdout + probe.stderr)
-            if holder_pid is not None:
-                deadline = time.monotonic() + 2
-                while integration["alive"](holder_pid):
-                    check(time.monotonic() < deadline,
-                          f"Truncated version discovery ({mode}) abandoned descendant {holder_pid} after failure")
-                    time.sleep(0.01)
-                holder_pid = None
+                  f"Truncated cancelled version output ({mode}) manufactured a valid version: " + stdout + stderr)
+            deadline = time.monotonic() + 2
+            while integration["alive"](holder_pid):
+                check(time.monotonic() < deadline,
+                      f"Truncated version discovery ({mode}) abandoned descendant {holder_pid} after failure")
+                time.sleep(0.01)
+            holder_pid = None
         finally:
             gate.write_text("release")
             if holder_pid and integration["alive"](holder_pid):
@@ -413,6 +425,44 @@ def version_pipe_inheritance_contract(adapter):
             gate.unlink(missing_ok=True)
             pid_file.unlink(missing_ok=True)
         print(f"PASS truncated cancelled version output is rejected and cleaned up: {mode}", flush=True)
+
+    for mode, expect_success in (("no-cli-version-inherits-pipes", True), ("no-cli-version-failure-inherits-pipes", False)):
+        gate = OUT / f"{mode}.release"
+        pid_file = gate.with_suffix(".pid")
+        gate.unlink(missing_ok=True)
+        pid_file.unlink(missing_ok=True)
+        holder_pid = None
+        try:
+            started = time.monotonic()
+            probe = subprocess.run([adapter, *arguments("lldb", mode, barrier=gate), "--native-debugger-info"],
+                                   capture_output=True, text=True, timeout=8)
+            elapsed = time.monotonic() - started
+            check(pid_file.exists(), f"DAP fallback probe ({mode}) did not record its helper PID")
+            holder_pid = int(pid_file.read_text().strip())
+            check(elapsed < 7, f"DAP fallback probe ({mode}) exceeded bounded deadline: {elapsed:.2f}s")
+            if expect_success:
+                check(probe.returncode == 0 and json.loads(probe.stdout)["version"] == "21.1.8",
+                      f"DAP fallback probe ({mode}) failed: " + probe.stdout + probe.stderr)
+            else:
+                check(probe.returncode != 0,
+                      f"DAP fallback failure probe ({mode}) unexpectedly succeeded: " + probe.stdout + probe.stderr)
+            deadline = time.monotonic() + 2
+            while integration["alive"](holder_pid):
+                check(time.monotonic() < deadline,
+                      f"DAP fallback probe ({mode}) abandoned helper {holder_pid} after Resolve returned")
+                time.sleep(0.01)
+            holder_pid = None
+        finally:
+            gate.write_text("release")
+            if holder_pid and integration["alive"](holder_pid):
+                try:
+                    os.kill(holder_pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+                except ProcessLookupError:
+                    pass
+                integration["exited"](holder_pid)
+            gate.unlink(missing_ok=True)
+            pid_file.unlink(missing_ok=True)
+        print(f"PASS DAP fallback version probe cleans up delegated helper: {mode}", flush=True)
 
 
 def selected_frame_contract(adapter):

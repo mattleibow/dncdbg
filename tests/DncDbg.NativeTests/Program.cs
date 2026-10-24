@@ -10,12 +10,21 @@ if (args.Length == 2 || args[2] == "version-probe-descriptors")
 {
     string directory = Path.GetFullPath($"build/validation/mixed-mode/probe-descriptors-{Environment.ProcessId}");
     Directory.CreateDirectory(directory);
-    string probePath;
-    string[] probeArguments;
+    string probePath, failProbePath, fastWrapperPath;
+    string[] probeArguments, failProbeArguments, fastWrapperArguments;
+    string fastGate = Path.Combine(directory, "fast-wrapper.release");
+    string fastPidFile = Path.ChangeExtension(fastGate, ".pid");
     if (OperatingSystem.IsWindows())
     {
         probePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe");
         probeArguments = ["/c", "echo lldb version 21.1.8 & rem"];
+        failProbePath = probePath;
+        failProbeArguments = ["/c", "exit /b 1 & rem"];
+        string fastScript = Path.Combine(directory, "lldb-dap-fast.cmd");
+        File.WriteAllText(fastScript,
+            $"@echo off\r\nstart /b \"\" \"{python}\" \"{fake}\" --record-pid --target-gate \"{fastGate}\"\r\necho lldb version 21.1.8\r\nexit /b 0\r\n");
+        fastWrapperPath = probePath;
+        fastWrapperArguments = ["/c", fastScript];
     }
     else
     {
@@ -23,32 +32,65 @@ if (args.Length == 2 || args[2] == "version-probe-descriptors")
         File.WriteAllText(probePath, "#!/bin/sh\necho 'lldb version 21.1.8'\n");
         File.SetUnixFileMode(probePath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         probeArguments = [];
+        failProbePath = Path.Combine(directory, "lldb-dap-fail");
+        File.WriteAllText(failProbePath, "#!/bin/sh\nexit 1\n");
+        File.SetUnixFileMode(failProbePath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        failProbeArguments = [];
+        fastWrapperPath = Path.Combine(directory, "lldb-dap-fast");
+        File.WriteAllText(fastWrapperPath,
+            $"#!/bin/sh\n\"{python}\" \"{fake}\" --record-pid --target-gate \"{fastGate}\" &\necho 'lldb version 21.1.8'\nexit 0\n");
+        File.SetUnixFileMode(fastWrapperPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        fastWrapperArguments = [];
     }
     try
     {
         for (int warmup = 0; warmup < 5; warmup++)
+        {
             _ = NativeAdapterLocator.Resolve("lldb", probePath, probeArguments);
+            try { _ = NativeAdapterLocator.Resolve("lldb", failProbePath, failProbeArguments); }
+            catch (ArgumentException) { }
+        }
         GC.Collect();
         GC.WaitForPendingFinalizers();
         GC.Collect();
         int baseline = OpenHandleCount();
         RLimit? originalLimit = null;
         int resource = OperatingSystem.IsMacOS() ? 8 : 7;
-        if (!OperatingSystem.IsWindows() && getrlimit(resource, out RLimit current) == 0)
+        if (!OperatingSystem.IsWindows())
         {
+            if (getrlimit(resource, out RLimit current) != 0)
+                throw new InvalidOperationException($"getrlimit failed: {Marshal.GetLastPInvokeError()}");
             originalLimit = current;
             ulong cap = Math.Min(current.Max, (ulong)Math.Max(baseline + 64, 256));
             var tightened = new RLimit { Cur = cap, Max = current.Max };
-            _ = setrlimit(resource, ref tightened);
+            if (setrlimit(resource, ref tightened) != 0)
+                throw new InvalidOperationException($"setrlimit failed: {Marshal.GetLastPInvokeError()}");
         }
+        bool noGc = GC.TryStartNoGCRegion(64 * 1024 * 1024);
+        (int Gen0, int Gen1, int Gen2) collectionsBefore = (GC.CollectionCount(0), GC.CollectionCount(1), GC.CollectionCount(2));
         try
         {
             for (int i = 0; i < 100; i++)
             {
-                var resolved = NativeAdapterLocator.Resolve("lldb", probePath, probeArguments);
-                if (resolved.Version != "21.1.8")
-                    throw new InvalidOperationException($"Unexpected version '{resolved.Version}' on probe {i}.");
+                if (i % 2 == 0)
+                {
+                    var resolved = NativeAdapterLocator.Resolve("lldb", probePath, probeArguments);
+                    if (resolved.Version != "21.1.8")
+                        throw new InvalidOperationException($"Unexpected version '{resolved.Version}' on probe {i}.");
+                }
+                else
+                {
+                    bool threw = false;
+                    try { _ = NativeAdapterLocator.Resolve("lldb", failProbePath, failProbeArguments); }
+                    catch (ArgumentException) { threw = true; }
+                    if (!threw)
+                        throw new InvalidOperationException($"Failure probe {i} unexpectedly succeeded.");
+                }
             }
+            (int Gen0, int Gen1, int Gen2) collectionsAfter = (GC.CollectionCount(0), GC.CollectionCount(1), GC.CollectionCount(2));
+            if (collectionsAfter != collectionsBefore)
+                throw new InvalidOperationException(
+                    $"GC ran during 100-probe descriptor check ({collectionsBefore} -> {collectionsAfter}), masking finalizer leaks.");
             int after = OpenHandleCount();
             if (after - baseline > 16)
                 throw new InvalidOperationException(
@@ -56,18 +98,113 @@ if (args.Length == 2 || args[2] == "version-probe-descriptors")
         }
         finally
         {
-            if (originalLimit is { } restore)
-                _ = setrlimit(resource, ref restore);
+            if (noGc)
+            {
+                try { GC.EndNoGCRegion(); } catch (InvalidOperationException) { }
+            }
+            if (originalLimit is { } restore && setrlimit(resource, ref restore) != 0)
+                throw new InvalidOperationException($"Restoring setrlimit failed: {Marshal.GetLastPInvokeError()}");
+        }
+        var fastResolved = NativeAdapterLocator.Resolve("lldb", fastWrapperPath, fastWrapperArguments);
+        if (fastResolved.Version != "21.1.8" || !File.Exists(fastPidFile))
+            throw new InvalidOperationException("Fast wrapper probe did not record its descendant PID.");
+        int fastChildPid = int.Parse(File.ReadAllText(fastPidFile).Trim(), System.Globalization.CultureInfo.InvariantCulture);
+        try
+        {
+            using var leaked = System.Diagnostics.Process.GetProcessById(fastChildPid);
+            if (!leaked.WaitForExit(1000))
+            {
+                leaked.Kill();
+                throw new InvalidOperationException($"Fast wrapper descendant {fastChildPid} escaped probe cleanup.");
+            }
+        }
+        catch (ArgumentException) { }
+        ThreadPool.GetMinThreads(out int minWorkers, out int minIo);
+        ThreadPool.GetMaxThreads(out int maxWorkers, out int maxIo);
+        int blockerCount = Math.Max(minWorkers, Environment.ProcessorCount * 2) + 8;
+        using var startedBlockers = new CountdownEvent(Math.Min(minWorkers, blockerCount));
+        using var releaseBlockers = new ManualResetEventSlim(false);
+        var blockerTasks = new Task[blockerCount];
+        Exception? unhandledPoolException = null;
+        void OnUnhandled(object sender, UnhandledExceptionEventArgs eventArgs) =>
+            unhandledPoolException = eventArgs.ExceptionObject as Exception ?? new InvalidOperationException("Unhandled exception");
+        AppDomain.CurrentDomain.UnhandledException += OnUnhandled;
+        try
+        {
+            _ = ThreadPool.SetMaxThreads(Math.Max(minWorkers, blockerCount), minIo);
+            for (int i = 0; i < blockerCount; i++)
+            {
+                int index = i;
+                blockerTasks[i] = Task.Run(() =>
+                {
+                    if (index < startedBlockers.InitialCount)
+                        startedBlockers.Signal();
+                    releaseBlockers.Wait(TimeSpan.FromSeconds(8));
+                });
+            }
+            startedBlockers.Wait(TimeSpan.FromSeconds(2));
+            var threadErrors = new Exception?[4];
+            var threads = new System.Threading.Thread[threadErrors.Length];
+            for (int i = 0; i < threads.Length; i++)
+            {
+                int slot = i;
+                threads[i] = new System.Threading.Thread(() =>
+                {
+                    try
+                    {
+                        var resolved = NativeAdapterLocator.Resolve("lldb", probePath, probeArguments);
+                        if (resolved.Version != "21.1.8")
+                            throw new InvalidOperationException("Unexpected version under thread-pool saturation: " + resolved.Version);
+                    }
+                    catch (Exception error)
+                    {
+                        threadErrors[slot] = error;
+                    }
+                }) { IsBackground = true };
+                threads[i].Start();
+            }
+            foreach (var thread in threads)
+                thread.Join();
+            releaseBlockers.Set();
+            Task.WaitAll(blockerTasks, TimeSpan.FromSeconds(5));
+            System.Threading.Thread.Sleep(100);
+            if (unhandledPoolException != null)
+                throw new InvalidOperationException("Thread-pool starvation triggered an unhandled callback exception.", unhandledPoolException);
+            if (threadErrors.FirstOrDefault(error => error != null) is { } firstError)
+                throw new InvalidOperationException("Concurrent version discovery failed under thread-pool saturation.", firstError);
+        }
+        finally
+        {
+            releaseBlockers.Set();
+            AppDomain.CurrentDomain.UnhandledException -= OnUnhandled;
+            _ = ThreadPool.SetMaxThreads(maxWorkers, maxIo);
         }
     }
     finally
     {
         try { Directory.Delete(directory, recursive: true); } catch (IOException) { }
     }
-    if (NativeAdapterLocator.ParseVersion("lldb version 21.1.") != null
-        || NativeAdapterLocator.ParseVersion("lldb version 21.1.\n") != null
-        || NativeAdapterLocator.ParseVersion("lldb-2103.0.") != null)
-        throw new InvalidOperationException("Trailing dot in incomplete version token was accepted as a valid version.");
+    foreach (string invalidVersion in new[]
+    {
+        "lldb version 21.1.",
+        "lldb version 21.1.\n",
+        "lldb-2103.0.",
+        "lldb version 21.1.8garbage",
+        "lldb version x21.1.8",
+        "lldb-2103.0.1garbage",
+        "lldb version 21.1.8-",
+        "lldb version 21.1.8+",
+        "lldb version 1.2.3.4.5",
+        "x21.1.8",
+    })
+        if (NativeAdapterLocator.ParseVersion(invalidVersion) != null)
+            throw new InvalidOperationException($"Malformed version token '{invalidVersion}' was accepted as valid.");
+    if (NativeAdapterLocator.ParseVersion("lldb version 21.1.8") != "21.1.8"
+        || NativeAdapterLocator.ParseVersion("lldb version 21.0.0git (https://github.com/llvm/llvm-project.git)") != "21.0.0"
+        || NativeAdapterLocator.ParseVersion("liblldb: lldb-2103.0.34.103") != "2103.0.34.103"
+        || NativeAdapterLocator.ParseVersion("lldb version 21.1.8-rc.1+build.42") != "21.1.8"
+        || NativeAdapterLocator.ParseVersion("21.1.8-alpha.1") != "21.1.8")
+        throw new InvalidOperationException("Valid version format was rejected by ParseVersion.");
     Console.WriteLine("PASS 100 repeated version discoveries under low descriptor limit keep descriptor/handle count stable without GC");
     if (args.Length == 3)
         return;

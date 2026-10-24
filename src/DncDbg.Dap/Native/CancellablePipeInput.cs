@@ -38,7 +38,7 @@ internal sealed class CancellablePipeInput(Stream input, CancellationToken cance
                 }
                 if (available > 0)
                     return input.Read(buffer, offset, (int)Math.Min(count, available));
-                cancellation.WaitHandle.WaitOne(20);
+                System.Threading.Thread.Sleep(10);
             }
             else
             {

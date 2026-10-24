@@ -136,6 +136,9 @@ def build():
                   if p.suffix in (".dylib", ".so", ".dll")]
     check(len(candidates) == 1, f"Expected one native library, got {candidates}")
     shutil.copy2(candidates[0], DLL.parent)
+    native_pdb = candidates[0].with_suffix(".pdb")
+    if native_pdb.exists():
+        shutil.copy2(native_pdb, DLL.parent)
     result = subprocess.run(["dotnet", str(DLL)], capture_output=True, text=True, check=True)
     check(result.stdout.splitlines() == ["BEFORE:19,23", "AFTER:42", "RESULT:42"], result.stdout)
     print("PASS fixture: native_add(19, 23) == 42", flush=True)
@@ -221,6 +224,42 @@ def managed_baseline(adapter):
     print("PASS managed breakpoints/stack/arguments/result across P/Invoke", flush=True)
 
 
+def windows_engine(adapter):
+    with Dap(adapter, "windows-engine") as session:
+        session.request("initialize", dict(adapterID="dncdbg"))
+        launch = session.send("launch", dict(program=str(DLL), args=["--preload"], nativeDebugging=True))
+        session.event("initialized")
+        session.request("setBreakpoints", dict(source=dict(path=str(FIXTURE / "Program.cs")),
+                                              breakpoints=[dict(line=line(FIXTURE / "Program.cs", marker))
+                                                           for marker in ("MANAGED_BEFORE", "MANAGED_AFTER")]))
+        session.request("configurationDone")
+        session.response(launch)
+        before = session.event("stopped")
+        bp = session.request("dotnet/setNativeBreakpoint", dict(module="mixedfixture.dll",
+                                                               source=dict(path=str(FIXTURE / "native.c")),
+                                                               line=line(FIXTURE / "native.c", "NATIVE_BREAK"),
+                                                               oneShot=True))
+        check(bp["verified"] and bp["oneShot"], str(bp))
+        session.request("continue", dict(threadId=before["threadId"]))
+        stop = session.event("stopped")
+        check(stop["description"] == "Native breakpoint", str(stop))
+        threads = session.request("threads")["threads"]
+        check(any(t["id"] == stop["threadId"] for t in threads), "Missing native stopped thread")
+        frames = session.request("stackTrace", dict(threadId=stop["threadId"]))["stackFrames"]
+        check("native_sum" in frames[0]["name"], str(frames[:3]))
+        check(any("native_add" in f["name"] for f in frames), "Missing native caller")
+        check(Path(frames[0]["source"]["path"]).resolve() == (FIXTURE / "native.c").resolve(), str(frames[0]))
+        check(frames[0]["line"] == line(FIXTURE / "native.c", "NATIVE_BREAK"), str(frames[0]))
+        session.request("scopes", dict(frameId=frames[0]["id"]), success=False)
+        session.request("stepIn", dict(threadId=stop["threadId"]), success=False)
+        session.request("continue", dict(threadId=stop["threadId"]))
+        after = managed_after(session)
+        session.request("continue", dict(threadId=after["threadId"]))
+        check(session.event("exited")["exitCode"] == 0, "Windows engine exit")
+        session.request("disconnect")
+    print("PASS Windows DNCDbg managed -> native source breakpoint/stack -> managed result", flush=True)
+
+
 def coordination_probe(adapter, lldb, preload=False):
     with Dap(adapter, "managed-baseline") as managed, Dap(lldb, "coordinated-native-baseline") as native:
         stop = start_managed(managed, preload)
@@ -259,7 +298,9 @@ def coordination_probe(adapter, lldb, preload=False):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--adapter", type=Path, default=ROOT / "bin" / "dncdbg-dap")
-    parser.add_argument("--lldb-dap", type=Path, required=True)
+    parser.add_argument("--lldb-dap", type=Path)
+    parser.add_argument("--windows-engine", action="store_true",
+                        help="Require the experimental Windows DNCDbg engine/DAP slice.")
     parser.add_argument("--probe-coordination", action="store_true",
                         help="Require the full dual-debugger scenario; currently FAILS on macOS.")
     parser.add_argument("--preload", action="store_true",
@@ -267,7 +308,11 @@ if __name__ == "__main__":
     options = parser.parse_args()
     check(not options.preload or options.probe_coordination, "--preload requires --probe-coordination")
     build()
-    native_baseline(options.lldb_dap)
-    managed_baseline(options.adapter.resolve())
-    if options.probe_coordination:
-        coordination_probe(options.adapter.resolve(), options.lldb_dap, options.preload)
+    if options.windows_engine:
+        windows_engine(options.adapter.resolve())
+    else:
+        check(options.lldb_dap is not None, "--lldb-dap is required for LLDB baselines")
+        native_baseline(options.lldb_dap)
+        managed_baseline(options.adapter.resolve())
+        if options.probe_coordination:
+            coordination_probe(options.adapter.resolve(), options.lldb_dap, options.preload)

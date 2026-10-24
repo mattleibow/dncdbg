@@ -24,6 +24,7 @@ internal sealed class InteropProof(string fixture, string sourceDirectory)
     private int _managedStops;
     private int _nativeStops;
     private int _nativeSteps;
+    private int? _nativeExitCode;
     private ulong _nativeAddress;
     private IntPtr _symbolHandle;
     private int _pid;
@@ -68,7 +69,7 @@ internal sealed class InteropProof(string fixture, string sourceDirectory)
             shim.ResumeProcess(launched.ResumeHandle);
             await _completed.Task.WaitAsync(TimeSpan.FromSeconds(60));
             await target.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15));
-            Require(target.ExitCode == 0, $"Target exit code: {target.ExitCode}");
+            Require(_nativeExitCode == 0, $"Native process exit event code: {_nativeExitCode}");
             Require(_managedStops == 2 && _nativeStops == 1 && _nativeSteps == 1,
                 $"Incomplete scenario: managed={_managedStops}, native={_nativeStops}, native steps={_nativeSteps}");
             Console.WriteLine("PASS public ICorDebug interop launch: managed -> native -> managed, result 42, clean exit");
@@ -189,6 +190,8 @@ internal sealed class InteropProof(string fixture, string sourceDirectory)
         {
             if (e.OutOfBand)
             {
+                if (native.dwDebugEventCode == DebugEventType.EXIT_PROCESS_DEBUG_EVENT)
+                    _nativeExitCode = native.u.ExitProcess.dwExitCode;
                 (_process ?? _debugger!.GetProcess(native.dwProcessId)).Continue(true);
                 return;
             }

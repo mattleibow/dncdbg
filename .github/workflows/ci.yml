@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  debugger:
+    name: Debugger (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Restore
+        run: dotnet restore DncDbg.slnx
+
+      - name: Build
+        run: dotnet build DncDbg.slnx --configuration Release --no-restore --nologo
+
+      - name: Publish adapter
+        run: dotnet publish src/DncDbg.Dap --configuration Release --no-build --output bin --nologo
+
+      - name: Run smoke and acceptance tests
+        shell: pwsh
+        run: |
+          $adapter = if ($IsWindows) {
+            Join-Path $PWD "bin/dncdbg-dap.exe"
+          } else {
+            Join-Path $PWD "bin/dncdbg-dap"
+          }
+          $env:DNCDBG = $adapter
+          dotnet run --project tests/DncDbg.SmokeTests --configuration Release --no-build -- $adapter
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          & ./test-suite/run_tests.ps1
+
+  vscode:
+    name: VS Code integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tests/DncDbg.VsCodeTests/package-lock.json
+
+      - name: Publish adapter
+        run: dotnet publish src/DncDbg.Dap --configuration Release --output bin --nologo
+
+      - name: Install VS Code test dependencies
+        run: npm ci --prefix tests/DncDbg.VsCodeTests
+
+      - name: Run VS Code integration tests
+        run: xvfb-run -a npm test --prefix tests/DncDbg.VsCodeTests
+        env:
+          DNCDBG_VSCODE_VERSION: stable

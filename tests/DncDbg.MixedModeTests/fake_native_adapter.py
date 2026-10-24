@@ -21,6 +21,16 @@ parser.add_argument("--arch", default="arm64")
 options = parser.parse_args()
 
 if options.target_gate:
+    if options.mode == "version-truncated-suffix":
+        deadline = time.monotonic() + 5.5
+        while time.monotonic() < deadline and not options.target_gate.exists():
+            time.sleep(0.02)
+        try:
+            sys.stdout.write("8\n")
+            sys.stdout.flush()
+        except OSError:
+            pass
+        sys.exit(0)
     while not options.target_gate.exists():
         time.sleep(0.01)
     sys.exit(0)
@@ -28,10 +38,21 @@ if options.target_gate:
 if options.version:
     if options.mode == "version-reads-stdin":
         sys.stdin.buffer.read(1)
-    if options.mode == "version-inherits-pipes":
+    if options.mode in ("version-inherits-pipes", "version-inherits-stdout", "version-inherits-stderr"):
+        out_stream = sys.stdout.buffer if options.mode != "version-inherits-stderr" else subprocess.DEVNULL
+        err_stream = sys.stderr.buffer if options.mode != "version-inherits-stdout" else subprocess.DEVNULL
         holder = subprocess.Popen([sys.executable, __file__, "--target-gate", str(options.barrier)],
+                                  stdin=subprocess.DEVNULL, stdout=out_stream, stderr=err_stream)
+        options.barrier.with_suffix(".pid").write_text(str(holder.pid))
+    if options.mode in ("version-truncated-pipe", "version-truncated-token"):
+        prefix = "lldb version 21.1." if options.mode == "version-truncated-pipe" else "lldb version 21.1"
+        sys.stdout.write(prefix)
+        sys.stdout.flush()
+        holder = subprocess.Popen([sys.executable, __file__, "--mode=version-truncated-suffix",
+                                   "--target-gate", str(options.barrier)],
                                   stdin=subprocess.DEVNULL, stdout=sys.stdout.buffer, stderr=sys.stderr.buffer)
         options.barrier.with_suffix(".pid").write_text(str(holder.pid))
+        sys.exit(0)
     if options.mode == "no-cli-version":
         sys.exit(1)
     if options.lldb:

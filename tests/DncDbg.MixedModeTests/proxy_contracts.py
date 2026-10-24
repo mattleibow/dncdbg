@@ -334,36 +334,85 @@ def version_stdin_contract(adapter):
 
 
 def version_pipe_inheritance_contract(adapter):
-    gate = OUT / "version-inherited-pipes.release"
-    pid_file = gate.with_suffix(".pid")
-    gate.unlink(missing_ok=True)
-    pid_file.unlink(missing_ok=True)
-    try:
-        started = time.monotonic()
-        try:
-            probe = subprocess.run([adapter, *arguments("lldb", "version-inherits-pipes", barrier=gate),
-                                    "--native-debugger-info"], capture_output=True, text=True, timeout=8)
-        except subprocess.TimeoutExpired:
-            raise AssertionError("Version discovery hung on inherited stdout/stderr pipes after probe process exit") from None
-        elapsed = time.monotonic() - started
-        check(pid_file.exists() and integration["alive"](int(pid_file.read_text().strip())),
-              "Version-probe pipe holder exited before discovery returned")
-        check(elapsed < 7, f"Version discovery exceeded its bounded 5s probe deadline: {elapsed:.2f}s")
-        check(probe.returncode == 0 and json.loads(probe.stdout)["version"] == "21.1.8",
-              "Version probe with inherited pipes did not complete cleanly: " + probe.stdout + probe.stderr)
-    finally:
-        gate.write_text("release")
-        if pid_file.exists():
-            pid = int(pid_file.read_text().strip())
-            if integration["alive"](pid):
-                try:
-                    os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
-                except ProcessLookupError:
-                    pass
-                integration["exited"](pid)
+    for mode in ("version-inherits-stdout", "version-inherits-stderr", "version-inherits-pipes"):
+        gate = OUT / f"{mode}.release"
+        pid_file = gate.with_suffix(".pid")
         gate.unlink(missing_ok=True)
         pid_file.unlink(missing_ok=True)
-    print("PASS version discovery bounds inherited stdout/stderr pipe waits under one monotonic deadline", flush=True)
+        holder_pid = None
+        try:
+            started = time.monotonic()
+            probe = subprocess.Popen([adapter, *arguments("lldb", mode, barrier=gate), "--native-debugger-info"],
+                                     stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            deadline = time.monotonic() + 3
+            while not pid_file.exists():
+                check(time.monotonic() < deadline and probe.poll() is None, f"{mode} did not record its pipe-holder PID")
+                time.sleep(0.01)
+            holder_pid = int(pid_file.read_text().strip())
+            time.sleep(0.3)
+            check(probe.poll() is None and integration["alive"](holder_pid),
+                  f"{mode} pipe holder was not alive during post-exit stream collection")
+            try:
+                stdout, stderr = probe.communicate(timeout=8)
+            except subprocess.TimeoutExpired:
+                probe.kill()
+                raise AssertionError(f"Version discovery hung on inherited pipes ({mode}) after probe process exit") from None
+            elapsed = time.monotonic() - started
+            check(elapsed < 7, f"Version discovery ({mode}) exceeded its bounded 5s probe deadline: {elapsed:.2f}s")
+            check(probe.returncode == 0 and json.loads(stdout)["version"] == "21.1.8",
+                  f"Version probe ({mode}) did not accept complete version line before cancellation: " + stdout + stderr)
+            deadline = time.monotonic() + 2
+            while integration["alive"](holder_pid):
+                check(time.monotonic() < deadline,
+                      f"Version discovery ({mode}) abandoned pipe-holding descendant {holder_pid} after Resolve returned")
+                time.sleep(0.01)
+            holder_pid = None
+        finally:
+            gate.write_text("release")
+            if holder_pid and integration["alive"](holder_pid):
+                try:
+                    os.kill(holder_pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+                except ProcessLookupError:
+                    pass
+                integration["exited"](holder_pid)
+            gate.unlink(missing_ok=True)
+            pid_file.unlink(missing_ok=True)
+        print(f"PASS version discovery bounds pipe wait and cleans up descendant holder: {mode}", flush=True)
+
+    for mode in ("version-truncated-pipe", "version-truncated-token"):
+        gate = OUT / f"{mode}.release"
+        pid_file = gate.with_suffix(".pid")
+        gate.unlink(missing_ok=True)
+        pid_file.unlink(missing_ok=True)
+        holder_pid = None
+        try:
+            started = time.monotonic()
+            probe = subprocess.run([adapter, *arguments("lldb", mode, barrier=gate), "--native-debugger-info"],
+                                   capture_output=True, text=True, timeout=8)
+            elapsed = time.monotonic() - started
+            if pid_file.exists():
+                holder_pid = int(pid_file.read_text().strip())
+            check(elapsed < 7, f"Truncated version probe ({mode}) exceeded bounded deadline: {elapsed:.2f}s")
+            check(probe.returncode != 0,
+                  f"Truncated cancelled version output ({mode}) manufactured a valid version: " + probe.stdout + probe.stderr)
+            if holder_pid is not None:
+                deadline = time.monotonic() + 2
+                while integration["alive"](holder_pid):
+                    check(time.monotonic() < deadline,
+                          f"Truncated version discovery ({mode}) abandoned descendant {holder_pid} after failure")
+                    time.sleep(0.01)
+                holder_pid = None
+        finally:
+            gate.write_text("release")
+            if holder_pid and integration["alive"](holder_pid):
+                try:
+                    os.kill(holder_pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+                except ProcessLookupError:
+                    pass
+                integration["exited"](holder_pid)
+            gate.unlink(missing_ok=True)
+            pid_file.unlink(missing_ok=True)
+        print(f"PASS truncated cancelled version output is rejected and cleaned up: {mode}", flush=True)
 
 
 def selected_frame_contract(adapter):

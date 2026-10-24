@@ -199,6 +199,14 @@ The version subprocess has redirected, closed stdin and cannot consume the
 client's DAP initialize bytes. Its process wait and cancellable stdout/stderr
 collection share one five-second monotonic deadline, so a descendant that
 inherits the probe's pipes cannot hold discovery open after the probe exits.
+Cancelled streams retain only completed newline-terminated lines and complete
+version tokens; a truncated prefix whose suffix arrives after the deadline fails
+discovery rather than manufacturing a partial version. Probe pipe streams are
+explicitly disposed when bounded collection finishes, keeping file descriptors
+and handles stable without waiting for finalization. Each probe establishes
+launch-scoped cleanup ownership (a new Unix process group signaled before
+reaping its leader, or a Windows Job Object) and terminates any remaining
+descendants on every completion path.
 Adapters without CLI `--version` are probed by
 public DAP initialize/version instead. Candidates must actually execute; merely
 finding an executable is not a usable-toolchain check.

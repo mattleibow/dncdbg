@@ -6,6 +6,72 @@ if (args.Length is < 2 or > 3)
     throw new ArgumentException("Supply the public Python executable and fake_native_adapter.py test peer.");
 string python = args[0], fake = args[1];
 
+if (args.Length == 2 || args[2] == "version-probe-descriptors")
+{
+    string directory = Path.GetFullPath($"build/validation/mixed-mode/probe-descriptors-{Environment.ProcessId}");
+    Directory.CreateDirectory(directory);
+    string probePath;
+    string[] probeArguments;
+    if (OperatingSystem.IsWindows())
+    {
+        probePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe");
+        probeArguments = ["/c", "echo lldb version 21.1.8 & rem"];
+    }
+    else
+    {
+        probePath = Path.Combine(directory, "lldb-dap-probe");
+        File.WriteAllText(probePath, "#!/bin/sh\necho 'lldb version 21.1.8'\n");
+        File.SetUnixFileMode(probePath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        probeArguments = [];
+    }
+    try
+    {
+        _ = NativeAdapterLocator.Resolve("lldb", probePath, probeArguments);
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+        int baseline = OpenHandleCount();
+        RLimit? originalLimit = null;
+        int resource = OperatingSystem.IsMacOS() ? 8 : 7;
+        if (!OperatingSystem.IsWindows() && getrlimit(resource, out RLimit current) == 0)
+        {
+            originalLimit = current;
+            ulong cap = Math.Min(current.Max, (ulong)Math.Max(baseline + 64, 256));
+            var tightened = new RLimit { Cur = cap, Max = current.Max };
+            _ = setrlimit(resource, ref tightened);
+        }
+        try
+        {
+            for (int i = 0; i < 100; i++)
+            {
+                var resolved = NativeAdapterLocator.Resolve("lldb", probePath, probeArguments);
+                if (resolved.Version != "21.1.8")
+                    throw new InvalidOperationException($"Unexpected version '{resolved.Version}' on probe {i}.");
+            }
+            int after = OpenHandleCount();
+            if (after - baseline > 16)
+                throw new InvalidOperationException(
+                    $"100 repeated version probes leaked descriptors/handles without GC: {baseline} -> {after}.");
+        }
+        finally
+        {
+            if (originalLimit is { } restore)
+                _ = setrlimit(resource, ref restore);
+        }
+    }
+    finally
+    {
+        try { Directory.Delete(directory, recursive: true); } catch (IOException) { }
+    }
+    if (NativeAdapterLocator.ParseVersion("lldb version 21.1.") != null
+        || NativeAdapterLocator.ParseVersion("lldb version 21.1.\n") != null
+        || NativeAdapterLocator.ParseVersion("lldb-2103.0.") != null)
+        throw new InvalidOperationException("Trailing dot in incomplete version token was accepted as a valid version.");
+    Console.WriteLine("PASS 100 repeated version discoveries under low descriptor limit keep descriptor/handle count stable without GC");
+    if (args.Length == 3)
+        return;
+}
+
 if (OperatingSystem.IsLinux() && (args.Length == 2 || args[2] == "linux-ancestry-generations"))
 {
     const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static;
@@ -635,6 +701,33 @@ NativeAdapterSession Session(string mode)
     return new NativeAdapterSession(new NativeAdapterDescriptor("dap", python,
         [fake, "--mode=" + mode, "--arch=" + architecture], "test", null, RuntimeInformation.RuntimeIdentifier, []),
         _ => { }, error => Console.Error.WriteLine(error.Message), Console.Error.WriteLine);
+}
+
+int OpenHandleCount()
+{
+    if (OperatingSystem.IsLinux())
+        return Directory.GetFileSystemEntries("/proc/self/fd").Length;
+    if (OperatingSystem.IsMacOS())
+        return Directory.GetFileSystemEntries("/dev/fd").Length;
+    using var self = System.Diagnostics.Process.GetCurrentProcess();
+    return GetProcessHandleCount(self.SafeHandle, out uint count) ? (int)count : self.HandleCount;
+}
+
+[DllImport("libc", SetLastError = true)]
+static extern int getrlimit(int resource, out RLimit rlim);
+
+[DllImport("libc", SetLastError = true)]
+static extern int setrlimit(int resource, ref RLimit rlim);
+
+[DllImport("kernel32.dll", SetLastError = true)]
+[return: MarshalAs(UnmanagedType.Bool)]
+static extern bool GetProcessHandleCount(Microsoft.Win32.SafeHandles.SafeProcessHandle process, out uint handleCount);
+
+[StructLayout(LayoutKind.Sequential)]
+struct RLimit
+{
+    public ulong Cur;
+    public ulong Max;
 }
 
 sealed class ClosedClientOutput : MemoryStream

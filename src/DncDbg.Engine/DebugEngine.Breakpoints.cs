@@ -64,8 +64,9 @@ public sealed partial class DebugEngine
                 : "No loaded module with symbols contains code for this location."));
     }
 
-    private readonly Dictionary<string, List<UserBreakpoint>> _breakpoints = new(
-        OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+    // DAP source paths are request identities: two spellings may resolve to the same document, but replacing one
+    // request must not recreate the other request's breakpoint IDs.
+    private readonly Dictionary<string, List<UserBreakpoint>> _breakpoints = new(StringComparer.Ordinal);
     private readonly List<UserBreakpoint> _functionBreakpoints = [];
     private readonly Dictionary<CodeLocation, NativeBreakpoint> _nativeBreakpoints = [];
     private CodeLocation? _entryBreakpoint;

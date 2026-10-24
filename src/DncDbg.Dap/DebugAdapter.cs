@@ -19,7 +19,7 @@ internal sealed class DebugAdapter : IDisposable
     private bool _initialized;
     private bool _configurationDone;
     private (DapMessage Request, object? Body, Action? AfterResponse)? _pendingStartResponse;
-    private readonly Dictionary<string, BreakpointRequest[]> _breakpointRequests = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, BreakpointRequest[]> _breakpointRequests = new(StringComparer.Ordinal);
     private FunctionBreakpointRequest[] _functionBreakpointRequests = [];
     private ExceptionFilterRequest[]? _exceptionFilterRequests;
     private bool _clientLinesStartAt1 = true;

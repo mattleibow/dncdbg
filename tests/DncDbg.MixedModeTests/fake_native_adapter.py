@@ -181,6 +181,8 @@ while True:
         last_reverse_response = request
         continue
     command, args = request["command"], request.get("arguments", {})
+    if options.mode == "eof-" + command:
+        os._exit(0)
     if options.mode == "wide-ids":
         for key in ("frameId", "variablesReference", "sourceReference"):
             if args.get(key, 0) > 1 << 40:
@@ -241,7 +243,7 @@ while True:
         if options.mode == "startup-failure" and launch_count == 1:
             response(request, success=False, message="Explicit startup rejection")
             continue
-        if options.mode in ("detach-stall", "detach-refused", "dead-disconnect"):
+        if options.mode in ("detach-stall", "detach-refused", "dead-disconnect", "attach-termination-refused"):
             owned_target = subprocess.Popen([sys.executable, __file__, "--target-gate", str(options.barrier)],
                                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             event("process", dict(systemProcessId=owned_target.pid, name="owned-test-target", isLocalProcess=True))
@@ -336,6 +338,11 @@ while True:
                                variablesReference=1, context=args.get("context")),
                  success=args.get("frameId", selected_frame) in (1, 2))
     elif command == "reverse":
+        if options.mode == "client-block-reverse":
+            write(sys.stdout.buffer, dict(seq=500, type="request", command="runInTerminal",
+                                         arguments=dict(args=["owned-fixture", "x" * (8 * 1024 * 1024)])))
+            response(request)
+            continue
         write(sys.stdout.buffer, dict(seq=500, type="request", command="runInTerminal", arguments=dict(args=["owned-fixture"])))
         response(request)
     elif command == "reverseStatus":
@@ -358,17 +365,28 @@ while True:
         event("capabilities", dict(capabilities=dict(supportsCancelRequest=True)))
     elif command == "disconnect":
         disconnects.append(args.get("terminateDebuggee"))
-        if options.mode in ("queued-terminals", "late-terminals", "staggered-terminals"):
-            if options.mode == "staggered-terminals":
+        if options.mode == "reverse-detach-refused" and args.get("terminateDebuggee") is False:
+            response(request, success=False, message="Test backend refused detach while terminal is pending")
+            continue
+        if options.mode == "attach-termination-refused":
+            if args.get("terminateDebuggee") is True:
+                response(request, success=False, message="Test attached target refused termination")
+                continue
+            response(request)
+            break
+        if options.mode in ("queued-terminals", "late-terminals", "staggered-terminals", "long-terminals", "long-staggered-terminals"):
+            if options.mode in ("staggered-terminals", "long-staggered-terminals"):
                 event("exited", dict(exitCode=0))
                 response(request)
                 while not options.barrier.exists():
                     time.sleep(0.01)
+                if options.mode == "long-staggered-terminals":
+                    time.sleep(3)
                 event("terminated")
                 break
-            if options.mode == "late-terminals":
+            if options.mode in ("late-terminals", "long-terminals"):
                 response(request)
-                time.sleep(0.2)
+                time.sleep(3 if options.mode == "long-terminals" else 0.2)
             event("exited", dict(exitCode=0))
             event("terminated")
             if options.mode == "queued-terminals":

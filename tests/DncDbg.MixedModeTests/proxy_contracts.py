@@ -985,6 +985,11 @@ def client_backpressure_contract(adapter, command="variables", finish="eof"):
                 args = dict(variablesReference=request("scopes", args)["scopes"][0]["variablesReference"])
             target = send(command, args)
             length = header()
+            while length <= 1000000:
+                message = json.loads(process.stdout.read(length))
+                check(command == "reverse" and message.get("type") in ("event", "response"),
+                      "Response is not large enough to fill a client pipe: " + str(message))
+                length = header()
             check(length > 1000000, "Response is not large enough to fill a client pipe")
             check(process.stdout.read(1) == b"{", "The large response write was not admitted")
             if finish == "eof":
@@ -996,7 +1001,7 @@ def client_backpressure_contract(adapter, command="variables", finish="eof"):
             elif finish != "deadline":
                 raise AssertionError("Unknown output backpressure mode")
             try:
-                process.wait(timeout=15)
+                process.wait(timeout=36 if command == "reverse" else 15)
             except subprocess.TimeoutExpired:
                 raise AssertionError("Client backpressure held state/teardown during " + command + "/" + finish) from None
             check(process.returncode == 0, "Client backpressure shutdown failed: " + str(process.returncode))
@@ -1129,7 +1134,7 @@ def disconnect_terminal_drain_contract(adapter, mode="queued-terminals"):
         started = time.monotonic()
         request = peer.send("disconnect", dict(terminateDebuggee=True))
         peer.response(request)
-        if mode == "staggered-terminals":
+        if mode in ("staggered-terminals", "long-staggered-terminals"):
             peer.event("exited")
             release.write_text("release terminated after exited delivery")
         try:
@@ -1148,13 +1153,99 @@ def disconnect_terminal_drain_contract(adapter, mode="queued-terminals"):
     print("PASS successful disconnect drains exited/terminated exactly once after reverse wait: " + mode, flush=True)
 
 
+def refused_reverse_contract(adapter):
+    with Dap(adapter, "refused-detach-reverse", arguments("dap", "reverse-detach-refused")) as peer:
+        peer.request("initialize", dict(adapterID="dncdbg", supportsRunInTerminalRequest=True))
+        peer.request("launch", dict(program="owned-test-target"))
+        peer.event("initialized")
+        peer.request("reverse")
+        peer.receive(lambda m: m.get("type") == "request" and m.get("command") == "runInTerminal")
+        peer.request("disconnect", dict(terminateDebuggee=False), success=False)
+        deadline = time.monotonic() + 2
+        while True:
+            reply = peer.request("reverseStatus").get("response")
+            if reply:
+                break
+            check(time.monotonic() < deadline, "Refused detach orphaned the originating runInTerminal request")
+            time.sleep(0.01)
+        check(reply["request_seq"] == 500 and reply["success"] is False, "Interrupted reverse did not receive explicit failure: " + str(reply))
+        peer.request("reverse")
+        reverse = peer.receive(lambda m: m.get("type") == "request" and m.get("command") == "runInTerminal")
+        payload = json.dumps(dict(seq=999, type="response", request_seq=reverse["seq"], command="runInTerminal",
+                                  success=True, body=dict(processId=123))).encode()
+        peer.process.stdin.write(f"Content-Length: {len(payload)}\r\n\r\n".encode() + payload)
+        peer.process.stdin.flush()
+        deadline = time.monotonic() + 2
+        while not peer.request("reverseStatus")["valid"]:
+            check(time.monotonic() < deadline, "Refused detach did not reset reverse-request admission")
+            time.sleep(0.01)
+        peer.request("disconnect", dict(terminateDebuggee=True))
+    print("PASS refused detach fails interrupted reverse to origin and permits the next reverse request", flush=True)
+
+
+def attached_refused_termination_contract(adapter):
+    release = OUT / "attached-refusal-target-release"
+    release.unlink(missing_ok=True)
+    pid = None
+    try:
+        with Dap(adapter, "attached-refused-termination", arguments("dap", "attach-termination-refused", barrier=release)) as peer:
+            peer.request("initialize", dict(adapterID="dncdbg"))
+            peer.request("attach", dict(pid=123))
+            pid = peer.event("process")["systemProcessId"]
+            peer.event("initialized")
+            peer.request("disconnect", dict(terminateDebuggee=True), success=False)
+            peer.process.stdin.close()
+            peer.disconnected = True
+            peer.process.wait(timeout=15)
+            check(peer.process.returncode == 0 and integration["alive"](pid),
+                  "Refused terminating disconnect escalated ownership of an attached target")
+            release.write_text("release")
+            integration["exited"](pid)
+            pid = None
+    finally:
+        release.write_text("release")
+        if pid and integration["alive"](pid):
+            os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+        release.unlink(missing_ok=True)
+    print("PASS refused terminating detach preserves non-owned attached target through EOF cleanup", flush=True)
+
+
+def inspection_backend_eof_contract(adapter, command="stackTrace"):
+    with Dap(adapter, "inspection-eof-" + command, arguments("dap", "eof-" + command)) as peer:
+        peer.request("initialize", dict(adapterID="dncdbg"))
+        peer.request("launch", dict(program="owned-test-target"))
+        peer.event("initialized")
+        peer.request("configurationDone")
+        peer.event("stopped")
+        args = dict(threadId=7)
+        if command in ("scopes", "variables"):
+            frame = peer.request("stackTrace", dict(threadId=7))["stackFrames"][0]["id"]
+            args = dict(frameId=frame)
+            if command == "variables":
+                args = dict(variablesReference=peer.request("scopes", args)["scopes"][0]["variablesReference"])
+        elif command == "readMemory":
+            args = dict(memoryReference="0x1000", count=4)
+        request = peer.send(command, args)
+        reply = peer.receive(lambda m: m.get("type") == "response" and m.get("request_seq") == request)
+        text = reply.get("message", "").lower()
+        check(not reply["success"] and any(word in text for word in ("connection", "transport", "unavailable", "closed"))
+              and "timed out" not in text and not text.startswith("cancelled"),
+              "Inspection backend EOF was misreported as stop/session cancellation: " + str(reply))
+        peer.process.stdin.close()
+        peer.disconnected = True
+        peer.process.wait(timeout=15)
+    print("PASS active " + command + " backend EOF reports transport loss rather than stop/session cancellation", flush=True)
+
+
 def managed_publication_contracts(lldb):
     subprocess.run(["dotnet", "build", "tests/DncDbg.NativeTests", "-c", "Release", "--nologo", "-v", "quiet"], check=True)
     env = dict(os.environ, DNCDBG_TEST_LLDB_DAP=lldb)
-    for command in ("scopes", "variables", "evaluate", "dotnet/managedStackTrace"):
+    for command in ("scopes", "variables", "evaluate", "dotnet/managedStackTrace", "stackTrace"):
         for transition in ("", ":module"):
             subprocess.run(["dotnet", "run", "--no-build", "--project", "tests/DncDbg.NativeTests", "-c", "Release", "--",
                             sys.executable, str(FAKE), "managed-publication-" + command + transition], env=env, check=True)
+    subprocess.run(["dotnet", "run", "--no-build", "--project", "tests/DncDbg.NativeTests", "-c", "Release", "--",
+                    sys.executable, str(FAKE), "managed-publication-hybrid-enumeration"], env=env, check=True)
 
 
 def native_only_watch_contract(adapter):
@@ -1352,6 +1443,13 @@ if __name__ == "__main__":
     disconnect_terminal_drain_contract(options.adapter)
     disconnect_terminal_drain_contract(options.adapter, mode="late-terminals")
     disconnect_terminal_drain_contract(options.adapter, mode="staggered-terminals")
+    disconnect_terminal_drain_contract(options.adapter, mode="long-terminals")
+    disconnect_terminal_drain_contract(options.adapter, mode="long-staggered-terminals")
+    client_backpressure_contract(options.adapter, command="reverse", finish="deadline")
+    refused_reverse_contract(options.adapter)
+    attached_refused_termination_contract(options.adapter)
+    for command in ("stackTrace", "scopes", "variables", "readMemory"):
+        inspection_backend_eof_contract(options.adapter, command=command)
     for command in ("variables", "scopes"):
         for finish in ("eof", "disconnect"):
             client_backpressure_contract(options.adapter, command=command, finish=finish)

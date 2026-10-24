@@ -4,6 +4,8 @@ using System.Text;
 using System.Text.Json;
 using DncDbg.Dap.Native;
 using DncDbg.Protocol;
+using DncDbg.Engine;
+using System.Collections;
 
 internal static class ManagedPublicationProof
 {
@@ -34,6 +36,32 @@ internal static class ManagedPublicationProof
             && f.GetProperty("name").GetString()!.Contains("ManagedCall", StringComparison.Ordinal)).GetProperty("id").GetInt32();
         int variables = worker.Request("scopes", new { frameId = managed }).GetProperty("scopes")[0].GetProperty("variablesReference").GetInt32();
         long stop = worker.Field<long>("_stop"), inspection = worker.Field<long>("_inspectionEpoch");
+        if (command == "hybrid-enumeration")
+        {
+            CoreClrInspection view = worker.Field<CoreClrInspection>("_inspection");
+            var stacks = (Dictionary<int, IReadOnlyList<ManagedInspectionFrame>>)typeof(CoreClrInspection)
+                .GetField("_stacks", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(view)!;
+            bool injected = false;
+            stacks[thread] = new InterruptedFrames(stacks[thread], () =>
+            {
+                if (injected)
+                    return;
+                injected = true;
+                worker.Receive(new DapMessage { Type = "event", Event = "module",
+                    Body = JsonSerializer.SerializeToElement(new { reason = "changed" }) });
+            });
+            int seq = worker.NextSequence;
+            Exception? enumerationFailure = null;
+            try { worker.Submit("stackTrace", new { threadId = thread }).WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult(); }
+            catch (Exception error) when (error is OperationCanceledException or IOException) { enumerationFailure = error; }
+            DapMessage? enumerationResult = output.Response(seq);
+            if (!injected || worker.Field<long>("_inspectionEpoch") <= inspection || enumerationFailure == null
+                && (enumerationResult?.Body is not JsonElement body || body.GetProperty("stackFrames").EnumerateArray()
+                    .Any(f => f.GetProperty("name").GetString()!.Contains("[Managed]", StringComparison.Ordinal))))
+                throw new InvalidOperationException($"Hybrid stack published managed frame IDs after module invalidation during cached CLR enumeration at epoch {inspection}.");
+            Console.WriteLine("PASS hybrid stack retains originating inspection epoch across cached CLR enumeration");
+            return;
+        }
         object arguments = command switch
         {
             "scopes" => new { frameId = managed },
@@ -59,6 +87,19 @@ internal static class ManagedPublicationProof
         if (result?.Success == true || failure == null && result == null)
             throw new InvalidOperationException($"Stale managed {command} succeeded after {(module ? "inspection" : "stop")} transition {stop}/{inspection}.");
         Console.WriteLine($"PASS real managed {command} publication rejects {(module ? "module inspection" : "stop")} transition behind client output gate");
+    }
+
+    private sealed class InterruptedFrames(IReadOnlyList<ManagedInspectionFrame> frames, Action interrupt)
+        : IReadOnlyList<ManagedInspectionFrame>
+    {
+        public int Count => frames.Count;
+        public ManagedInspectionFrame this[int index] => frames[index];
+        public IEnumerator<ManagedInspectionFrame> GetEnumerator()
+        {
+            interrupt();
+            return frames.GetEnumerator();
+        }
+        IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
     }
 
     private static string FindDotnet() => (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator)

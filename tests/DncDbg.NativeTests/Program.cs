@@ -137,9 +137,29 @@ if (args.Length == 2 || args[2] == "reverse-client-timeout")
         [0L, 0L, 0L, new DncDbg.Protocol.DapMessage { Seq = 500, Type = "request", Command = "runInTerminal" }, null])!;
     typeof(NativeDebugProxy).GetMethod("ForwardReverse", flags)!.Invoke(proxy, [envelope]);
     var body = (System.Text.Json.JsonElement)backend.Request("reverseStatus", new { }).Body!;
-    if (body.GetProperty("response").GetProperty("success").GetBoolean())
-        throw new InvalidOperationException("A timed-out client write did not fail back to the originating backend.");
-    Console.WriteLine("PASS client reverse-write timeout fails explicitly to the originating backend");
+    var lifetime = (CancellationTokenSource)typeof(NativeDebugProxy).GetField("_lifetime", flags)!.GetValue(proxy)!;
+    if (!connection.WriteFailed || !lifetime.IsCancellationRequested || body.GetProperty("response").ValueKind != System.Text.Json.JsonValueKind.Null)
+        throw new InvalidOperationException("A partial timed-out reverse write did not abort the poisoned client transport.");
+    Console.WriteLine("PASS partial client reverse-write timeout aborts the poisoned client transport");
+    if (args.Length == 3)
+        return;
+}
+
+if (args.Length == 2 || args[2] == "reverse-before-exposure")
+{
+    const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+    using var output = new MemoryStream();
+    using var connection = new DncDbg.Protocol.DapConnection(Stream.Null, output);
+    using var proxy = new NativeDebugProxy(connection, new NativeAdapterDescriptor("dap", python, [], "test", null,
+        RuntimeInformation.RuntimeIdentifier, []), Console.Error.WriteLine);
+    ((CancellationTokenSource)typeof(NativeDebugProxy).GetField("_reverseCancellation", flags)!.GetValue(proxy)!).Cancel();
+    var envelope = Activator.CreateInstance(typeof(NativeDebugProxy).GetNestedType("BackendMessage", System.Reflection.BindingFlags.NonPublic)!,
+        [0L, 0L, 0L, new DncDbg.Protocol.DapMessage { Seq = 500, Type = "request", Command = "runInTerminal" }, null])!;
+    typeof(NativeDebugProxy).GetMethod("ForwardReverse", flags)!.Invoke(proxy, [envelope]);
+    var lifetime = (CancellationTokenSource)typeof(NativeDebugProxy).GetField("_lifetime", flags)!.GetValue(proxy)!;
+    if (connection.WriteFailed || lifetime.IsCancellationRequested || output.Length != 0)
+        throw new InvalidOperationException("Cancellation before reverse request exposure incorrectly aborted the client.");
+    Console.WriteLine("PASS reverse cancellation before frame exposure remains nonfatal");
     if (args.Length == 3)
         return;
 }

@@ -74,8 +74,16 @@ and strict `dotnet/managedStackTrace` responses. It validates both the captured
 stop and inspection epoch, including module changes that do not resume the
 target. Real CoreCLR tests gate each response behind client output and exercise
 both a native stop transition and a same-stop module/inspection transition.
+Hybrid `stackTrace` retains the CLR view's originating inspection epoch through
+cached managed-frame enumeration, frame mapping and final publication. A
+module event during enumeration cannot stamp old managed IDs with the new
+epoch or publish a stack whose managed scopes are already stale.
 Replies are bound to their originating backend generation. A client timeout or
-failure produces a failed reply to that backend, never to its replacement.
+failure with a usable client transport produces a failed reply to that backend,
+never to its replacement. A partial reverse-request write uses the same client
+transport-abort policy as other publications; it cancels Run and reaps owned
+processes without waiting for frontend EOF. Cancellation before exposing any
+frame bytes remains nonfatal.
 Each native request has its own cancellation/timeout registration; one timeout
 does not cancel unrelated requests. Explicitly failed startup without target
 evidence releases launch admission
@@ -118,22 +126,29 @@ the client's pipe has broken. A disconnect against a poisoned backend reports
 transport failure and exits to cleanup; it does not require a second frontend EOF.
 Terminal delivery now has one queue owner rather than racing buffered and live
 senders. Disconnect cancels reverse/inspection waits separately from the output
-lifetime, releases terminal delivery only after its response, then waits at most
-two seconds for backend receive completion and two seconds for a queue barrier.
-Queued, shortly delayed and staggered `exited`/`terminated` events retain their
-order and are delivered once before output shutdown. Exceeding the drain budget
-is logged; an unresponsive adapter/client does not get unbounded shutdown time.
+lifetime and releases terminal delivery only after its response. Before the
+final queue barrier, it quiesces the native transport using the existing bounded
+shutdown: allow up to five seconds for adapter exit, stop it if needed according
+to target ownership, and require the reader to finish within five seconds.
+Only then is the final event barrier enqueued, with a two-second delivery
+budget. Queued and delayed/staggered events (including three-second delays)
+retain `exited` then `terminated` order exactly once before output shutdown.
+An unresponsive adapter/client still does not get unbounded shutdown time.
 If a client pipe has already failed, error-response delivery logs the transport
 failure and cancels the lifetime instead of throwing an unhandled exception
 from a background worker. Native reverse-response writes report partial-write
-failure to the session owner; client reverse-write timeouts fail explicitly to
-the originating backend.
+failure to the session owner. A client response timeout after a complete reverse
+request fails back to the originating backend; an interrupted request frame
+instead poisons the client transport and triggers bounded cleanup.
 Run's frontend-read wait observes lifetime cancellation. A partial/truncated
 client publication or write deadline therefore closes the frontend and cleans
 up its owned native target even when the client keeps stdin open waiting for a
 body that cannot be completed. DAP connection disposal is idempotent. Immediate
 backend EOF cancels pending work as a transport failure, not as a fictitious
 elapsed request timeout.
+During an active inspection, a recorded backend transport failure takes
+precedence over an operation cancellation induced by that same failure callback;
+it must not be mislabeled as an ordinary stop/session change.
 
 ## Find an installed debugger
 
@@ -331,6 +346,11 @@ to detach; a launched target defaults to termination.
 Refused non-terminating detach keeps the session alive and its non-termination
 intent sticky. Cleanup must not reinterpret that refusal as permission to
 terminate the target.
+Interrupting a pending reverse request for a refused disconnect sends an
+explicit failed reply to its origin and resets reverse admission for the live
+session. A refused terminating disconnect on a non-owned attached process does
+not grant target ownership: only accepted termination may change false to true.
+Explicit non-termination remains sticky before acceptance.
 An unanswered disconnect has unknown outcome, not a confirmed refusal: it must
 not restore stopped/all-stop state or access modules/DAC without a fresh stopped
 event. Only an explicit failed response can restore the prior stop.
@@ -473,6 +493,11 @@ The next review's exact red/green excerpts are in
 `evidence/dded7bd2-managed-publication-terminal-drain.txt`, including real CLR
 response gating, native frame zero, terminal queue draining, open-input partial
 publication cleanup, atomic startup admission and immediate backend EOF.
+The following frozen-tip review's exact evidence is in
+`evidence/bcb69406-reverse-hybrid-terminal-red-green.txt`: partial reverse-write
+cleanup with open stdin, module invalidation during real cached CLR frame
+enumeration, three-second delayed/staggered terminals, refused-detach reverse
+recovery, attached-target ownership and active-inspection backend EOF.
 
 Real attach reached SIGSTOP with a verified native checkpoint breakpoint, but
 did not reach the checkpoint after continue. The current Xcode adapter also

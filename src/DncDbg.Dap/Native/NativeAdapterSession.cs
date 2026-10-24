@@ -15,11 +15,11 @@ internal sealed class NativeAdapterSession : IDisposable
     private bool _disconnected;
     private bool _transportStopped;
     private readonly Action<Exception> _failed;
+    private Exception? _transportFailure;
 
     public int ProcessId => _process.Id;
     public bool IsAlive => !_process.HasExited;
-    public bool TransportFailed => _connection.WriteFailed || _reader.IsCompleted;
-    public bool WaitForReader(TimeSpan timeout) => _reader.Wait(timeout);
+    public bool TransportFailed => Volatile.Read(ref _transportFailure) != null || _connection.WriteFailed || _reader.IsCompleted;
 
     public NativeAdapterSession(NativeAdapterDescriptor descriptor, Action<DapMessage> receive,
         Action<Exception> failed, Action<string> log)
@@ -52,13 +52,13 @@ internal sealed class NativeAdapterSession : IDisposable
                         receive(message);
                 }
                 if (!_disposing && !_disconnected)
-                    failed(new IOException("The native debug adapter closed its DAP connection."
+                    Fail(new IOException("The native debug adapter closed its DAP connection."
                         + (_process.HasExited ? $" Exit code: 0x{unchecked((uint)_process.ExitCode):X8}." : "")));
             }
             catch (Exception error) when (error is IOException or ObjectDisposedException or InvalidOperationException)
             {
                 if (!_disposing)
-                    failed(error);
+                    Fail(error);
             }
             finally { _connection.CancelPendingRequests(); }
         });
@@ -70,7 +70,7 @@ internal sealed class NativeAdapterSession : IDisposable
         catch (Exception error) when (error is OperationCanceledException or IOException or ObjectDisposedException)
         {
             if (_connection.WriteFailed && !_disposing)
-                _failed(new IOException("The native DAP write did not complete; the transport is unusable.", error));
+                Fail(new IOException("The native DAP write did not complete; the transport is unusable.", error));
             throw;
         }
     }
@@ -84,6 +84,10 @@ internal sealed class NativeAdapterSession : IDisposable
             DapMessage response = SendAsync(command, arguments, timeout.Token).GetAwaiter().GetResult();
             _disconnected |= command == "disconnect" && response.Success == true;
             return response;
+        }
+        catch (OperationCanceledException error) when (TransportFailed)
+        {
+            throw new IOException($"Native debug adapter transport ended handling '{command}'.", _transportFailure ?? error);
         }
         catch (OperationCanceledException) when (!cancellation.IsCancellationRequested && timeout.IsCancellationRequested)
         {
@@ -102,9 +106,15 @@ internal sealed class NativeAdapterSession : IDisposable
         catch (Exception error) when (error is OperationCanceledException or IOException or ObjectDisposedException or TimeoutException)
         {
             if (_connection.WriteFailed && !_disposing)
-                _failed(new IOException("The native DAP response write did not complete; the transport is unusable.", error));
+                Fail(new IOException("The native DAP response write did not complete; the transport is unusable.", error));
             throw;
         }
+    }
+
+    private void Fail(Exception error)
+    {
+        if (Interlocked.CompareExchange(ref _transportFailure, error, null) == null)
+            _failed(error);
     }
 
     public void StopTransport(bool terminateTarget)
@@ -133,7 +143,8 @@ internal sealed class NativeAdapterSession : IDisposable
                 _process.Kill(entireProcessTree: terminateTarget);
                 _process.WaitForExit();
             }
-            _reader.Wait(TimeSpan.FromSeconds(5));
+            if (!_reader.Wait(TimeSpan.FromSeconds(5)))
+                throw new IOException("The native adapter reader did not quiesce after transport shutdown.");
             _stderr.Wait(TimeSpan.FromSeconds(5));
         }
         finally { _connection.Dispose(); _transportStopped = true; }

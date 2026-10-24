@@ -114,6 +114,9 @@ jobs:
           if ($IsLinux) {
             dotnet build tests/DncDbg.NativeTests -c Release --nologo
             if ($LASTEXITCODE) { exit $LASTEXITCODE }
+            dotnet tests/DncDbg.NativeTests/bin/Release/net10.0/DncDbg.NativeTests.dll `
+              $python (Join-Path $PWD "tests/DncDbg.MixedModeTests/fake_native_adapter.py") linux-ancestry-generations
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
             python tests/DncDbg.MixedModeTests/pid_reuse.py --dotnet (Get-Command dotnet).Source `
               --tests (Join-Path $PWD "tests/DncDbg.NativeTests/bin/Release/net10.0/DncDbg.NativeTests.dll") `
               --python $python --peer (Join-Path $PWD "tests/DncDbg.MixedModeTests/fake_native_adapter.py") 2>&1 |

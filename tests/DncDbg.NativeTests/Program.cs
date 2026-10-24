@@ -6,6 +6,95 @@ if (args.Length is < 2 or > 3)
     throw new ArgumentException("Supply the public Python executable and fake_native_adapter.py test peer.");
 string python = args[0], fake = args[1];
 
+if (OperatingSystem.IsLinux() && (args.Length == 2 || args[2] == "linux-ancestry-generations"))
+{
+    const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static;
+    var failures = new List<string>();
+    using var self = System.Diagnostics.Process.GetCurrentProcess();
+    using (var backend = Session("normal"))
+    {
+        var root = typeof(NativeAdapterSession).GetField("_adapterIdentity",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)?.GetValue(backend);
+        if (root is not Microsoft.Win32.SafeHandles.SafeFileHandle { IsClosed: false, IsInvalid: false })
+            failures.Add("native adapter startup did not retain its Linux root generation");
+        else
+            Console.WriteLine("PASS native adapter startup retains its Linux root generation");
+    }
+    var sleeper = new System.Diagnostics.ProcessStartInfo(python) { UseShellExecute = false };
+    sleeper.ArgumentList.Add("-c");
+    sleeper.ArgumentList.Add("import time; time.sleep(30)");
+    using (var exited = System.Diagnostics.Process.Start(sleeper)!)
+    using (var identity = (Microsoft.Win32.SafeHandles.SafeFileHandle)typeof(OwnedLocalTarget)
+        .GetMethod("OpenLinuxIdentity", flags)!.Invoke(null, [exited.Id])!)
+    {
+        exited.Kill();
+        exited.WaitForExit(5000);
+        try
+        {
+            bool live = (bool)typeof(OwnedLocalTarget).GetMethod("LinuxIdentityIsLive", flags)!.Invoke(null, [identity])!;
+            if (live)
+                failures.Add("exited retained generation reported live");
+            else
+                Console.WriteLine("PASS exited retained Linux generation returns false without throwing");
+        }
+        catch (System.Reflection.TargetInvocationException error) when (error.InnerException is System.ComponentModel.Win32Exception)
+        { failures.Add("exited retained generation threw instead of returning false: " + error.InnerException.Message); }
+    }
+    bool matched = false;
+    for (int attempt = 0; attempt < 128 && !matched; attempt++)
+    {
+        var start = new System.Diagnostics.ProcessStartInfo(python)
+        { UseShellExecute = false, RedirectStandardInput = true, RedirectStandardOutput = true };
+        start.ArgumentList.Add("-c");
+        start.ArgumentList.Add("""
+            import os, signal, sys
+            def ticks(pid):
+                stat = open(f"/proc/{pid}/stat").read()
+                return stat[stat.rindex(")") + 2:].split()[19]
+            child = os.fork()
+            if child == 0:
+                while True:
+                    signal.pause()
+            try:
+                print(child, ticks(os.getpid()) == ticks(child), flush=True)
+                sys.stdin.readline()
+            finally:
+                os.kill(child, signal.SIGKILL)
+                os.waitpid(child, 0)
+            """);
+        using var wrapper = System.Diagnostics.Process.Start(start)!;
+        try
+        {
+            string[] result = wrapper.StandardOutput.ReadLine()!.Split(' ');
+            matched = result[1] == "True";
+            if (matched)
+            {
+                int pid = int.Parse(result[0], System.Globalization.CultureInfo.InvariantCulture);
+                using var target = OwnedLocalTarget.Capture(pid, self.Id, self.StartTime.ToUniversalTime(), Console.Error.WriteLine);
+                if (target == null)
+                    failures.Add("legitimate same-tick wrapper/child ancestry was rejected");
+                else
+                    Console.WriteLine("PASS legitimate same-tick wrapper/child Capture retains its kernel-bound identity");
+            }
+        }
+        finally
+        {
+            wrapper.StandardInput.WriteLine("RELEASE");
+            wrapper.StandardInput.Flush();
+            if (!wrapper.WaitForExit(5000))
+                wrapper.Kill(entireProcessTree: true);
+        }
+    }
+    if (!matched)
+        failures.Add("positive ancestry proof never exercised equal creation ticks");
+    foreach (string failure in failures)
+        Console.Error.WriteLine("FAIL Linux generation proof: " + failure);
+    if (failures.Count != 0)
+        throw new InvalidOperationException("Linux generation proofs failed: " + string.Join("; ", failures));
+    if (args.Length == 3)
+        return;
+}
+
 if (args.Length == 3 && args[2] == "parent-reuse-worker")
 {
     if (!OperatingSystem.IsLinux())
@@ -17,9 +106,39 @@ if (args.Length == 3 && args[2] == "parent-reuse-worker")
     warmStart.ArgumentList.Add("pass");
     using (var warm = System.Diagnostics.Process.Start(warmStart)!)
         warm.WaitForExit();
+    NativeAdapterSession? rootBackend = null;
+    System.Diagnostics.Process? rootProcess = null;
     Console.WriteLine("READY");
     while (Console.ReadLine() is { } command && command != "EXIT")
     {
+        if (command == "ROOT")
+        {
+            rootBackend = Session("normal");
+            rootProcess = (System.Diagnostics.Process)typeof(NativeAdapterSession).GetField("_process",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(rootBackend)!;
+            Console.WriteLine("ROOT " + rootProcess.Id);
+            continue;
+        }
+        if (command == "REAP_ROOT")
+        {
+            if (rootProcess == null || !rootProcess.WaitForExit(5000))
+                throw new InvalidOperationException("Original adapter root did not exit");
+            Console.WriteLine("ROOT_REAPED");
+            continue;
+        }
+        if (command.StartsWith("CAPTURE_ROOT ", StringComparison.Ordinal))
+        {
+            int targetPid = int.Parse(command["CAPTURE_ROOT ".Length..], System.Globalization.CultureInfo.InvariantCulture);
+            rootBackend!.TrackLaunchedLocalTarget(targetPid);
+            var targets = (System.Collections.IDictionary)typeof(NativeAdapterSession).GetField("_ownedTargets",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(rootBackend)!;
+            bool adopted = targets.Count != 0;
+            rootBackend.Dispose();
+            rootBackend = null;
+            rootProcess = null;
+            Console.WriteLine("ROOT_DONE " + (adopted ? "adopted" : "rejected"));
+            continue;
+        }
         string[] identity = command.Split(' ');
         int pid = int.Parse(identity[0], System.Globalization.CultureInfo.InvariantCulture);
         int oldParent = int.Parse(identity[1], System.Globalization.CultureInfo.InvariantCulture);
@@ -54,6 +173,7 @@ if (args.Length == 3 && args[2] == "parent-reuse-worker")
             replacement.Dispose();
         }
     }
+    rootBackend?.Dispose();
     return;
 }
 

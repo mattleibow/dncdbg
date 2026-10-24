@@ -112,10 +112,46 @@ try:
             break
     if not matched:
         raise AssertionError("Intermediate-parent proof never exercised equal target/replacement creation ticks")
+    print("PASS same-tick intermediate-parent PID reuse cannot authorize independent target termination", flush=True)
+    matched = False
+    for attempt in range(128):
+        send("ROOT")
+        root = receive()
+        if not root.startswith("ROOT "):
+            raise AssertionError("Native session did not start its adapter root: " + root)
+        number = int(root.split()[1])
+        original_tick = ticks(number)
+        os.kill(number, signal.SIGKILL)
+        send("REAP_ROOT")
+        if receive() != "ROOT_REAPED":
+            raise AssertionError("Original adapter root was not reaped")
+        with open("/proc/sys/kernel/ns_last_pid", "w") as allocator:
+            allocator.write(str(number - 1))
+        parent, target = unrelated()
+        if parent != number:
+            raise AssertionError(f"Private namespace did not reuse root PID {number}: {parent}")
+        matched = original_tick == ticks(parent) == ticks(target)
+        send(f"CAPTURE_ROOT {target}")
+        result = receive()
+        exited, status = os.waitpid(target, os.WNOHANG)
+        if exited:
+            target = None
+            raise AssertionError(f"Replacement adapter root authorized killing its unrelated target; same_tick={matched}, status={status}")
+        if result != "ROOT_DONE rejected":
+            raise AssertionError(f"Replacement root acquired cleanup authority; same_tick={matched}, result={result}")
+        print(f"PASS replacement adapter root rejected and unrelated target survives: same_tick={matched}", flush=True)
+        reap(parent)
+        parent = None
+        reap(target)
+        target = None
+        if matched:
+            break
+    if not matched:
+        raise AssertionError("Adapter-root proof never exercised equal original/replacement/target creation ticks")
     send("EXIT")
     if worker.wait(timeout=5) != 0:
         raise AssertionError("Intermediate-parent proof worker failed")
-    print("PASS same-tick intermediate-parent PID reuse cannot authorize independent target termination", flush=True)
+    print("PASS startup-retained root rejects same-tick adapter PID reuse", flush=True)
 finally:
     reap(parent)
     reap(target)

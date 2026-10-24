@@ -196,7 +196,20 @@ if (args.Length == 3 && args[2] == "parent-reuse-worker")
         {
             if (rootProcess == null || !rootProcess.WaitForExit(5000))
                 throw new InvalidOperationException("Original adapter root did not exit");
+            var readerField = typeof(NativeAdapterSession).GetField("_reader",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+            var stderrField = typeof(NativeAdapterSession).GetField("_stderr",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+            Task.WaitAll([(Task)readerField.GetValue(rootBackend!)!, (Task)stderrField.GetValue(rootBackend!)!], TimeSpan.FromSeconds(2));
             Console.WriteLine("ROOT_REAPED");
+            continue;
+        }
+        if (command == "DISPOSE_ROOT")
+        {
+            rootBackend?.Dispose();
+            rootBackend = null;
+            rootProcess = null;
+            Console.WriteLine("ROOT_DISPOSED");
             continue;
         }
         if (command.StartsWith("CAPTURE_ROOT ", StringComparison.Ordinal))
@@ -237,7 +250,6 @@ if (args.Length == 3 && args[2] == "parent-reuse-worker")
             }
         }, adapterIdentity);
         target?.Terminate(Console.Error.WriteLine);
-        Console.WriteLine("DONE " + (target == null ? "rejected" : "adopted"));
         if (replacement != null)
         {
             if (!replacement.HasExited)
@@ -245,6 +257,7 @@ if (args.Length == 3 && args[2] == "parent-reuse-worker")
             replacement.WaitForExit(5000);
             replacement.Dispose();
         }
+        Console.WriteLine("DONE " + (target == null ? "rejected" : "adopted"));
     }
     rootBackend?.Dispose();
     return;

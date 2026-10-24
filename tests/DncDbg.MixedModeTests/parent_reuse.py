@@ -129,7 +129,14 @@ try:
             allocator.write(str(number - 1))
         parent, target = unrelated()
         if parent != number:
-            raise AssertionError(f"Private namespace did not reuse root PID {number}: {parent}")
+            send("DISPOSE_ROOT")
+            if receive() != "ROOT_DISPOSED":
+                raise AssertionError("Root session did not dispose after PID allocation contention")
+            reap(parent)
+            parent = None
+            reap(target)
+            target = None
+            continue
         matched = original_tick == ticks(parent) == ticks(target)
         send(f"CAPTURE_ROOT {target}")
         result = receive()

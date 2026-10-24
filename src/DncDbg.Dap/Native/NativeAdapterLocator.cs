@@ -246,7 +246,6 @@ internal static class NativeAdapterLocator
         foreach (string argument in arguments)
             start.ArgumentList.Add(argument);
         var timer = Stopwatch.StartNew();
-        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         using SafeFileHandle job = CreateJobObjectW(IntPtr.Zero, null);
         if (job.IsInvalid)
             throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
@@ -263,28 +262,49 @@ internal static class NativeAdapterLocator
             }
         }
         process.StandardInput.Dispose();
-        (string Text, bool Complete) outResult = ("", false), errResult = ("", false);
-        using var readersDone = new CountdownEvent(2);
-        _ = ReadPipeAsync(process.StandardOutput.BaseStream, deadline.Token, result => outResult = result, readersDone);
-        _ = ReadPipeAsync(process.StandardError.BaseStream, deadline.Token, result => errResult = result, readersDone);
+        using Stream outStream = process.StandardOutput.BaseStream;
+        using Stream errStream = process.StandardError.BaseStream;
+        SafeHandle outHandle = ((FileStream)outStream).SafeFileHandle;
+        SafeHandle errHandle = ((FileStream)errStream).SafeFileHandle;
+        using var outBytes = new MemoryStream();
+        using var errBytes = new MemoryStream();
+        var buffer = new byte[1024];
+        bool processExited = false, outComplete = false, errComplete = false;
         try
         {
-            uint waitStatus = WaitForSingleObject(processHandle, (uint)Math.Max(0, 5000 - (int)timer.ElapsedMilliseconds));
-            if (waitStatus != 0)
+            while (timer.ElapsedMilliseconds < 5000)
+            {
+                bool progressed = DrainWindowsPipe(outStream, outHandle, outBytes, buffer, ref outComplete)
+                    | DrainWindowsPipe(errStream, errHandle, errBytes, buffer, ref errComplete);
+                if (!processExited && WaitForSingleObject(processHandle, 0) == 0)
+                {
+                    processExited = true;
+                    continue;
+                }
+                if (processExited && outComplete && errComplete)
+                    break;
+                if (!progressed)
+                {
+                    uint waitMs = (uint)Math.Clamp(5000 - (int)timer.ElapsedMilliseconds, 1, 10);
+                    if (!processExited)
+                        processExited = WaitForSingleObject(processHandle, waitMs) == 0;
+                    else
+                        System.Threading.Thread.Sleep((int)waitMs);
+                }
+            }
+            if (!processExited && WaitForSingleObject(processHandle, 0) != 0)
                 throw new ArgumentException("Error: Native debugger discovery/version probe timed out: " + executable);
-            int remaining = Math.Max(0, 5000 - (int)timer.ElapsedMilliseconds);
-            if (!readersDone.Wait(remaining))
-                deadline.Cancel();
-            deadline.Cancel();
-            readersDone.Wait(TimeSpan.FromSeconds(1));
+            _ = DrainWindowsPipe(outStream, outHandle, outBytes, buffer, ref outComplete);
+            _ = DrainWindowsPipe(errStream, errHandle, errBytes, buffer, ref errComplete);
             if (!GetExitCodeProcess(processHandle, out uint rawExitCode))
                 throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
-            bool complete = outResult.Complete && errResult.Complete;
-            return (unchecked((int)rawExitCode), CompleteLines(outResult.Text, complete) + CompleteLines(errResult.Text, complete), complete);
+            bool complete = outComplete && errComplete;
+            string outText = System.Text.Encoding.UTF8.GetString(outBytes.GetBuffer(), 0, (int)outBytes.Length);
+            string errText = System.Text.Encoding.UTF8.GetString(errBytes.GetBuffer(), 0, (int)errBytes.Length);
+            return (unchecked((int)rawExitCode), CompleteLines(outText, complete) + CompleteLines(errText, complete), complete);
         }
         finally
         {
-            deadline.Cancel();
             _ = TerminateJobObject(job, 1);
             _ = WaitForSingleObject(processHandle, 1000);
             var cleanup = Stopwatch.StartNew();
@@ -292,9 +312,38 @@ internal static class NativeAdapterLocator
                 && QueryInformationJobObject(job, 1, out var accounting, Marshal.SizeOf<JobObjectBasicAccountingInformation>(), IntPtr.Zero)
                 && accounting.ActiveProcesses != 0)
                 System.Threading.Thread.Sleep(10);
-            readersDone.Wait(TimeSpan.FromSeconds(1));
             try { process.StandardOutput.Dispose(); } catch (Exception) { }
             try { process.StandardError.Dispose(); } catch (Exception) { }
+        }
+    }
+
+    private static bool DrainWindowsPipe(Stream stream, SafeHandle handle, MemoryStream destination, byte[] buffer, ref bool complete)
+    {
+        if (complete)
+            return false;
+        bool readAny = false;
+        while (true)
+        {
+            if (!PeekNamedPipe(handle, IntPtr.Zero, 0, IntPtr.Zero, out uint available, IntPtr.Zero))
+            {
+                int error = Marshal.GetLastPInvokeError();
+                if (error is 109 or 232)
+                {
+                    complete = true;
+                    return readAny;
+                }
+                throw new IOException("Cannot inspect native adapter pipe readiness.", new System.ComponentModel.Win32Exception(error));
+            }
+            if (available == 0)
+                return readAny;
+            int read = stream.Read(buffer, 0, (int)Math.Min(buffer.Length, available));
+            if (read <= 0)
+            {
+                complete = true;
+                return readAny;
+            }
+            destination.Write(buffer, 0, read);
+            readAny = true;
         }
     }
 
@@ -320,8 +369,16 @@ internal static class NativeAdapterLocator
         var timer = Stopwatch.StartNew();
         (string Text, bool Complete) outResult = ("", false), errResult = ("", false);
         using var readersDone = new CountdownEvent(2);
-        _ = ReadPipeAsync(stdout, deadline.Token, result => outResult = result, readersDone);
-        _ = ReadPipeAsync(stderr, deadline.Token, result => errResult = result, readersDone);
+        _ = System.Threading.ThreadPool.QueueUserWorkItem(_ =>
+        {
+            try { outResult = ReadPipe(stdout, deadline.Token); }
+            finally { readersDone.Signal(); }
+        });
+        _ = System.Threading.ThreadPool.QueueUserWorkItem(_ =>
+        {
+            try { errResult = ReadPipe(stderr, deadline.Token); }
+            finally { readersDone.Signal(); }
+        });
         int status = 0;
         bool reaped = false;
         try
@@ -454,31 +511,22 @@ internal static class NativeAdapterLocator
         }
     }
 
-    private static async Task ReadPipeAsync(Stream stream, CancellationToken cancellation,
-        Action<(string Text, bool Complete)> store, CountdownEvent done)
+    private static (string Text, bool Complete) ReadPipe(Stream stream, CancellationToken cancellation)
     {
-        await Task.Yield();
+        using var input = new CancellablePipeInput(stream, cancellation);
+        using var bytes = new MemoryStream();
+        var buffer = new byte[1024];
+        bool complete = false;
         try
         {
-            using var input = new CancellablePipeInput(stream, cancellation);
-            using var bytes = new MemoryStream();
-            var buffer = new byte[1024];
-            bool complete = false;
-            try
-            {
-                int read;
-                while ((read = await input.ReadAsync(buffer, cancellation).ConfigureAwait(false)) > 0)
-                    bytes.Write(buffer, 0, read);
-                complete = !cancellation.IsCancellationRequested;
-            }
-            catch (Exception error) when (error is OperationCanceledException or IOException or ObjectDisposedException) { }
-            string text = System.Text.Encoding.UTF8.GetString(bytes.GetBuffer(), 0, (int)bytes.Length);
-            store((CompleteLines(text, complete), complete));
+            int read;
+            while ((read = input.Read(buffer, 0, buffer.Length)) > 0)
+                bytes.Write(buffer, 0, read);
+            complete = !cancellation.IsCancellationRequested;
         }
-        finally
-        {
-            done.Signal();
-        }
+        catch (Exception error) when (error is OperationCanceledException or IOException or ObjectDisposedException) { }
+        string text = System.Text.Encoding.UTF8.GetString(bytes.GetBuffer(), 0, (int)bytes.Length);
+        return (CompleteLines(text, complete), complete);
     }
 
     private static string CompleteLines(string text, bool complete)
@@ -524,6 +572,11 @@ internal static class NativeAdapterLocator
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetExitCodeProcess(SafeProcessHandle process, out uint exitCode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool PeekNamedPipe(SafeHandle pipe, IntPtr buffer, uint size, IntPtr read,
+        out uint available, IntPtr remaining);
 
     [DllImport("libc", SetLastError = true)]
     private static extern int posix_spawnattr_init(IntPtr attr);

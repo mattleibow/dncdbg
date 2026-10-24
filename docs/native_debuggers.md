@@ -290,6 +290,10 @@ The active workflow gates native-only LLDB relay/lifecycle and generic ownership
 contracts separately on macOS, Linux and Windows. Strict managed-overlay
 assertions run only when that explicitly proven configuration matches; other
 runner configurations are reported unproven, not converted into managed passes.
+Native launch configuration is backend-specific: the fixture uses LLDB's
+backwards-compatible `env:["NAME=value"]` form. LLVM 18's public launch handler
+reads a string array and silently ignores the newer object representation;
+DNCDbg forwards configuration rather than inventing a universal launch schema.
 
 [Run 40085975520](https://github.com/mattleibow/dncdbg/actions/runs/40085975520)
 was red: macOS/Linux failed before DAC open because older LLDB serializes
@@ -302,6 +306,14 @@ real-LLDB relay reproduced that decimal representation, failed with
 passed strict managed frame/locals assertions after the parser fix. This
 addresses the known representation failure, not every DAC/ABI/stop combination
 on the previously red CI configurations.
+
+[Run 40087105817](https://github.com/mattleibow/dncdbg/actions/runs/40087105817)
+proved native-only relay/lifecycle, deterministic contracts and managed
+regressions on macOS and Windows (including the public Python dependency fix).
+Linux remained red because LLVM 18 ignored the fixture's object-shaped `env`,
+so the required checkpoint was never enabled and the first stop was
+`native_sum`. The fixture now supplies the public string-array form; stop-order,
+persistent identity, locals, stepping and lifecycle assertions are unchanged.
 
 The new timeout/control regressions were red before their production fixes:
 

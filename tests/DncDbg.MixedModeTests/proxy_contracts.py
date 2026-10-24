@@ -139,7 +139,7 @@ def invalid_runtime(adapter, lldb, poison):
              ["--native-debugger=lldb", "--native-debugger-path=" + lldb]) as peer:
         peer.request("initialize", dict(adapterID="dncdbg", pathFormat="path", linesStartAt1=True, columnsStartAt1=True))
         launch = peer.send("launch", dict(program=shutil.which("dotnet"), args=[str(DLL)],
-                                          env=dict(DNCDBG_MIXED_CHECKPOINTS="1"),
+                                          env=["DNCDBG_MIXED_CHECKPOINTS=1"],
                                           managedInspection=dict(runtimeDirectory=str(directory))))
         peer.event("initialized")
         peer.request("setBreakpoints", dict(source=dict(path=str(FIXTURE / "native.c")),
@@ -359,7 +359,7 @@ def notification_contract(adapter, lldb):
         peer.request("initialize", dict(adapterID="dncdbg", pathFormat="path", linesStartAt1=True,
                                         columnsStartAt1=True, supportsInvalidatedEvent=True))
         launch = peer.send("launch", dict(program=shutil.which("dotnet"), args=[str(DLL)],
-                                          env=dict(DNCDBG_MIXED_CHECKPOINTS="1"), managedInspection=True))
+                                          env=["DNCDBG_MIXED_CHECKPOINTS=1"], managedInspection=True))
         peer.event("initialized")
         peer.request("setBreakpoints", dict(source=dict(path=str(FIXTURE / "native.c")),
                                            breakpoints=[dict(line=line(FIXTURE / "native.c", "NATIVE_CHECKPOINT"))]))
@@ -388,7 +388,7 @@ def strict_managed_contract(adapter, lldb, mode=None):
         peer.request("initialize", dict(adapterID="dncdbg", pathFormat="path", linesStartAt1=True,
                                         columnsStartAt1=True, supportsInvalidatedEvent=True))
         launch = peer.send("launch", dict(program=shutil.which("dotnet"), args=[str(DLL)],
-                                          env=dict(DNCDBG_MIXED_CHECKPOINTS="1"), managedInspection=True))
+                                          env=["DNCDBG_MIXED_CHECKPOINTS=1"], managedInspection=True))
         peer.event("initialized")
         peer.request("setBreakpoints", dict(source=dict(path=str(FIXTURE / "native.c")),
                                            breakpoints=[dict(line=line(FIXTURE / "native.c", "NATIVE_CHECKPOINT"))]))
@@ -411,7 +411,7 @@ def real_restart_contract(adapter, lldb):
                                                columnsStartAt1=True, supportsInvalidatedEvent=True))
         check(caps.get("supportsRestartRequest"), "Selected LLDB does not advertise restart")
         launch = peer.send("launch", dict(program=shutil.which("dotnet"), args=[str(DLL)],
-                                          env=dict(DNCDBG_MIXED_CHECKPOINTS="1"), managedInspection=True))
+                                          env=["DNCDBG_MIXED_CHECKPOINTS=1"], managedInspection=True))
         peer.event("initialized")
         peer.request("setBreakpoints", dict(source=dict(path=str(FIXTURE / "native.c")),
                                            breakpoints=[dict(line=line(FIXTURE / "native.c", "NATIVE_CHECKPOINT"))]))
@@ -483,7 +483,7 @@ def interrupted_read(adapter, lldb, mode):
     with Dap(adapter, "native-read-" + mode, arguments("lldb", mode, lldb, barrier)) as peer:
         peer.request("initialize", dict(adapterID="dncdbg", pathFormat="path", linesStartAt1=True, columnsStartAt1=True))
         launched = peer.send("launch", dict(program=shutil.which("dotnet"), args=[str(DLL)],
-                                            env=dict(DNCDBG_MIXED_CHECKPOINTS="1"), managedInspection=True))
+                                            env=["DNCDBG_MIXED_CHECKPOINTS=1"], managedInspection=True))
         peer.event("initialized")
         peer.request("setBreakpoints", dict(source=dict(path=str(FIXTURE / "native.c")),
                                            breakpoints=[dict(line=line(FIXTURE / "native.c", "NATIVE_CHECKPOINT")),

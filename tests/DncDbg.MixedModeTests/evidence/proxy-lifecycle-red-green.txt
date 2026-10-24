@@ -70,3 +70,8 @@ AssertionError: Unproven control was not explicitly rejected: {'seq': 2, 'type':
 
 === unsupported-controls-green.log ===
 PASS unproven managed attach and proxy restart fail explicitly
+
+=== Linux native-only CI 40087105817, before fixture environment correction ===
+Public LLVM 18 launch handler accepts env as a string array, not an object.
+Checkpoint-first assertion (unchanged) failed with this exact terminal line:
+AssertionError: [{'column': 9, 'id': 1, 'instructionPointerReference': '0x7FFFF7724107', 'line': 11, 'name': 'native_sum', 'source': {'name': 'native.c', 'path': '/home/runner/work/dncdbg/dncdbg/tests/DncDbg.MixedModeTests/fixture/native.c'}}, {'column': 18, 'id': 2, 'instructionPointerReference': '0x7FFFF7724138', 'line': 17, 'name': 'native_add', 'source': {'name': 'native.c', 'path': '/home/runner/work/dncdbg/dncdbg/tests/DncDbg.MixedModeTests/fixture/native.c'}}, {'column': 0, 'id': 3, 'instructionPointerReference': '0x7FFF7909310E', 'line': 0, 'name': '0x00007fff7909310e', 'presentationHint': 'subtle'}]

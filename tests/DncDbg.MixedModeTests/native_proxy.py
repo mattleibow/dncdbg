@@ -73,7 +73,7 @@ def scenario(adapter, lldb, managed, finish):
         check(capabilities["dncdbg"]["executionOwner"] == "native-adapter", str(capabilities))
         program, arguments_to_target = target()
         launch = session.send("launch", dict(program=program, args=arguments_to_target,
-                                             env=dict(DNCDBG_MIXED_CHECKPOINTS="1", **EXTRA_ENV),
+                                             env=["DNCDBG_MIXED_CHECKPOINTS=1", *[k + "=" + v for k, v in EXTRA_ENV.items()]],
                                              managedInspection=managed))
         session.event("initialized")
         breakpoints = session.request("setBreakpoints", dict(source=dict(path=str(FIXTURE / "native.c")),
@@ -181,7 +181,8 @@ def detach_scenario(adapter, lldb, managed):
             peer.request("initialize", dict(adapterID="dncdbg", pathFormat="path", linesStartAt1=True, columnsStartAt1=True))
             program, arguments_to_target = target(["--exit-gate", str(gate)])
             launch = peer.send("launch", dict(program=program, args=arguments_to_target,
-                                              env=dict(DNCDBG_MIXED_CHECKPOINTS="1", **EXTRA_ENV), managedInspection=managed,
+                                              env=["DNCDBG_MIXED_CHECKPOINTS=1", *[k + "=" + v for k, v in EXTRA_ENV.items()]],
+                                              managedInspection=managed,
                                               preRunCommands=[
                                                   'settings set target.output-path "' + str(OUT / "detached.stdout").replace("\\", "/") + '"',
                                                   'settings set target.error-path "' + str(OUT / "detached.stderr").replace("\\", "/") + '"',

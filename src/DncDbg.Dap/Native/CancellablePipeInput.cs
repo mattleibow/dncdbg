@@ -38,7 +38,7 @@ internal sealed class CancellablePipeInput(Stream input, CancellationToken cance
                 }
                 if (available > 0)
                     return input.Read(buffer, offset, (int)Math.Min(count, available));
-                cancellation.WaitHandle.WaitOne(20);
+                System.Threading.Thread.Sleep(10);
             }
             else
             {
@@ -46,6 +46,40 @@ internal sealed class CancellablePipeInput(Stream input, CancellationToken cance
                 int ready = Poll(ref descriptor, 1, 50);
                 if (ready > 0)
                     return input.Read(buffer, offset, count);
+                if (ready < 0 && Marshal.GetLastPInvokeError() != 4)
+                    throw new IOException("Cannot wait for native adapter pipe readiness.",
+                        new Win32Exception(Marshal.GetLastPInvokeError()));
+            }
+        }
+    }
+
+    public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+    {
+        if (buffer.Length == 0)
+            return 0;
+        while (true)
+        {
+            cancellation.ThrowIfCancellationRequested();
+            cancellationToken.ThrowIfCancellationRequested();
+            if (OperatingSystem.IsWindows())
+            {
+                if (!PeekNamedPipe(_handle, IntPtr.Zero, 0, IntPtr.Zero, out uint available, IntPtr.Zero))
+                {
+                    int error = Marshal.GetLastPInvokeError();
+                    if (error is 109 or 232)
+                        return 0;
+                    throw new IOException("Cannot inspect native adapter pipe readiness.", new Win32Exception(error));
+                }
+                if (available > 0)
+                    return await input.ReadAsync(buffer[..(int)Math.Min(buffer.Length, available)], cancellation).ConfigureAwait(false);
+                System.Threading.Thread.Sleep(10);
+            }
+            else
+            {
+                var descriptor = new PollDescriptor { File = _handle.DangerousGetHandle().ToInt32(), Events = 1 };
+                int ready = Poll(ref descriptor, 1, 50);
+                if (ready > 0)
+                    return await input.ReadAsync(buffer, cancellation).ConfigureAwait(false);
                 if (ready < 0 && Marshal.GetLastPInvokeError() != 4)
                     throw new IOException("Cannot wait for native adapter pipe readiness.",
                         new Win32Exception(Marshal.GetLastPInvokeError()));

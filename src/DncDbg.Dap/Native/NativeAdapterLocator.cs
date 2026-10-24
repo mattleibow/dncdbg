@@ -262,16 +262,8 @@ internal static class NativeAdapterLocator
         process.StandardInput.Dispose();
         (string Text, bool Complete) outResult = ("", false), errResult = ("", false);
         using var readersDone = new CountdownEvent(2);
-        _ = System.Threading.ThreadPool.QueueUserWorkItem(_ =>
-        {
-            try { outResult = ReadPipe(process.StandardOutput.BaseStream, deadline.Token); }
-            finally { readersDone.Signal(); }
-        });
-        _ = System.Threading.ThreadPool.QueueUserWorkItem(_ =>
-        {
-            try { errResult = ReadPipe(process.StandardError.BaseStream, deadline.Token); }
-            finally { readersDone.Signal(); }
-        });
+        _ = ReadPipeAsync(process.StandardOutput.BaseStream, deadline.Token, result => outResult = result, readersDone);
+        _ = ReadPipeAsync(process.StandardError.BaseStream, deadline.Token, result => errResult = result, readersDone);
         try
         {
             uint waitStatus = WaitForSingleObject(processHandle, (uint)Math.Max(0, 5000 - (int)timer.ElapsedMilliseconds));
@@ -325,16 +317,8 @@ internal static class NativeAdapterLocator
         var timer = Stopwatch.StartNew();
         (string Text, bool Complete) outResult = ("", false), errResult = ("", false);
         using var readersDone = new CountdownEvent(2);
-        _ = System.Threading.ThreadPool.QueueUserWorkItem(_ =>
-        {
-            try { outResult = ReadPipe(stdout, deadline.Token); }
-            finally { readersDone.Signal(); }
-        });
-        _ = System.Threading.ThreadPool.QueueUserWorkItem(_ =>
-        {
-            try { errResult = ReadPipe(stderr, deadline.Token); }
-            finally { readersDone.Signal(); }
-        });
+        _ = ReadPipeAsync(stdout, deadline.Token, result => outResult = result, readersDone);
+        _ = ReadPipeAsync(stderr, deadline.Token, result => errResult = result, readersDone);
         int status = 0;
         bool reaped = false;
         try
@@ -467,22 +451,31 @@ internal static class NativeAdapterLocator
         }
     }
 
-    private static (string Text, bool Complete) ReadPipe(Stream stream, CancellationToken cancellation)
+    private static async Task ReadPipeAsync(Stream stream, CancellationToken cancellation,
+        Action<(string Text, bool Complete)> store, CountdownEvent done)
     {
-        using var input = new CancellablePipeInput(stream, cancellation);
-        using var bytes = new MemoryStream();
-        var buffer = new byte[1024];
-        bool complete = false;
+        await Task.Yield();
         try
         {
-            int read;
-            while ((read = input.Read(buffer, 0, buffer.Length)) > 0)
-                bytes.Write(buffer, 0, read);
-            complete = !cancellation.IsCancellationRequested;
+            using var input = new CancellablePipeInput(stream, cancellation);
+            using var bytes = new MemoryStream();
+            var buffer = new byte[1024];
+            bool complete = false;
+            try
+            {
+                int read;
+                while ((read = await input.ReadAsync(buffer, cancellation).ConfigureAwait(false)) > 0)
+                    bytes.Write(buffer, 0, read);
+                complete = !cancellation.IsCancellationRequested;
+            }
+            catch (Exception error) when (error is OperationCanceledException or IOException or ObjectDisposedException) { }
+            string text = System.Text.Encoding.UTF8.GetString(bytes.GetBuffer(), 0, (int)bytes.Length);
+            store((CompleteLines(text, complete), complete));
         }
-        catch (Exception error) when (error is OperationCanceledException or IOException or ObjectDisposedException) { }
-        string text = System.Text.Encoding.UTF8.GetString(bytes.GetBuffer(), 0, (int)bytes.Length);
-        return (CompleteLines(text, complete), complete);
+        finally
+        {
+            done.Signal();
+        }
     }
 
     private static string CompleteLines(string text, bool complete)

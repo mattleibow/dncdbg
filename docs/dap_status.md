@@ -7,6 +7,115 @@ This document shows, message by message and field by field, which parts of the [
 > every field in this matrix or every platform. The managed adapter advertises its
 > currently implemented capabilities in the `initialize` response.
 
+## Mixed managed/native debugging
+
+**Decision:** preserve the managed engine's existing behavior. Do not advertise
+mixed-mode DAP support or add a macOS dual-controller production path without a
+passing external baseline. Investigate the direct Windows ICorDebug interop path
+separately; a native-only LLDB stop is not evidence of a working mixed debugger.
+
+### Scenarios and acceptance boundary
+
+The first required scenario is managed source breakpoint -> P/Invoke -> native
+source breakpoint -> continue -> managed source breakpoint, with arguments
+`19, 23`, native sum `42`, and managed return local `42`. The repo-owned fixture
+in `tests/DncDbg.MixedModeTests/fixture` includes labelled, non-inlined managed/C
+functions, a native caller/callee pair, and an optional library-preload variant.
+Managed breakpoints hold execution while the native session attaches, avoiding a
+time-based race into P/Invoke.
+
+Additional scenarios need separate proofs: merging native/managed frames on one
+thread, enumerating native-only and managed threads without ID collisions,
+stepping into/out of P/Invoke and reverse callbacks, native locals/types versus
+managed expressions, late library loads, attach to an existing runtime,
+detach/restart, and cancellation/termination while either controller is stopped.
+None is implied by passing a native-only baseline.
+
+### Public architectures evaluated
+
+| Approach | Public surface and restrictions | Decision |
+| --- | --- | --- |
+| Direct ICorDebug interop | `SetUnmanagedHandler`, `DebugActiveProcess(pid, true)`, `ICorDebugUnmanagedCallback`, `ICorDebugProcess2.SetUnmanagedBreakpoint`/`ClearUnmanagedBreakpoint`, and native thread contexts. Runtime interop is compiled for **Windows x86, x64 and arm64**, not Unix. An unmanaged callback is initially OS-stopped, not necessarily CLR-synchronized; out-of-band callbacks require special continuation discipline. | Windows-only proof first; do not just flip `win32Attach` in the managed engine. |
+| DbgEng / WinDbg | Documented Windows execution control, native symbols/stacks/threads. The public `Microsoft.Debugging.Platform.DbgEng` NuGet package describes redistributable debugger DLLs, headers and libraries, but has Microsoft-specific license terms, not an open-source engine license. A managed wrapper does not relicense its native engine. Two independent Win32 debugger owners cannot simply attach concurrently. | Public option, but no package or debugger binary added. Prefer the runtime's existing interop controller for the first Windows proof. |
+| LLDB SB API embedding | Public native execution controller, C/C++ symbols and typed SB APIs. Requires matching native libraries, process/debugserver components, signing/permissions, and potentially a matching Python distribution. It does not itself supply ICorDebug mixed-mode synchronization or C# source support. | More in-process ABI/distribution coupling than a subprocess proof; rejected for the initial slice. |
+| LLDB / `lldb-dap` subprocess | Public native debugger and DAP interface; toolchain-supplied or upstream LLVM binaries. `lldb-server`/debugserver provide the native process transport, not managed debugging. | Native-only baseline works on this host. Concurrent ICorDebug/LLDB control fails the macOS transition probe; not enabled in production. Linux is unproven, not inferred from macOS. |
+| DAP multiplexer | Can route requests and translate handles/events, but cannot fix OS stop ownership, runtime helper-thread starvation, exception-port conflicts, or synthesize merged stacks. Requires explicit stop ownership, capability intersection, ID lifetimes, and coordinated lifecycle. | Do not implement a protocol facade over a failing engine baseline. |
+| ClrMD, SOS, EventPipe | ClrMD/SOS provide process/dump inspection; EventPipe is tracing. These are useful diagnostics, but do not provide native source breakpoint/step execution control. | Not substitutes for a native debugger. No dependency added. |
+
+### macOS blocker
+
+The [reproducible LLDB baseline and failing probes](build_macos.md#mixed-mode-public-tool-baseline)
+separate managed-only, native-only, and concurrent behavior. The native-only
+baseline exposes C source, arguments, caller/callee frames and stepping across a
+native assignment. Its unsymbolized JIT/transition frames are **not** a merged
+C#/C call stack.
+
+Current CoreCLR PAL source installs per-thread Mach breakpoint exception handlers
+to support the managed debugger. It explicitly warns that suppressing those
+handlers makes a managed debugger unusable. Native debugging can instead run with
+those handlers suppressed when the runtime detects a native debugger at startup,
+but that is not a documented simultaneous managed/native integration contract.
+The probe does not alter private runtime settings, exception ports, JIT
+instructions, or debugger binaries. Preloading the library still encounters
+`PAL_DispatchException` around the native breakpoint, so preloading alone is not
+a production fix.
+
+This is a measured blocker for the tested macOS dual-controller architecture,
+not a claim that every conceivable mixed-mode implementation is impossible.
+
+### Dependencies, distribution and supported matrix
+
+The fixture and harness are repository-owned MIT-licensed code. The test harness
+uses the Python standard library, CMake, a host C compiler, the installed .NET SDK,
+and an explicitly supplied `lldb-dap`. Upstream LLVM/LLDB uses
+**Apache-2.0 WITH LLVM-exception**. Xcode's toolchain is used in place under Apple's
+distribution terms; no Apple or LLVM binary is bundled with DNCDbg. Upstream LLDB
+and Xcode LLDB are not assumed interchangeable: Homebrew LLVM `21.1.8` did not
+complete its launch handshake on this host, while the Xcode binary did.
+
+The Windows proof uses the same public pinned **MIT** ClrDebug `0.4.2` and
+Microsoft.Diagnostics.DbgShim `10.0.745401` packages as the debugger, target-runtime
+`mscordbi` supplied by .NET, and the operating system's documented `DbgHelp.dll`
+API for source-to-address resolution. No DbgEng, Visual Studio debugger, vsdbg,
+internal feed or privately redistributed component is required. The public MSVC
+compiler from the Windows Actions image builds the DLL/PDB; its binaries are not
+redistributed by this repository.
+
+| Surface | Measured support |
+| --- | --- |
+| DNCDbg production mixed-mode capabilities | None added; managed-only DAP behavior is unchanged. |
+| macOS `osx-arm64` / .NET 10 / Xcode LLDB | Separate managed and native launch baselines pass. Concurrent transition probe fails. |
+| macOS `osx-x64` | Not validated. |
+| Linux `linux-x64` / `linux-arm64` | Fixture is portable; no mixed-mode baseline established. No support claim. |
+| Windows `win-x64` | Dedicated public Actions proof; results must be recorded before implementation. |
+| Windows x86 / arm64 | Runtime feature gate exists, but these fixture/proof runs do not validate them. |
+
+Debugger/target architecture must match. Runtime DBI/DAC selection and
+cross-version compatibility remain the CLR's contracts; native symbols must
+match the exact DLL/PDB or shared-library DWARF. No frozen debugger-version
+compatibility is inferred from one passing toolchain.
+
+### Official references checked
+
+- [ICorDebug.DebugActiveProcess](https://learn.microsoft.com/dotnet/core/unmanaged-api/debugging/icordebug/icordebug-debugactiveprocess-method)
+  and [SetUnmanagedHandler](https://learn.microsoft.com/dotnet/core/unmanaged-api/debugging/icordebug/icordebug-setunmanagedhandler-method).
+  The old x86-only remarks on Learn must not be used as the current CoreCLR
+  architecture matrix.
+- Current runtime source at `47e0d08aa903b476781b746c081d1e2144e1d30c`:
+  [platform feature gate](https://github.com/dotnet/runtime/blob/47e0d08aa903b476781b746c081d1e2144e1d30c/src/coreclr/clrdefinitions.cmake#L122-L124),
+  [interop eligibility and rejection](https://github.com/dotnet/runtime/blob/47e0d08aa903b476781b746c081d1e2144e1d30c/src/coreclr/debug/di/rsmain.cpp#L1469-L1478),
+  [native breakpoint implementation in .NET 10.0.12](https://github.com/dotnet/runtime/blob/v10.0.12/src/coreclr/debug/di/process.cpp#L9077-L9195),
+  and [macOS PAL exception ownership](https://github.com/dotnet/runtime/blob/v10.0.12/src/coreclr/pal/src/exception/machexception.cpp#L124-L210).
+- [Unmanaged callback synchronization/OOB rules](https://learn.microsoft.com/dotnet/core/unmanaged-api/debugging/icordebug/icordebugunmanagedcallback-debugevent-method).
+- [LLDB DAP public distribution and configuration](https://lldb.llvm.org/use/lldbdap.html),
+  [LLDB embedding/Python caveats](https://lldb.llvm.org/resources/caveats.html),
+  [LLVM license](https://github.com/llvm/llvm-project/blob/llvmorg-21.1.8/lldb/LICENSE.TXT).
+- [DbgEng overview](https://learn.microsoft.com/windows-hardware/drivers/debugger/debugger-engine-overview),
+  [public DbgEng package](https://www.nuget.org/packages/Microsoft.Debugging.Platform.DbgEng),
+  [DbgHelp source-line API](https://learn.microsoft.com/windows/win32/api/dbghelp/nf-dbghelp-symgetlinefromname64).
+- [ClrMD's stated inspection scope](https://github.com/microsoft/clrmd),
+  [EventPipe tracing scope](https://learn.microsoft.com/dotnet/core/diagnostics/eventpipe).
+
 How to read the blocks below:
 
 - Field names, signatures, and their order are identical to the official DAP specification.

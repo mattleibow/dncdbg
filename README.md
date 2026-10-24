@@ -18,6 +18,13 @@ wrap another debugger executable. Native CLR debugging libraries and the Windows
 PDB reader remain runtime dependencies supplied through NuGet and the target
 runtime; no C++ compiler, CMake build, or vendored native source is required.
 
+Debugging a managed application that calls native code is supported, but native
+source debugging is **not** currently a DNCDbg capability. The
+[mixed-mode investigation](docs/dap_status.md#mixed-managednative-debugging)
+includes a real P/Invoke fixture, public-tool baselines, the macOS PAL blocker,
+and a Windows-only public ICorDebug proof. The fixture alone requires a C compiler
+and CMake; the debugger does not.
+
 ## Build and publish
 
 Install the stable SDK selected by [`global.json`](global.json), then run:

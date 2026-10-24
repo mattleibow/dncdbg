@@ -1,0 +1,52 @@
+name: Mixed-mode public API proof
+
+on:
+  push:
+    branches: [mattleibow-mixed-mode-debugging]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mixed-mode-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-proof:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - name: Build public MSVC native and .NET fixtures
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force build/validation/mixed-mode | Out-Null
+          dotnet --info | Tee-Object build/validation/mixed-mode/dotnet-info.txt
+          dotnet build tests/DncDbg.MixedModeTests/fixture/Fixture.csproj -o build/validation/mixed-mode/fixture --nologo
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cmake -S tests/DncDbg.MixedModeTests/fixture -B build/validation/mixed-mode/native -A x64
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cmake --build build/validation/mixed-mode/native --config Debug
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Copy-Item build/validation/mixed-mode/native/Debug/mixedfixture.* build/validation/mixed-mode/fixture/
+          dotnet build/validation/mixed-mode/fixture/Fixture.dll
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Run public ICorDebug interop baseline
+        shell: pwsh
+        run: |
+          dotnet run --project tests/DncDbg.MixedModeTests/WindowsProof -- build/validation/mixed-mode/fixture/Fixture.dll tests/DncDbg.MixedModeTests/fixture 2>&1 |
+            Tee-Object build/validation/mixed-mode/windows-proof.log
+          exit $LASTEXITCODE
+      - name: Preserve proof logs and binaries
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-mixed-mode-proof
+          path: build/validation/mixed-mode/
+          retention-days: 14

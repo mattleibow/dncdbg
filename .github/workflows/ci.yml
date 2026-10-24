@@ -27,6 +27,13 @@ jobs:
           - ubuntu-latest
           - macos-latest
           - windows-latest
+        include:
+          - os: ubuntu-latest
+            rid: linux-x64
+          - os: macos-latest
+            rid: osx-arm64
+          - os: windows-latest
+            rid: win-x64
 
     steps:
       - name: Configure byte-preserving checkout
@@ -64,6 +71,13 @@ jobs:
             exit $LASTEXITCODE
           }
           & ./test-suite/run_tests.ps1
+
+      - name: Upload adapter artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dncdbg-${{ matrix.rid }}
+          path: bin/
+          if-no-files-found: error
 
   vscode:
     name: VS Code integration

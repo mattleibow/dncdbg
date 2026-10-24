@@ -56,6 +56,9 @@ Each native request has its own cancellation/timeout registration; one timeout
 does not cancel unrelated requests. Failed startup releases launch admission
 and a refused continue restores the previous partial-stop/all-stop state rather
 than inventing an all-stop.
+A timeout/transport failure is not a confirmed refusal: execution state is
+unknown and managed inspection stays unavailable until a fresh stopped event.
+An unsupported restart is rejected without expiring the unchanged stop/frames.
 
 ## Find an installed debugger
 

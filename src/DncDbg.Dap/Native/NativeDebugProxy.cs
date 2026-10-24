@@ -72,7 +72,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
                 lock (_state)
                 {
                     bool stopped = _stopped, allStopped = _allStopped;
-                    if (message.Command is "continue" or "next" or "stepIn" or "stepOut" or "restart" or "launch" or "attach")
+                    if (message.Command is "continue" or "next" or "stepIn" or "stepOut" or "launch" or "attach")
                     {
                         _operation?.Cancel();
                         Invalidate(execution: true, stopped: false, cancelOperation: true);
@@ -105,12 +105,10 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
             try { Handle(work); }
             catch (OperationCanceledException)
             {
-                RestoreControlState(work);
                 client.SendErrorResponse(work.Request, "cancelled: native stop or session changed");
             }
             catch (Exception error)
             {
-                RestoreControlState(work);
                 log($"Native proxy request '{work.Request.Command}' failed: {error}");
                 client.SendErrorResponse(work.Request, ErrorText.Describe(error));
             }
@@ -626,7 +624,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
 
     private void RestoreControlState(Work work)
     {
-        if (work.Request.Command is not ("continue" or "next" or "stepIn" or "stepOut" or "restart"))
+        if (work.Request.Command is not ("continue" or "next" or "stepIn" or "stepOut"))
             return;
         lock (_state)
             if (_stop == work.Stop && !_targetEnded)

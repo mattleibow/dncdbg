@@ -191,6 +191,8 @@ while True:
         source = args.get("source", {}).get("sourceReference", args.get("sourceReference"))
         response(request, dict(content="native source"), success=source == 1)
     elif command in ("continue", "next"):
+        if options.mode == "timeout-control":
+            continue
         if options.mode == "refused-control":
             response(request, success=False, message="Test backend refused continuation")
             continue

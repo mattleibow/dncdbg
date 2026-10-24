@@ -316,6 +316,36 @@ def refused_control_contract(adapter):
     print("PASS refused native controls preserve the prior partial-stop/all-stop state", flush=True)
 
 
+def uncertain_control_contract(adapter):
+    with Dap(adapter, "uncertain-control", arguments("lldb", "timeout-control")) as peer:
+        peer.request("initialize", dict(adapterID="dncdbg"))
+        peer.request("launch", dict(program="owned-test-target", managedInspection=True))
+        peer.event("initialized")
+        peer.request("configurationDone")
+        peer.event("stopped")
+        peer.response(peer.send("continue", dict(threadId=7)), success=False, timeout=35)
+        request = peer.send("dotnet/managedStackTrace", dict(threadId=7))
+        response = peer.receive(lambda m: m.get("type") == "response" and m.get("request_seq") == request)
+        check(not response["success"] and "not stopped" in response["message"].lower(),
+              "A timed-out control has unknown execution state, not a proven refusal: " + str(response))
+        peer.request("disconnect")
+    print("PASS uncertain control timeout fails closed instead of inventing stopped state", flush=True)
+
+
+def rejected_restart_preserves_stop(adapter):
+    with Dap(adapter, "rejected-restart-stop", arguments()) as peer:
+        peer.request("initialize", dict(adapterID="dncdbg"))
+        peer.request("launch", dict(program="owned-test-target"))
+        peer.event("initialized")
+        peer.request("configurationDone")
+        peer.event("stopped")
+        frame = peer.request("stackTrace", dict(threadId=7))["stackFrames"][0]["id"]
+        peer.request("restart", success=False)
+        peer.request("scopes", dict(frameId=frame))
+        peer.request("disconnect")
+    print("PASS unsupported restart preserves the unchanged stop and frame handles", flush=True)
+
+
 def reverse_timeout_contract(adapter):
     with Dap(adapter, "reverse-timeout", arguments("dap")) as peer:
         peer.request("initialize", dict(adapterID="dncdbg"))
@@ -531,6 +561,8 @@ if __name__ == "__main__":
     version_stdin_contract(options.adapter)
     selected_frame_contract(options.adapter)
     refused_control_contract(options.adapter)
+    uncertain_control_contract(options.adapter)
+    rejected_restart_preserves_stop(options.adapter)
     reverse_timeout_contract(options.adapter)
     startup_timeout_contract(options.adapter)
     unsupported_overlay_controls(options.adapter)

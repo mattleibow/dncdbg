@@ -75,3 +75,14 @@ PASS unproven managed attach and proxy restart fail explicitly
 Public LLVM 18 launch handler accepts env as a string array, not an object.
 Checkpoint-first assertion (unchanged) failed with this exact terminal line:
 AssertionError: [{'column': 9, 'id': 1, 'instructionPointerReference': '0x7FFFF7724107', 'line': 11, 'name': 'native_sum', 'source': {'name': 'native.c', 'path': '/home/runner/work/dncdbg/dncdbg/tests/DncDbg.MixedModeTests/fixture/native.c'}}, {'column': 18, 'id': 2, 'instructionPointerReference': '0x7FFFF7724138', 'line': 17, 'name': 'native_add', 'source': {'name': 'native.c', 'path': '/home/runner/work/dncdbg/dncdbg/tests/DncDbg.MixedModeTests/fixture/native.c'}}, {'column': 0, 'id': 3, 'instructionPointerReference': '0x7FFF7909310E', 'line': 0, 'name': '0x00007fff7909310e', 'presentationHint': 'subtle'}]
+
+=== uncertain-control-red.log (terminal assertion, production c822561c) ===
+AssertionError: A timed-out control has unknown execution state, not a proven refusal: {'seq': 7, 'type': 'response', 'command': 'dotnet/managedStackTrace', 'request_seq': 5, 'success': False, 'message': 'A separately loaded CoreCLR runtime module is unavailable. Single-file/static runtime images, Mono/NativeAOT and not-yet-loaded runtimes are not supported by this inspection provider.', 'body': {'error': {'id': 1, 'format': 'A separately loaded CoreCLR runtime module is unavailable. Single-file/static runtime images, Mono/NativeAOT and not-yet-loaded runtimes are not supported by this inspection provider.'}}}
+
+=== rejected-restart-red.log (terminal assertion, production c822561c) ===
+AssertionError: {'seq': 8, 'type': 'response', 'command': 'scopes', 'request_seq': 6, 'success': False, 'message': 'The frame reference is stale or unknown.', 'body': {'error': {'id': 1, 'format': 'The frame reference is stale or unknown.'}}}
+
+=== uncertain-control-green.log (same tests after narrowing restoration) ===
+PASS uncertain control timeout fails closed instead of inventing stopped state
+PASS unsupported restart preserves the unchanged stop and frame handles
+PASS refused native controls preserve the prior partial-stop/all-stop state

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using DncDbg.Protocol;
+using Microsoft.Win32.SafeHandles;
 
 namespace DncDbg.Dap.Native;
 
@@ -19,6 +20,7 @@ internal sealed class NativeAdapterSession : IDisposable
     private readonly Dictionary<int, OwnedLocalTarget> _ownedTargets = [];
     private readonly CancellationTokenSource _readerCancellation = new();
     private readonly DateTime? _adapterStarted;
+    private readonly SafeFileHandle? _adapterIdentity;
 
     public int ProcessId => _process.Id;
     public bool IsAlive => !_process.HasExited;
@@ -34,7 +36,7 @@ internal sealed class NativeAdapterSession : IDisposable
                 return;
             }
             if (_adapterStarted is { } started && !_ownedTargets.ContainsKey(pid)
-                && OwnedLocalTarget.Capture(pid, _process.Id, started, _log) is { } target)
+                && OwnedLocalTarget.Capture(pid, _process.Id, started, _log, _adapterIdentity) is { } target)
                 _ownedTargets.Add(pid, target);
         }
     }
@@ -52,9 +54,25 @@ internal sealed class NativeAdapterSession : IDisposable
         foreach (string argument in descriptor.Arguments)
             start.ArgumentList.Add(argument);
         _process = Process.Start(start) ?? throw new InvalidOperationException("Cannot start the native debug adapter.");
-        try { _adapterStarted = _process.StartTime.ToUniversalTime(); }
-        catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception)
-        { _log("Cannot verify native adapter creation time; independent target adoption is disabled: " + error.Message); }
+        try
+        {
+            if (OperatingSystem.IsLinux())
+                _adapterIdentity = OwnedLocalTarget.OpenLinuxIdentity(_process.Id);
+            _adapterStarted = _process.StartTime.ToUniversalTime();
+            // Process.Start retains the original child's exit state even if its
+            // numeric PID is reused before pidfd_open or metadata lookup finishes.
+            if (_adapterIdentity != null && (!OwnedLocalTarget.LinuxIdentityIsLive(_adapterIdentity) || _process.HasExited))
+                throw new InvalidOperationException("The original native adapter exited during root identity capture.");
+        }
+        catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception
+            or NotSupportedException or IOException or UnauthorizedAccessException or FormatException
+            or OverflowException or EntryPointNotFoundException or DllNotFoundException)
+        {
+            _adapterIdentity?.Dispose();
+            _adapterIdentity = null;
+            _adapterStarted = null;
+            _log("Cannot verify native adapter launch identity; independent target adoption is disabled: " + error.Message);
+        }
         _connection = new DapConnection(new CancellablePipeInput(_process.StandardOutput.BaseStream, _readerCancellation.Token),
             _process.StandardInput.BaseStream);
         _stderr = Task.Run(() =>
@@ -199,6 +217,7 @@ internal sealed class NativeAdapterSession : IDisposable
                     target.Dispose();
                 }
                 _ownedTargets.Clear();
+                _adapterIdentity?.Dispose();
             }
             _transportStopped = true;
         }

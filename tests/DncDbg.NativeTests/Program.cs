@@ -11,6 +11,7 @@ if (OperatingSystem.IsLinux() && (args.Length == 2 || args[2] == "linux-ancestry
     const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static;
     var failures = new List<string>();
     using var self = System.Diagnostics.Process.GetCurrentProcess();
+    using var selfIdentity = OwnedLocalTarget.OpenLinuxIdentity(self.Id);
     using (var backend = Session("normal"))
     {
         var root = typeof(NativeAdapterSession).GetField("_adapterIdentity",
@@ -74,7 +75,7 @@ if (OperatingSystem.IsLinux() && (args.Length == 2 || args[2] == "linux-ancestry
             if (matched)
             {
                 int pid = int.Parse(result[0], System.Globalization.CultureInfo.InvariantCulture);
-                using var target = OwnedLocalTarget.Capture(pid, self.Id, self.StartTime.ToUniversalTime(), Console.Error.WriteLine);
+                using var target = OwnedLocalTarget.Capture(pid, self.Id, self.StartTime.ToUniversalTime(), Console.Error.WriteLine, selfIdentity);
                 if (target == null)
                     failures.Add("legitimate same-tick wrapper/child ancestry was rejected");
                 else
@@ -104,6 +105,7 @@ if (args.Length == 3 && args[2] == "parent-reuse-worker")
     if (!OperatingSystem.IsLinux())
         throw new PlatformNotSupportedException("Parent reuse proof requires a private Linux PID namespace.");
     using var adapter = System.Diagnostics.Process.GetCurrentProcess();
+    using var adapterIdentity = OwnedLocalTarget.OpenLinuxIdentity(adapter.Id);
     DateTime adapterStarted = adapter.StartTime.ToUniversalTime();
     var warmStart = new System.Diagnostics.ProcessStartInfo(python) { UseShellExecute = false };
     warmStart.ArgumentList.Add("-c");
@@ -166,7 +168,7 @@ if (args.Length == 3 && args[2] == "parent-reuse-worker")
                 if (Console.ReadLine() != "CONTINUE")
                     throw new InvalidOperationException("Invalid ancestry continuation barrier");
             }
-        });
+        }, adapterIdentity);
         target?.Terminate(Console.Error.WriteLine);
         Console.WriteLine("DONE " + (target == null ? "rejected" : "adopted"));
         if (replacement != null)
@@ -222,7 +224,8 @@ if (args.Length == 3 && args[2] == "pid-reuse-worker")
         int pid = int.Parse(identity[0], System.Globalization.CultureInfo.InvariantCulture);
         int parent = int.Parse(identity[1], System.Globalization.CultureInfo.InvariantCulture);
         using var ancestor = System.Diagnostics.Process.GetProcessById(parent);
-        using var target = OwnedLocalTarget.Capture(pid, parent, ancestor.StartTime.ToUniversalTime(), Console.Error.WriteLine)
+        using var ancestorIdentity = OwnedLocalTarget.OpenLinuxIdentity(parent);
+        using var target = OwnedLocalTarget.Capture(pid, parent, ancestor.StartTime.ToUniversalTime(), Console.Error.WriteLine, ancestorIdentity)
             ?? throw new InvalidOperationException("Forced-reuse fixture could not retain a verified pidfd identity.");
         target.Terminate(message =>
         {
@@ -242,6 +245,7 @@ if (args.Length == 3 && args[2] == "pid-reuse-worker")
 if ((args.Length == 2 || args[2] == "capture-failures") && (OperatingSystem.IsLinux() || OperatingSystem.IsWindows()))
 {
     using var self = System.Diagnostics.Process.GetCurrentProcess();
+    using var selfIdentity = OperatingSystem.IsLinux() ? OwnedLocalTarget.OpenLinuxIdentity(self.Id) : null;
     var failures = new List<string>();
     foreach (Exception injected in new Exception[] { new OverflowException("Test metadata overflow"), new DllNotFoundException("Test kernel binding unavailable") })
     {
@@ -257,7 +261,7 @@ if ((args.Length == 2 || args[2] == "capture-failures") && (OperatingSystem.IsLi
                 if (message.StartsWith("Native launch ancestry edge ", StringComparison.Ordinal))
                     throw injected;
                 messages.Add(message);
-            });
+            }, selfIdentity);
             if (target != null || child.HasExited || !messages.Any(message => message.StartsWith("Cannot retain kernel-bound launch identity", StringComparison.Ordinal)))
                 throw new InvalidOperationException("Optional kernel identity failure did not reject and log retention.");
         }
@@ -329,7 +333,8 @@ if (args.Length == 2 || args[2] == "target-identity")
     using var child = System.Diagnostics.Process.Start(start)!;
     try
     {
-        using var stale = OwnedLocalTarget.Capture(child.Id, Environment.ProcessId, DateTime.UtcNow.AddDays(1), Console.Error.WriteLine);
+        using var selfIdentity = OperatingSystem.IsLinux() ? OwnedLocalTarget.OpenLinuxIdentity(Environment.ProcessId) : null;
+        using var stale = OwnedLocalTarget.Capture(child.Id, Environment.ProcessId, DateTime.UtcNow.AddDays(1), Console.Error.WriteLine, selfIdentity);
         if (stale != null)
             throw new InvalidOperationException("A mismatched launch creation boundary was adopted.");
         if (child.HasExited)

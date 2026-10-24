@@ -382,11 +382,13 @@ uncertain launch still retains admission without acquiring arbitrary PID authori
 
 Linux uses the public `pidfd_open`/`pidfd_send_signal` APIs. A pidfd is opened
 before PID-based metadata/ancestry checks for the target and every resolved
-parent, including the adapter. Every ancestry generation remains pinned through
-final chain validation. Signal zero and pidfd polling reject exited generations,
+parent. The adapter's root pidfd is retained at session startup, not reopened
+from its numeric PID during adoption. Every ancestry generation remains pinned
+through final chain validation. Signal zero and pidfd polling reject exited generations,
 including zombies; each child's `/proc` PPID is reread after its parent is pinned
-and again for the completed chain. Changed relationships and equal child/parent
-creation ticks fail closed: ambiguous chronology cannot establish provenance.
+and again for the completed chain. Changed relationships fail closed. Equal
+child/parent creation ticks are admitted only with the complete pinned-generation
+relationship proof; chronology alone cannot establish provenance.
 All later independent target signals use the target pidfd, **never a numeric
 PID**, so forced PID reuse (including equal creation ticks) cannot target its
 replacement. `/proc` ancestry is required for every Linux adoption and

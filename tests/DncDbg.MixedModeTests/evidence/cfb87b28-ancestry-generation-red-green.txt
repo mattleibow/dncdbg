@@ -21,7 +21,7 @@ are the pre-fix red evidence.
 
 Generation-bound implementation:
   22891de5 (Bind Linux launch ancestry to retained process generations)
-First hosted ancestry green tip:
+First hosted negative ancestry green tip (superseded by review below):
   ebeefc845cb48135bf225638883b8698fe6b077c
 Run:
   https://github.com/mattleibow/dncdbg/actions/runs/40122252777
@@ -39,6 +39,23 @@ the same job deliberately continued into newly added optional-capture red tests.
 Those failed before their production hardening:
 2026-10-24T18:47:32.0119921Z Unhandled exception. System.InvalidOperationException: Optional kernel identity capture leaked failures: OverflowException, DllNotFoundException
 
+Review found that blanket equal-tick rejection masked relationship validation
+in this first negative green. It was not sufficient evidence of a complete fix.
+The corrected implementation must also admit a legitimate same-tick chain and
+bind the root to the identity retained at adapter startup.
+
+Executing review reds, before production correction:
+  832bb87f8da842dc187108a68b010d3e6ab38187
+  https://github.com/mattleibow/dncdbg/actions/runs/40123530993/job/120960025552
+2026-10-24T19:04:02.5149681Z FAIL Linux generation proof: native adapter startup did not retain its Linux root generation
+2026-10-24T19:04:02.5150624Z FAIL Linux generation proof: exited retained generation threw instead of returning false: No such process
+2026-10-24T19:04:02.5151374Z FAIL Linux generation proof: legitimate same-tick wrapper/child ancestry was rejected
+
+The positive fixture creates a real wrapper/child with consecutive forks and
+checks their actual /proc creation ticks before calling Capture. A preliminary
+fixture at b75840d7 included interpreter startup and did not exercise equal
+ticks; its positive assertion is not counted as product red evidence.
+
 The supervisor runs only as PID1 in sudo unshare --mount --pid --fork
 --mount-proc. It never writes the host PID allocator. The normal ancestry audit
 logger pauses after reading unrelated target T's PPID, then the supervisor
@@ -51,7 +68,9 @@ The fix retains pidfds for all resolved Linux parents through final chain
 validation, in addition to the already retained target pidfd. Poll plus signal
 zero reject exit/reuse, including zombies. Every PPID is reread after resolving
 its pinned parent and again across the final chain. Equal parent/child creation
-ticks, changed relationships and metadata/kernel failures reject admission.
+ticks require the complete live pinned-generation relationship proof; changed
+relationships and metadata/kernel failures reject admission. The adapter root
+uses its startup-retained pidfd, never a newly opened numeric adapter PID.
 Only the retained target pidfd can signal the target; no numeric-PID signaling
 fallback was introduced. Ancestry pidfds are released on every outcome.
 
@@ -87,6 +106,9 @@ and run the full three-OS native backend matrix before the branch is frozen.
 Its uploaded forced-parent-reuse.log, forced-pid-reuse.log,
 backend-contracts.log, native-only-proxy.log, managed smoke/regression logs and
 proof-disposition.json are the authoritative final matrix artifacts.
+The extended private-namespace supervisor must additionally reap the original
+adapter root, reuse its PID within the original creation tick for a new parent
+and child, and require rejection plus unrelated-target survival.
 
 Local root-fix validation also completed the protocol contracts, native
 contracts, real native-only LLDB continue/disconnect/EOF/detach proofs,
@@ -100,8 +122,8 @@ inspection pass. No managed source breakpoint, stepping, exception-control,
 func-eval, device, real attach/restart or broader platform parity is claimed.
 Windows retained-handle/Toolhelp behavior is unchanged. macOS has no independent
 kernel-bound orphan cleanup; its negative contracts require target survival
-and release their own fixture. Linux equal-tick ancestry may conservatively
-decline independent cleanup for a legitimate launch.
+and release their own fixture. Linux equal-tick chronology alone remains
+insufficient, but a fully pinned and revalidated legitimate chain is admitted.
 
 The separately suggested Linux post-signal EINTR budget and Windows
 TerminateProcess access-denied exit-race changes are deferred: deterministic

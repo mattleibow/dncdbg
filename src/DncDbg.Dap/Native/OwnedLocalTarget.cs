@@ -20,7 +20,8 @@ internal sealed class OwnedLocalTarget : IDisposable
         _windowsHandle = windowsHandle;
     }
 
-    public static OwnedLocalTarget? Capture(int pid, int adapterPid, DateTime adapterStarted, Action<string> log)
+    public static OwnedLocalTarget? Capture(int pid, int adapterPid, DateTime adapterStarted, Action<string> log,
+        SafeFileHandle? adapterIdentity)
     {
         if (pid <= 0 || pid == Environment.ProcessId || pid == adapterPid)
             return null;
@@ -41,7 +42,7 @@ internal sealed class OwnedLocalTarget : IDisposable
             DateTime started = process.StartTime.ToUniversalTime();
             if (started < adapterStarted || process.HasExited
                 || !(pidfd != null
-                    ? LinuxDescendsFrom(pid, adapterPid, started, adapterStarted, pidfd, log)
+                    ? LinuxDescendsFrom(pid, adapterPid, started, adapterStarted, pidfd, adapterIdentity, log)
                     : WindowsDescendsFrom(pid, adapterPid, started, adapterStarted, log)))
             {
                 log($"Native target {pid} lacks live corroborated launch ancestry; independent cleanup is not authorized.");
@@ -63,8 +64,10 @@ internal sealed class OwnedLocalTarget : IDisposable
     }
 
     private static bool LinuxDescendsFrom(int pid, int ancestor, DateTime childStarted, DateTime adapterStarted,
-        SafeFileHandle childIdentity, Action<string> log)
+        SafeFileHandle childIdentity, SafeFileHandle? adapterIdentity, Action<string> log)
     {
+        if (adapterIdentity == null || !LinuxIdentityIsLive(adapterIdentity))
+            return false;
         var retained = new List<SafeFileHandle>();
         var edges = new List<(int Child, int Parent, SafeFileHandle ChildIdentity, SafeFileHandle ParentIdentity)>();
         var seen = new HashSet<int>();
@@ -76,13 +79,14 @@ internal sealed class OwnedLocalTarget : IDisposable
                     || LinuxParent(File.ReadAllText($"/proc/{pid}/stat")) is not { } parent)
                     return false;
                 log($"Native launch ancestry edge {pid} -> {parent} requires generation validation.");
-                SafeFileHandle parentIdentity = OpenLinuxIdentity(parent);
-                retained.Add(parentIdentity);
+                SafeFileHandle parentIdentity = parent == ancestor ? adapterIdentity : OpenLinuxIdentity(parent);
+                if (parent != ancestor)
+                    retained.Add(parentIdentity);
                 using Process parentProcess = Process.GetProcessById(parent);
                 DateTime parentStarted = parentProcess.StartTime.ToUniversalTime();
-                // Equal creation ticks cannot prove that the resolved parent predates
-                // this child. Pinning the parent must also precede a fresh PPID check.
-                if (parentStarted >= childStarted || parentStarted < adapterStarted
+                // Creation ticks alone are not provenance. Even equal-tick edges
+                // require pinned generations and a fresh child-parent relationship.
+                if (parentStarted > childStarted || parentStarted < adapterStarted
                     || !LinuxEdgeIsLive(pid, parent, childIdentity, parentIdentity))
                     return false;
                 edges.Add((pid, parent, childIdentity, parentIdentity));
@@ -113,7 +117,7 @@ internal sealed class OwnedLocalTarget : IDisposable
         && LinuxParent(File.ReadAllText($"/proc/{child}/stat")) == parent
         && LinuxIdentityIsLive(childIdentity) && LinuxIdentityIsLive(parentIdentity);
 
-    private static SafeFileHandle OpenLinuxIdentity(int pid)
+    internal static SafeFileHandle OpenLinuxIdentity(int pid)
     {
         int descriptor = PidfdOpen(pid, 0);
         if (descriptor < 0)
@@ -121,14 +125,21 @@ internal sealed class OwnedLocalTarget : IDisposable
         return new SafeFileHandle(descriptor, ownsHandle: true);
     }
 
-    private static bool LinuxIdentityIsLive(SafeFileHandle identity)
+    internal static bool LinuxIdentityIsLive(SafeFileHandle identity)
     {
         // A zombie can still accept signal zero; pidfd readability also detects exit.
         var descriptor = new PollDescriptor { File = identity.DangerousGetHandle().ToInt32(), Events = 1 };
         int ready = Poll(ref descriptor, 1, 0);
-        if (ready < 0 || PidfdSendSignal(identity, 0, IntPtr.Zero, 0) != 0)
+        if (ready < 0)
             throw new Win32Exception(Marshal.GetLastPInvokeError());
-        return ready == 0 && descriptor.ReturnedEvents == 0;
+        if (ready > 0 || descriptor.ReturnedEvents != 0)
+            return false;
+        if (PidfdSendSignal(identity, 0, IntPtr.Zero, 0) == 0)
+            return true;
+        int error = Marshal.GetLastPInvokeError();
+        if (error == 3)
+            return false;
+        throw new Win32Exception(error);
     }
 
     private static bool WindowsDescendsFrom(int pid, int ancestor, DateTime childStarted, DateTime adapterStarted, Action<string> log)

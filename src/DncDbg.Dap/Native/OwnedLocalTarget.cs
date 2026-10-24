@@ -45,7 +45,7 @@ internal sealed class OwnedLocalTarget : IDisposable
             process = Process.GetProcessById(pid);
             SafeProcessHandle? handle = OperatingSystem.IsWindows() ? process.SafeHandle : null;
             DateTime started = process.StartTime.ToUniversalTime();
-            if (started < adapterStarted || process.HasExited || !DescendsFrom(pid, adapterPid, started, adapterStarted)
+            if (started < adapterStarted || process.HasExited || !DescendsFrom(pid, adapterPid, started, adapterStarted, log)
                 || pidfd != null && PidfdSendSignal(pidfd, 0, IntPtr.Zero, 0) != 0)
             {
                 log($"Native target {pid} lacks live corroborated launch ancestry; independent cleanup is not authorized.");
@@ -65,7 +65,7 @@ internal sealed class OwnedLocalTarget : IDisposable
         }
     }
 
-    private static bool DescendsFrom(int pid, int ancestor, DateTime childStarted, DateTime adapterStarted)
+    private static bool DescendsFrom(int pid, int ancestor, DateTime childStarted, DateTime adapterStarted, Action<string> log)
     {
         Dictionary<int, int>? parents = OperatingSystem.IsWindows() ? WindowsParents() : null;
         var seen = new HashSet<int>();
@@ -84,6 +84,7 @@ internal sealed class OwnedLocalTarget : IDisposable
                     return false;
                 parent = parsed;
             }
+            log($"Native launch ancestry edge {pid} -> {parent} requires generation validation.");
             using Process parentProcess = Process.GetProcessById(parent);
             DateTime parentStarted = parentProcess.StartTime.ToUniversalTime();
             if (parentProcess.HasExited || parentStarted > childStarted || parentStarted < adapterStarted)

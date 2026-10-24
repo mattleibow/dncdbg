@@ -6,6 +6,57 @@ if (args.Length is < 2 or > 3)
     throw new ArgumentException("Supply the public Python executable and fake_native_adapter.py test peer.");
 string python = args[0], fake = args[1];
 
+if (args.Length == 3 && args[2] == "parent-reuse-worker")
+{
+    if (!OperatingSystem.IsLinux())
+        throw new PlatformNotSupportedException("Parent reuse proof requires a private Linux PID namespace.");
+    using var adapter = System.Diagnostics.Process.GetCurrentProcess();
+    DateTime adapterStarted = adapter.StartTime.ToUniversalTime();
+    var warmStart = new System.Diagnostics.ProcessStartInfo(python) { UseShellExecute = false };
+    warmStart.ArgumentList.Add("-c");
+    warmStart.ArgumentList.Add("pass");
+    using (var warm = System.Diagnostics.Process.Start(warmStart)!)
+        warm.WaitForExit();
+    Console.WriteLine("READY");
+    while (Console.ReadLine() is { } command && command != "EXIT")
+    {
+        string[] identity = command.Split(' ');
+        int pid = int.Parse(identity[0], System.Globalization.CultureInfo.InvariantCulture);
+        int oldParent = int.Parse(identity[1], System.Globalization.CultureInfo.InvariantCulture);
+        System.Diagnostics.Process? replacement = null;
+        bool paused = false;
+        using var target = OwnedLocalTarget.Capture(pid, adapter.Id, adapterStarted, message =>
+        {
+            Console.Error.WriteLine(message);
+            if (!paused && message.StartsWith($"Native launch ancestry edge {pid} -> {oldParent} ", StringComparison.Ordinal))
+            {
+                paused = true;
+                Console.WriteLine("PARENT_READ");
+                if (Console.ReadLine() != "REPLACE")
+                    throw new InvalidOperationException("Invalid ancestry replacement barrier");
+                var start = new System.Diagnostics.ProcessStartInfo(python) { UseShellExecute = false };
+                foreach (string argument in new[] { fake, "--target-gate",
+                    Path.GetFullPath($"build/validation/mixed-mode/never-release-{Environment.ProcessId}") })
+                    start.ArgumentList.Add(argument);
+                replacement = System.Diagnostics.Process.Start(start)!;
+                Console.WriteLine("REPLACEMENT " + replacement.Id);
+                if (Console.ReadLine() != "CONTINUE")
+                    throw new InvalidOperationException("Invalid ancestry continuation barrier");
+            }
+        });
+        target?.Terminate(Console.Error.WriteLine);
+        Console.WriteLine("DONE " + (target == null ? "rejected" : "adopted"));
+        if (replacement != null)
+        {
+            if (!replacement.HasExited)
+                replacement.Kill();
+            replacement.WaitForExit(5000);
+            replacement.Dispose();
+        }
+    }
+    return;
+}
+
 if (args.Length == 2 || args[2] == "late-capture")
 {
     var backend = Session("normal");

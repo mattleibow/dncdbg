@@ -120,6 +120,12 @@ jobs:
               Tee-Object build/validation/mixed-mode/forced-pid-reuse.log
             if ($LASTEXITCODE -eq 2) { Write-Output "::notice title=Forced PID reuse SKIP::Private PID namespace proof unavailable."; $global:LASTEXITCODE = 0 }
             elseif ($LASTEXITCODE) { exit $LASTEXITCODE }
+            python tests/DncDbg.MixedModeTests/parent_reuse.py --dotnet (Get-Command dotnet).Source `
+              --tests (Join-Path $PWD "tests/DncDbg.NativeTests/bin/Release/net10.0/DncDbg.NativeTests.dll") `
+              --python $python --peer (Join-Path $PWD "tests/DncDbg.MixedModeTests/fake_native_adapter.py") 2>&1 |
+              Tee-Object build/validation/mixed-mode/forced-parent-reuse.log
+            if ($LASTEXITCODE -eq 2) { Write-Output "::notice title=Parent PID reuse SKIP::Private PID namespace proof unavailable."; $global:LASTEXITCODE = 0 }
+            elseif ($LASTEXITCODE) { exit $LASTEXITCODE }
           }
           dotnet run --project tests/DncDbg.NativeTests -c Release -- $python (Join-Path $PWD "tests/DncDbg.MixedModeTests/fake_native_adapter.py")
           if ($LASTEXITCODE) { exit $LASTEXITCODE }

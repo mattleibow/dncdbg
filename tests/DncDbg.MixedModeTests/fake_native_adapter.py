@@ -243,10 +243,14 @@ while True:
         if options.mode == "startup-failure" and launch_count == 1:
             response(request, success=False, message="Explicit startup rejection")
             continue
-        if options.mode in ("detach-stall", "detach-refused", "dead-disconnect", "attach-termination-refused"):
+        if options.mode in ("detach-stall", "detach-refused", "dead-disconnect", "attach-termination-refused",
+                            "orphan-reverse", "orphan-eof", "orphan-detached", "inherited-stdout"):
             owned_target = subprocess.Popen([sys.executable, __file__, "--target-gate", str(options.barrier)],
-                                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            event("process", dict(systemProcessId=owned_target.pid, name="owned-test-target", isLocalProcess=True))
+                                            stdin=subprocess.DEVNULL,
+                                            stdout=sys.stdout.buffer if options.mode == "inherited-stdout" else subprocess.DEVNULL,
+                                            stderr=subprocess.DEVNULL)
+            event("process", dict(systemProcessId=owned_target.pid, name="owned-test-target", isLocalProcess=True,
+                                  startMethod=command))
         if options.mode.startswith("client-block-"):
             owned_target = subprocess.Popen([sys.executable, __file__, "--target-gate", str(options.barrier) + ".target"],
                                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -338,6 +342,10 @@ while True:
                                variablesReference=1, context=args.get("context")),
                  success=args.get("frameId", selected_frame) in (1, 2))
     elif command == "reverse":
+        if options.mode == "orphan-reverse":
+            write(sys.stdout.buffer, dict(seq=500, type="request", command="runInTerminal",
+                                         arguments=dict(args=["owned-fixture", "x" * (8 * 1024 * 1024)])))
+            os._exit(0)
         if options.mode == "client-block-reverse":
             write(sys.stdout.buffer, dict(seq=500, type="request", command="runInTerminal",
                                          arguments=dict(args=["owned-fixture", "x" * (8 * 1024 * 1024)])))
@@ -365,6 +373,19 @@ while True:
         event("capabilities", dict(capabilities=dict(supportsCancelRequest=True)))
     elif command == "disconnect":
         disconnects.append(args.get("terminateDebuggee"))
+        if options.mode == "orphan-detached":
+            response(request)
+            break
+        if options.mode == "inherited-stdout":
+            response(request)
+            event("terminated")
+            break
+        if options.mode == "slow-terminal-output":
+            response(request)
+            event("output", dict(category="stdout", output="x" * (2 * 1024 * 1024)))
+            event("exited", dict(exitCode=0))
+            event("terminated")
+            break
         if options.mode == "reverse-detach-refused" and args.get("terminateDebuggee") is False:
             response(request, success=False, message="Test backend refused detach while terminal is pending")
             continue

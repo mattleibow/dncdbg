@@ -6,6 +6,81 @@ if (args.Length is < 2 or > 3)
     throw new ArgumentException("Supply the public Python executable and fake_native_adapter.py test peer.");
 string python = args[0], fake = args[1];
 
+if (args.Length == 2 || args[2] is "reverse-completed-cancel" or "reverse-queued-refusal")
+foreach (string mode in args.Length == 2 ? new[] { "reverse-completed-cancel", "reverse-queued-refusal" } : [args[2]])
+{
+    const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+    using var output = new CompletingReverseOutput();
+    using var connection = new DncDbg.Protocol.DapConnection(Stream.Null, output);
+    using var proxy = new NativeDebugProxy(connection, new NativeAdapterDescriptor("dap", python, [], "test", null,
+        RuntimeInformation.RuntimeIdentifier, []), Console.Error.WriteLine);
+    var backend = Session(mode == "reverse-queued-refusal" ? "reverse-detach-refused" : "normal");
+    typeof(NativeDebugProxy).GetField("_native", flags)!.SetValue(proxy, backend);
+    var reverseToken = (CancellationTokenSource)typeof(NativeDebugProxy).GetField("_reverseCancellation", flags)!.GetValue(proxy)!;
+    output.Answer = message =>
+    {
+        connection.CompleteRequest(new DncDbg.Protocol.DapMessage { Type = "response", RequestSeq = message.Seq,
+            Command = message.Command, Success = true });
+        reverseToken.Cancel();
+    };
+    typeof(NativeDebugProxy).GetMethod("Receive", flags)!.Invoke(proxy, [0L,
+        new DncDbg.Protocol.DapMessage { Seq = 500, Type = "request", Command = "runInTerminal" }]);
+    var queue = (System.Collections.IEnumerable)typeof(NativeDebugProxy).GetField("_events", flags)!.GetValue(proxy)!;
+    object envelope = queue.Cast<object>().Single();
+    if (mode == "reverse-queued-refusal")
+    {
+        reverseToken.Cancel();
+        var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        object work = Activator.CreateInstance(typeof(NativeDebugProxy).GetNestedType("Work", System.Reflection.BindingFlags.NonPublic)!,
+            [new DncDbg.Protocol.DapMessage { Type = "request", Command = "disconnect",
+                Arguments = System.Text.Json.JsonSerializer.SerializeToElement(new { terminateDebuggee = false }) },
+                0L, completion, false, false])!;
+        typeof(NativeDebugProxy).GetMethod("Disconnect", flags)!.Invoke(proxy, [work]);
+    }
+    typeof(NativeDebugProxy).GetMethod("ForwardReverse", flags)!.Invoke(proxy, [envelope]);
+    var reply = ((System.Text.Json.JsonElement)backend.Request("reverseStatus", new { }).Body!).GetProperty("response");
+    if (mode == "reverse-completed-cancel" && !reply.GetProperty("success").GetBoolean())
+        throw new InvalidOperationException("Successful client reverse response was overwritten by cancellation after completion.");
+    if (mode == "reverse-queued-refusal" && (output.Requests != 0 || reply.GetProperty("success").GetBoolean()))
+        throw new InvalidOperationException("Queued reverse request crossed a refused-disconnect generation.");
+    Console.WriteLine("PASS reverse request enqueue/completion ownership: " + mode);
+    if (args.Length == 3)
+        return;
+}
+
+if (args.Length == 2 || args[2] == "target-identity")
+{
+    string gate = Path.GetFullPath($"build/validation/mixed-mode/identity-target-{Environment.ProcessId}");
+    File.Delete(gate);
+    var start = new System.Diagnostics.ProcessStartInfo(python) { UseShellExecute = false };
+    foreach (string argument in new[] { fake, "--target-gate", gate })
+        start.ArgumentList.Add(argument);
+    using var child = System.Diagnostics.Process.Start(start)!;
+    try
+    {
+        using var stale = new OwnedLocalTarget(System.Diagnostics.Process.GetProcessById(child.Id), child.StartTime.ToUniversalTime().AddDays(-1));
+        stale.Terminate(Console.Error.WriteLine);
+        if (child.HasExited)
+            throw new InvalidOperationException("Independent target cleanup ignored a mismatched process identity.");
+        // The child predates this adapter; a claimed process event must not adopt it.
+        using var backend = Session("normal");
+        backend.TrackLaunchedLocalTarget(child.Id);
+        backend.StopTransport(terminateTarget: true);
+        if (child.HasExited)
+            throw new InvalidOperationException("Independent target cleanup adopted a process predating the adapter.");
+        Console.WriteLine("PASS independent target cleanup rejects changed identity and preexisting process adoption");
+    }
+    finally
+    {
+        if (!child.HasExited)
+            child.Kill();
+        child.WaitForExit(5000);
+        File.Delete(gate);
+    }
+    if (args.Length == 3)
+        return;
+}
+
 if (args.Length == 3 && args[2].StartsWith("managed-publication-", StringComparison.Ordinal))
 {
     string[] selection = args[2]["managed-publication-".Length..].Split(':');
@@ -135,6 +210,8 @@ if (args.Length == 2 || args[2] == "reverse-client-timeout")
     typeof(NativeDebugProxy).GetField("_native", flags)!.SetValue(proxy, backend);
     var envelope = Activator.CreateInstance(typeof(NativeDebugProxy).GetNestedType("BackendMessage", System.Reflection.BindingFlags.NonPublic)!,
         [0L, 0L, 0L, new DncDbg.Protocol.DapMessage { Seq = 500, Type = "request", Command = "runInTerminal" }, null])!;
+    envelope.GetType().GetProperty("ReverseCancellation")!.SetValue(envelope,
+        ((CancellationTokenSource)typeof(NativeDebugProxy).GetField("_reverseCancellation", flags)!.GetValue(proxy)!).Token);
     typeof(NativeDebugProxy).GetMethod("ForwardReverse", flags)!.Invoke(proxy, [envelope]);
     var body = (System.Text.Json.JsonElement)backend.Request("reverseStatus", new { }).Body!;
     var lifetime = (CancellationTokenSource)typeof(NativeDebugProxy).GetField("_lifetime", flags)!.GetValue(proxy)!;
@@ -155,6 +232,8 @@ if (args.Length == 2 || args[2] == "reverse-before-exposure")
     ((CancellationTokenSource)typeof(NativeDebugProxy).GetField("_reverseCancellation", flags)!.GetValue(proxy)!).Cancel();
     var envelope = Activator.CreateInstance(typeof(NativeDebugProxy).GetNestedType("BackendMessage", System.Reflection.BindingFlags.NonPublic)!,
         [0L, 0L, 0L, new DncDbg.Protocol.DapMessage { Seq = 500, Type = "request", Command = "runInTerminal" }, null])!;
+    envelope.GetType().GetProperty("ReverseCancellation")!.SetValue(envelope,
+        ((CancellationTokenSource)typeof(NativeDebugProxy).GetField("_reverseCancellation", flags)!.GetValue(proxy)!).Token);
     typeof(NativeDebugProxy).GetMethod("ForwardReverse", flags)!.Invoke(proxy, [envelope]);
     var lifetime = (CancellationTokenSource)typeof(NativeDebugProxy).GetField("_lifetime", flags)!.GetValue(proxy)!;
     if (connection.WriteFailed || lifetime.IsCancellationRequested || output.Length != 0)
@@ -305,4 +384,24 @@ sealed class TimeoutClientOutput : MemoryStream
 {
     public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default) =>
         ValueTask.FromException(new TimeoutException("Test client output timed out."));
+}
+
+sealed class CompletingReverseOutput : MemoryStream
+{
+    public Action<DncDbg.Protocol.DapMessage>? Answer { get; set; }
+    public int Requests { get; private set; }
+    public override Task FlushAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        string frame = System.Text.Encoding.UTF8.GetString(ToArray());
+        var message = System.Text.Json.JsonSerializer.Deserialize<DncDbg.Protocol.DapMessage>(
+            frame[(frame.IndexOf("\r\n\r\n", StringComparison.Ordinal) + 4)..], DncDbg.Protocol.DapJson.Options)!;
+        SetLength(0);
+        if (message.Type == "request")
+        {
+            Requests++;
+            Answer?.Invoke(message);
+        }
+        return Task.CompletedTask;
+    }
 }

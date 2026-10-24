@@ -1248,6 +1248,183 @@ def managed_publication_contracts(lldb):
                     sys.executable, str(FAKE), "managed-publication-hybrid-enumeration"], env=env, check=True)
 
 
+def orphan_target_contract(adapter, reverse=False, attached=False, detached=False):
+    mode = "orphan-reverse" if reverse else "orphan-detached" if detached else "orphan-eof"
+    gate = OUT / ("orphan-target-" + mode + "-" + str(attached))
+    gate.unlink(missing_ok=True)
+    pid = None
+    with (OUT / (gate.name + ".stderr")).open("wb") as errors:
+        process = subprocess.Popen([adapter, *arguments("dap", mode, barrier=gate)],
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors)
+        seq, backend = 0, None
+        def send(command, args=None):
+            nonlocal seq
+            seq += 1
+            data = json.dumps(dict(seq=seq, type="request", command=command, arguments=args or {})).encode()
+            process.stdin.write(f"Content-Length: {len(data)}\r\n\r\n".encode() + data)
+            process.stdin.flush()
+            return seq
+        def header():
+            length = None
+            while True:
+                line = process.stdout.readline()
+                check(line, "Adapter closed before orphan test admission")
+                if line == b"\r\n":
+                    return length
+                if line.lower().startswith(b"content-length:"):
+                    length = int(line.split(b":", 1)[1])
+        def request(command, args=None):
+            nonlocal pid
+            target = send(command, args)
+            while True:
+                message = json.loads(process.stdout.read(header()))
+                if message.get("event") == "process":
+                    pid = message["body"]["systemProcessId"]
+                if message.get("request_seq") == target:
+                    check(message["success"], str(message))
+                    return message.get("body", {})
+        try:
+            request("initialize", dict(adapterID="dncdbg"))
+            request("attach" if attached else "launch", dict(program="owned-test-target", pid=123))
+            info = request("dotnet/info")
+            backend = info["nativeAdapterProcessId"]
+            check(pid and integration["alive"](pid), "No actual child target to prove cleanup")
+            if detached:
+                request("disconnect", dict(terminateDebuggee=False))
+            elif reverse:
+                send("reverse")
+                length = header()
+                check(length > 8000000 and process.stdout.read(1) == b"{", "No admitted partial reverse request")
+            else:
+                request("die")
+                deadline = time.monotonic() + 5
+                while integration["alive"](backend):
+                    check(time.monotonic() < deadline, "Backend did not exit")
+                    time.sleep(0.01)
+                process.stdin.close()
+            process.wait(timeout=36)
+            check(process.returncode == 0 and not integration["alive"](backend), "Proxy/backend cleanup did not finish")
+            if attached or detached:
+                check(integration["alive"](pid), "Independent fallback killed an attached/relinquished target")
+                gate.write_text("release")
+                integration["exited"](pid)
+            else:
+                try:
+                    integration["exited"](pid)
+                except AssertionError:
+                    raise AssertionError("Owned local child survived cleanup after its native adapter exited: " + mode) from None
+            pid = None
+        finally:
+            gate.write_text("release")
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
+            process.stdout.close()
+            if pid and integration["alive"](pid):
+                os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+            gate.unlink(missing_ok=True)
+    print("PASS adapter-exit target ownership: " + mode + (" attached" if attached else ""), flush=True)
+
+
+def slow_terminal_output_contract(adapter):
+    with (OUT / "slow-terminal-output.stderr").open("wb") as errors:
+        process = subprocess.Popen([adapter, *arguments("dap", "slow-terminal-output")],
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors)
+        seq = 0
+        def send(command, args=None):
+            nonlocal seq
+            seq += 1
+            data = json.dumps(dict(seq=seq, type="request", command=command, arguments=args or {})).encode()
+            process.stdin.write(f"Content-Length: {len(data)}\r\n\r\n".encode() + data)
+            process.stdin.flush()
+            return seq
+        def read():
+            length = None
+            while True:
+                line = process.stdout.readline()
+                if not line:
+                    return None
+                if line == b"\r\n":
+                    break
+                if line.lower().startswith(b"content-length:"):
+                    length = int(line.split(b":", 1)[1])
+            body = process.stdout.read(length)
+            check(len(body) == length, "Slow terminal output was truncated: " + str(len(body)) + "/" + str(length))
+            return json.loads(body)
+        def request(command, args=None):
+            target = send(command, args)
+            while True:
+                message = read()
+                check(message is not None, "Unexpected adapter exit")
+                if message.get("request_seq") == target:
+                    check(message["success"], str(message))
+                    return
+        try:
+            request("initialize", dict(adapterID="dncdbg"))
+            request("launch", dict(program="owned-test-target"))
+            request("configurationDone")
+            started = time.monotonic()
+            request("disconnect", dict(terminateDebuggee=True))
+            time.sleep(3)
+            messages = []
+            while (message := read()) is not None:
+                messages.append(message)
+            process.wait(timeout=8)
+            output = [m["body"]["output"] for m in messages if m.get("event") == "output"]
+            check(output == ["x" * (2 * 1024 * 1024)], "Slow but responsive client did not receive its full valid output event")
+            check([m["event"] for m in messages if m.get("event") in ("exited", "terminated")] == ["exited", "terminated"],
+                  "Slow output lost/reordered terminal events")
+            check(process.returncode == 0 and time.monotonic() - started < 12, "Slow terminal drain did not bound shutdown")
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
+    print("PASS three-second client pause preserves complete 2MiB terminal output and ordered exit events", flush=True)
+
+
+def hybrid_backend_eof_contract(adapter):
+    with Dap(adapter, "hybrid-eof-modules", arguments("lldb", "eof-modules")) as peer:
+        peer.request("initialize", dict(adapterID="dncdbg"))
+        peer.request("launch", dict(program="owned-test-target", managedInspection=True))
+        peer.event("initialized")
+        peer.request("configurationDone")
+        peer.event("stopped")
+        request = peer.send("stackTrace", dict(threadId=7))
+        reply = peer.receive(lambda m: m.get("type") == "response" and m.get("request_seq") == request)
+        text = reply.get("message", "").lower()
+        check(not reply["success"] and any(word in text for word in ("connection", "transport", "closed"))
+              and not text.startswith("cancelled"), "Hybrid acquisition swallowed fatal backend loss: " + str(reply))
+        peer.process.stdin.close()
+        peer.disconnected = True
+        peer.process.wait(timeout=15)
+    print("PASS hybrid stack acquisition propagates fatal backend EOF as connection loss", flush=True)
+
+
+def inherited_stdout_contract(adapter, attach=False):
+    gate = OUT / ("inherited-stdout-" + str(attach))
+    gate.unlink(missing_ok=True)
+    pid = None
+    try:
+        with Dap(adapter, gate.name, arguments("dap", "inherited-stdout", barrier=gate)) as peer:
+            peer.request("initialize", dict(adapterID="dncdbg"))
+            peer.request("attach" if attach else "launch", dict(program="owned-test-target", pid=123))
+            pid = peer.event("process")["systemProcessId"]
+            peer.event("initialized")
+            peer.request("disconnect", dict(terminateDebuggee=False))
+            peer.process.wait(timeout=18)
+            check(peer.process.returncode == 0, "Inherited detached target stdout aborted cleanup: exit=" + str(peer.process.returncode))
+            check(integration["alive"](pid), "Reader quiescence killed a detached/attached target")
+            gate.write_text("release")
+            integration["exited"](pid)
+            pid = None
+    finally:
+        gate.write_text("release")
+        if pid and integration["alive"](pid):
+            os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+        gate.unlink(missing_ok=True)
+    print("PASS inherited target stdout cannot throw or block bounded detached reader cleanup; attach=" + str(attach), flush=True)
+
+
 def native_only_watch_contract(adapter):
     with Dap(adapter, "native-only-watch-semantics", arguments("lldb")) as peer:
         peer.request("initialize", dict(adapterID="dncdbg"))
@@ -1446,6 +1623,14 @@ if __name__ == "__main__":
     disconnect_terminal_drain_contract(options.adapter, mode="long-terminals")
     disconnect_terminal_drain_contract(options.adapter, mode="long-staggered-terminals")
     client_backpressure_contract(options.adapter, command="reverse", finish="deadline")
+    orphan_target_contract(options.adapter)
+    orphan_target_contract(options.adapter, reverse=True)
+    orphan_target_contract(options.adapter, attached=True)
+    orphan_target_contract(options.adapter, detached=True)
+    slow_terminal_output_contract(options.adapter)
+    hybrid_backend_eof_contract(options.adapter)
+    inherited_stdout_contract(options.adapter)
+    inherited_stdout_contract(options.adapter, attach=True)
     refused_reverse_contract(options.adapter)
     attached_refused_termination_contract(options.adapter)
     for command in ("stackTrace", "scopes", "variables", "readMemory"):

@@ -129,9 +129,13 @@ senders. Disconnect cancels reverse/inspection waits separately from the output
 lifetime and releases terminal delivery only after its response. Before the
 final queue barrier, it quiesces the native transport using the existing bounded
 shutdown: allow up to five seconds for adapter exit, stop it if needed according
-to target ownership, and require the reader to finish within five seconds.
-Only then is the final event barrier enqueued, with a two-second delivery
-budget. Queued and delayed/staggered events (including three-second delays)
+to target ownership, and allow five seconds for reader drain before cancelling
+its readiness wait with a one-second join budget.
+Only then is the final event barrier enqueued, with a delivery budget longer
+than the normal five-second client-publication deadline (six seconds).
+A valid output frame is not truncated by a shorter final-drain timer: a client
+that resumes after a three-second pause receives the full 2MiB output frame
+and then both terminal events. Queued and delayed/staggered events (including three-second delays)
 retain `exited` then `terminated` order exactly once before output shutdown.
 An unresponsive adapter/client still does not get unbounded shutdown time.
 If a client pipe has already failed, error-response delivery logs the transport
@@ -149,6 +153,16 @@ elapsed request timeout.
 During an active inspection, a recorded backend transport failure takes
 precedence over an operation cancellation induced by that same failure callback;
 it must not be mislabeled as an ordinary stop/session change.
+Fatal connection loss during optional hybrid acquisition propagates as a
+transport error; it is not swallowed by optional-overlay degradation and then
+replaced by the failure callback's ordinary cancellation diagnostic.
+
+A detached/attached target may inherit the adapter's stdout descriptor and keep
+it open after the adapter exits. Pipe readers use public readiness APIs
+(`poll` on Unix, `PeekNamedPipe` on Windows) so shutdown can cancel their wait
+without a synchronous disposal deadlock. An inherited pipe exceeding the reader
+budget is explicitly logged and cancelled, not thrown out of cleanup. This
+does not authorize killing an attached or relinquished target.
 
 ## Find an installed debugger
 
@@ -351,6 +365,28 @@ explicit failed reply to its origin and resets reverse admission for the live
 session. A refused terminating disconnect on a non-owned attached process does
 not grant target ownership: only accepted termination may change false to true.
 Explicit non-termination remains sticky before acceptance.
+Reverse requests capture their disconnect-cancellation generation when enqueued,
+not when the event worker later dequeues them. A queued request cannot adopt a
+replacement token after refusal. A successful client reply that won the
+completion race is not overwritten by cancellation after completion.
+
+For an admitted launch, the selected backend's explicit local `process` event
+can retain a separate process identity for emergency cleanup. The adapter's
+creation time is recorded before launch, and the target must be live, distinct
+from both debugger processes, and created during that adapter session. DNCDbg
+retains the .NET `Process`/exit observation (and Windows process handle) plus
+creation time; it checks the live PID's creation time again before independent
+termination. A changed/missing identity is not signaled. This is a public
+process-identity guard, not a general cross-platform job/container abstraction.
+
+When normal adapter cleanup cannot kill its tree because the adapter is already
+gone, cleanup can terminate the retained owned local target itself within a
+five-second bound. It does not infer arbitrary orphan descendants. Capturing or
+terminating an identity can fail due to OS permissions; those failures are
+logged rather than claiming cleanup succeeded. The fallback is never adopted
+for attach, non-local events or explicit non-termination/relinquishment, even
+after a refused terminating request. No PID-only kill is attempted without the
+retained launch identity and creation-time checks.
 An unanswered disconnect has unknown outcome, not a confirmed refusal: it must
 not restore stopped/all-stop state or access modules/DAC without a fresh stopped
 event. Only an explicit failed response can restore the prior stop.
@@ -498,6 +534,11 @@ The following frozen-tip review's exact evidence is in
 cleanup with open stdin, module invalidation during real cached CLR frame
 enumeration, three-second delayed/staggered terminals, refused-detach reverse
 recovery, attached-target ownership and active-inspection backend EOF.
+The subsequent cleanup review is preserved in
+`evidence/2b0170f7-owned-target-slow-drain-red-green.txt`: real orphan child
+termination after adapter death, attached/relinquished survival guards, slow
+terminal-output framing, fatal hybrid EOF, inherited stdout cancellation,
+queued reverse generations and completed-reply cancellation races.
 
 Real attach reached SIGSTOP with a verified native checkpoint breakpoint, but
 did not reach the checkpoint after continue. The current Xcode adapter also
@@ -523,6 +564,10 @@ Missing/nonnamable PE metadata is not silently claimed as named-source support.
 
 - [LLDB DAP distribution/configuration](https://lldb.llvm.org/use/lldbdap.html)
   and [public DAP extensions](https://lldb.llvm.org/resources/lldbdap-extensions.html).
+- Public pipe readiness: POSIX [`poll`](https://pubs.opengroup.org/onlinepubs/9799919799/functions/poll.html)
+  and Windows [`PeekNamedPipe`](https://learn.microsoft.com/windows/win32/api/namedpipeapi/nf-namedpipeapi-peeknamedpipe).
+- Public process identity/control: [.NET `Process.StartTime`](https://learn.microsoft.com/dotnet/api/system.diagnostics.process.starttime)
+  and [`Process.Kill`](https://learn.microsoft.com/dotnet/api/system.diagnostics.process.kill).
 - [Public LLDB hover evaluation](https://github.com/llvm/llvm-project/blob/llvmorg-18.1.8/lldb/tools/lldb-dap/lldb-dap.cpp#L1316-L1330):
   variable-path lookup with `eDynamicDontRunTarget`; no expression-parser fallback for hover.
 - [LLDB remote platforms/server architecture](https://lldb.llvm.org/use/remote.html).

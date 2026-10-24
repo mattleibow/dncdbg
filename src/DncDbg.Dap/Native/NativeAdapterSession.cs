@@ -16,10 +16,23 @@ internal sealed class NativeAdapterSession : IDisposable
     private bool _transportStopped;
     private readonly Action<Exception> _failed;
     private Exception? _transportFailure;
+    private readonly Dictionary<int, OwnedLocalTarget> _ownedTargets = [];
+    private readonly CancellationTokenSource _readerCancellation = new();
+    private readonly DateTime? _adapterStarted;
 
     public int ProcessId => _process.Id;
     public bool IsAlive => !_process.HasExited;
     public bool TransportFailed => Volatile.Read(ref _transportFailure) != null || _connection.WriteFailed || _reader.IsCompleted;
+
+    public void TrackLaunchedLocalTarget(int pid)
+    {
+        lock (_ownedTargets)
+        {
+            if (_adapterStarted is { } started && !_ownedTargets.ContainsKey(pid)
+                && OwnedLocalTarget.Capture(pid, _process.Id, started, _log) is { } target)
+                _ownedTargets.Add(pid, target);
+        }
+    }
 
     public NativeAdapterSession(NativeAdapterDescriptor descriptor, Action<DapMessage> receive,
         Action<Exception> failed, Action<string> log)
@@ -34,11 +47,20 @@ internal sealed class NativeAdapterSession : IDisposable
         foreach (string argument in descriptor.Arguments)
             start.ArgumentList.Add(argument);
         _process = Process.Start(start) ?? throw new InvalidOperationException("Cannot start the native debug adapter.");
-        _connection = new DapConnection(_process.StandardOutput.BaseStream, _process.StandardInput.BaseStream);
-        _stderr = Task.Run(async () =>
+        try { _adapterStarted = _process.StartTime.ToUniversalTime(); }
+        catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception)
+        { _log("Cannot verify native adapter creation time; independent target adoption is disabled: " + error.Message); }
+        _connection = new DapConnection(new CancellablePipeInput(_process.StandardOutput.BaseStream, _readerCancellation.Token),
+            _process.StandardInput.BaseStream);
+        _stderr = Task.Run(() =>
         {
-            while (await _process.StandardError.ReadLineAsync() is { } line)
-                _log("Native debugger stderr: " + line);
+            try
+            {
+                using var reader = new StreamReader(new CancellablePipeInput(_process.StandardError.BaseStream, _readerCancellation.Token));
+                while (reader.ReadLine() is { } line)
+                    _log("Native debugger stderr: " + line);
+            }
+            catch (OperationCanceledException) when (_readerCancellation.IsCancellationRequested) { }
         });
         _reader = Task.Run(() =>
         {
@@ -60,6 +82,7 @@ internal sealed class NativeAdapterSession : IDisposable
                 if (!_disposing)
                     Fail(error);
             }
+            catch (OperationCanceledException) when (_readerCancellation.IsCancellationRequested) { }
             finally { _connection.CancelPendingRequests(); }
         });
     }
@@ -141,19 +164,46 @@ internal sealed class NativeAdapterSession : IDisposable
                 _log(terminateTarget ? "Native adapter did not exit; terminating its owned process tree."
                     : "Native adapter did not exit after detach; terminating only the adapter, not its relinquished target.");
                 _process.Kill(entireProcessTree: terminateTarget);
-                _process.WaitForExit();
+                if (!_process.WaitForExit(5000))
+                    _log("Native adapter did not exit within its forced-termination budget.");
             }
             if (!_reader.Wait(TimeSpan.FromSeconds(5)))
-                throw new IOException("The native adapter reader did not quiesce after transport shutdown.");
+            {
+                _log("Native adapter reader remained open after process exit; cancelling inherited pipe input.");
+                _readerCancellation.Cancel();
+                if (!_reader.Wait(TimeSpan.FromSeconds(1)))
+                    _log("Native adapter reader did not stop within its cancellation budget.");
+            }
+            _readerCancellation.Cancel();
             _stderr.Wait(TimeSpan.FromSeconds(5));
         }
-        finally { _connection.Dispose(); _transportStopped = true; }
+        catch (Exception error) when (error is IOException or InvalidOperationException or System.ComponentModel.Win32Exception)
+        { _log("Native adapter transport shutdown failed: " + error.Message); }
+        finally
+        {
+            _readerCancellation.Cancel();
+            try { _connection.Dispose(); }
+            catch (Exception error) when (error is IOException or ObjectDisposedException)
+            { _log("Native adapter pipe disposal failed: " + error.Message); }
+            lock (_ownedTargets)
+            {
+                foreach (OwnedLocalTarget target in _ownedTargets.Values)
+                {
+                    if (terminateTarget)
+                        target.Terminate(_log);
+                    target.Dispose();
+                }
+                _ownedTargets.Clear();
+            }
+            _transportStopped = true;
+        }
     }
 
     public void Dispose(bool terminateTarget)
     {
         StopTransport(terminateTarget);
         _process.Dispose();
+        _readerCancellation.Dispose();
     }
 
     public void Dispose() => Dispose(terminateTarget: true);

@@ -448,6 +448,62 @@ def blocked_write_contract(adapter, eof=False):
     print("PASS blocked backend writes: " + ("frontend EOF aborts before worker join" if eof else "request deadline is bounded"), flush=True)
 
 
+def inspection_capability_contract(adapter, modes=("no-memory", "malformed-module")):
+    for mode in modes:
+        with Dap(adapter, "inspection-" + mode, arguments("lldb", mode)) as peer:
+            peer.request("initialize", dict(adapterID="dncdbg"))
+            peer.request("launch", dict(program="owned-test-target", managedInspection=True))
+            peer.event("initialized")
+            peer.request("configurationDone")
+            peer.event("stopped")
+            body = peer.request("stackTrace", dict(threadId=7))
+            check(body["stackFrames"][0]["name"] == "native", "Overlay failure lost native stack")
+            status = body["dncdbgManagedInspection"]
+            check(status["status"] == "unavailable", str(body))
+            if mode == "no-memory":
+                check("supportsReadMemoryRequest" in status["message"]
+                      and peer.request("ownershipStatus")["moduleReads"] == 0, "Unsupported memory inspection reached module/DAC reads: " + str(status))
+            peer.request("disconnect")
+    print("PASS unsupported memory and malformed managed metadata degrade to explicit native-only stacks", flush=True)
+
+
+def wide_reference_contract(adapter):
+    with Dap(adapter, "wide-backend-references", arguments("dap", "wide-ids")) as peer:
+        peer.request("initialize", dict(adapterID="dncdbg"))
+        peer.request("launch", dict(program="owned-test-target"))
+        peer.event("initialized")
+        peer.request("configurationDone")
+        peer.event("stopped")
+        frame = peer.request("stackTrace", dict(threadId=7))["stackFrames"][0]
+        check(0 < frame["id"] < 1 << 31, "Client frame ID is not a proxy int")
+        scope = peer.request("scopes", dict(frameId=frame["id"]))["scopes"][0]
+        variable = peer.request("variables", dict(variablesReference=scope["variablesReference"]))["variables"][0]
+        peer.request("variables", dict(variablesReference=variable["variablesReference"]))
+        check(peer.request("source", dict(sourceReference=frame["source"]["sourceReference"]))["content"] == "native source",
+              "64-bit backend source ID was truncated")
+        peer.request("evaluate", dict(frameId=frame["id"], expression="value", context="hover"))
+        peer.request("disconnect")
+    print("PASS 64-bit native frame/variable/source identities stay opaque behind client int IDs", flush=True)
+
+
+def refused_admission_contract(adapter):
+    with Dap(adapter, "refused-admission", arguments("dap", "refused-admission")) as peer:
+        peer.request("initialize", dict(adapterID="dncdbg"))
+        peer.request("launch", dict(program="owned-test-target"))
+        peer.event("initialized")
+        peer.request("configurationDone")
+        peer.event("stopped")
+        frame = peer.request("stackTrace", dict(threadId=7))["stackFrames"][0]
+        scope = peer.request("scopes", dict(frameId=frame["id"]))["scopes"][0]
+        for command, args in (("launch", dict(program="duplicate")), ("attach", dict(pid=123)),
+                              ("continue", dict(threadId=7)), ("next", dict(threadId=7))):
+            peer.request(command, args, success=False)
+            peer.request("scopes", dict(frameId=frame["id"]))
+            peer.request("variables", dict(variablesReference=scope["variablesReference"]))
+        peer.request("disconnect")
+    print("PASS rejected startup and refused native control preserve the live stop and references", flush=True)
+
+
 def unsupported_overlay_controls(adapter):
     with Dap(adapter, "unsupported-overlay-controls", arguments("lldb")) as peer:
         caps = peer.request("initialize", dict(adapterID="dncdbg"))
@@ -646,6 +702,9 @@ if __name__ == "__main__":
     disconnect_timeout_contract(options.adapter)
     blocked_write_contract(options.adapter)
     blocked_write_contract(options.adapter, eof=True)
+    inspection_capability_contract(options.adapter)
+    wide_reference_contract(options.adapter)
+    refused_admission_contract(options.adapter)
     unsupported_overlay_controls(options.adapter)
     bundle_contracts(options.adapter)
     detached_backend_stall(options.adapter)

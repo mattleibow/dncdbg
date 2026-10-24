@@ -6,6 +6,16 @@ if (args.Length is < 2 or > 3)
     throw new ArgumentException("Supply the public Python executable and fake_native_adapter.py test peer.");
 string python = args[0], fake = args[1];
 
+if (args.Length == 3 && args[2] == "binary-flags")
+{
+    var method = typeof(LldbSnapshotTarget).GetMethod("Number", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+    ulong value = (ulong)method.Invoke(null, [new Dictionary<string, string> { ["eflags"] = "0b0000001000000010 [ IF ]" }, "eflags"])!;
+    if (value != 0x202)
+        throw new InvalidOperationException("Binary EFLAGS was misparsed.");
+    Console.WriteLine("PASS native binary-formatted EFLAGS");
+    return;
+}
+
 if (args.Length == 2 || args[2] == "timeout")
 {
     using var backend = Session("request-timeout");
@@ -62,6 +72,25 @@ using (var backend = Session("register-context"))
     finally { Marshal.FreeHGlobal(buffer); }
 }
 Console.WriteLine("PASS native snapshot register aliases and requested bank ownership");
+
+if (RuntimeInformation.ProcessArchitecture == Architecture.X64)
+using (var backend = Session("register-optional-mxcsr"))
+{
+    var target = new LldbSnapshotTarget(backend, () => CancellationToken.None, CancellationToken.None, Console.Error.WriteLine);
+    IntPtr buffer = Marshal.AllocHGlobal(2048);
+    try
+    {
+        HRESULT result = target.GetThreadContext(7, ContextFlags.AMD64ContextControl | ContextFlags.AMD64ContextInteger
+            | ContextFlags.AMD64ContextFloatingPoint, 2048, buffer);
+        if (result != HRESULT.S_OK)
+            throw new InvalidOperationException("An absent optional MXCSR lost the valid integer/control context.");
+        uint valid = unchecked((uint)Marshal.ReadInt32(buffer, 0x30));
+        if ((valid & 8) != 0)
+            throw new InvalidOperationException("An absent MXCSR bank was advertised as valid floating-point state.");
+    }
+    finally { Marshal.FreeHGlobal(buffer); }
+    Console.WriteLine("PASS absent optional MXCSR preserves integer/control context without fabricating FP state");
+}
 
 NativeAdapterSession Session(string mode)
 {

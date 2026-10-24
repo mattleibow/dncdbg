@@ -119,6 +119,21 @@ module_reads = 0
 
 
 def response(request, body=None, success=True, message=None):
+    if options.mode == "wide-ids" and body is not None:
+        def widen(value):
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    if key in ("variablesReference", "sourceReference") and isinstance(child, int) and child > 0:
+                        value[key] += 1 << 40
+                    elif isinstance(child, (dict, list)):
+                        widen(child)
+            elif isinstance(value, list):
+                for child in value:
+                    widen(child)
+        widen(body)
+        if request["command"] == "stackTrace":
+            for frame in body["stackFrames"]:
+                frame["id"] += 1 << 40
     value = dict(seq=0, type="response", request_seq=request["seq"], command=request["command"], success=success)
     if body is not None:
         value["body"] = body
@@ -139,12 +154,18 @@ while True:
         last_reverse_response = request
         continue
     command, args = request["command"], request.get("arguments", {})
+    if options.mode == "wide-ids":
+        for key in ("frameId", "variablesReference", "sourceReference"):
+            if args.get(key, 0) > 1 << 40:
+                args[key] -= 1 << 40
+        if args.get("source", {}).get("sourceReference", 0) > 1 << 40:
+            args["source"]["sourceReference"] -= 1 << 40
     if command == "initialize":
         if options.mode == "malformed":
             sys.stdout.buffer.write(b"Content-Length: 15\r\n\r\n{\"success\": []}")
             sys.stdout.buffer.flush()
             break
-        response(request, dict(supportsConfigurationDoneRequest=True, supportsReadMemoryRequest=True,
+        response(request, dict(supportsConfigurationDoneRequest=True, supportsReadMemoryRequest=options.mode != "no-memory",
                                supportsModulesRequest=True, supportsCancelRequest=True,
                                **{"$__lldb_version": "lldb version " + ("99.0.0" if options.mode == "version-mismatch" else "21.1.8")}))
         if options.mode == "blocked-writes":
@@ -186,11 +207,11 @@ while True:
                                                                source=dict(name="native.c", sourceReference=1))]))
     elif command == "scopes":
         selected_frame = args["frameId"]
-        response(request, dict(scopes=[dict(name="Registers" if options.mode == "register-context" else "Locals",
-                                           variablesReference=3 if options.mode == "register-context" else 1, expensive=False)]),
+        response(request, dict(scopes=[dict(name="Registers" if options.mode.startswith("register-") else "Locals",
+                                           variablesReference=3 if options.mode.startswith("register-") else 1, expensive=False)]),
                  success=args["frameId"] in (1, 2))
     elif command == "variables":
-        if options.mode == "register-context":
+        if options.mode.startswith("register-"):
             if args["variablesReference"] == 3:
                 response(request, dict(variables=[dict(name="General Purpose Registers", value="", variablesReference=4)]))
             else:
@@ -200,6 +221,8 @@ while True:
                 else:
                     registers = {**{n: "0x1000" for n in ("rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rsp", "rbp", "rip")},
                                  **{"r" + str(i): "0x1000" for i in range(8, 16)}, "eflags": "0x202 [ IF ]"}
+                    if options.mode == "register-optional-mxcsr":
+                        registers.update({"xmm" + str(i): "0x0" for i in range(16)})
                 response(request, dict(variables=[dict(name=n, value=v, variablesReference=0) for n, v in registers.items()]))
             continue
         check = args["variablesReference"] in (1, 2)
@@ -212,7 +235,7 @@ while True:
     elif command in ("continue", "next"):
         if options.mode == "timeout-control":
             continue
-        if options.mode == "refused-control":
+        if options.mode in ("refused-control", "refused-admission"):
             response(request, success=False, message="Test backend refused continuation")
             continue
         response(request, dict(allThreadsContinued=True))
@@ -221,7 +244,8 @@ while True:
     elif command == "threads":
         response(request, dict(threads=[dict(id=7, name="Native")]))
     elif command == "evaluate":
-        response(request, dict(result="42", variablesReference=1), success=args.get("frameId") == 1)
+        response(request, dict(result=str(args.get("frameId", selected_frame)) if options.mode == "selected-frame" else "42",
+                               variablesReference=1), success=args.get("frameId", selected_frame) in (1, 2))
     elif command == "reverse":
         write(sys.stdout.buffer, dict(seq=500, type="request", command="runInTerminal", arguments=dict(args=["owned-fixture"])))
         response(request)
@@ -264,7 +288,8 @@ while True:
         break
     elif command == "modules":
         module_reads += 1
-        response(request, dict(modules=[]))
+        response(request, dict(modules=[dict(name="libcoreclr.dylib", addressRange=123)]
+                               if options.mode == "malformed-module" else []))
     elif command == "ownershipStatus":
         response(request, dict(launches=launch_count, disconnects=disconnects, moduleReads=module_reads))
     elif command == "readMemory" and options.mode == "partial-memory":

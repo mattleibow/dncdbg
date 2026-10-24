@@ -52,7 +52,8 @@ internal sealed class OwnedLocalTarget : IDisposable
             return new OwnedLocalTarget(process, pidfd, handle);
         }
         catch (Exception error) when (error is ArgumentException or InvalidOperationException or Win32Exception or NotSupportedException
-            or IOException or UnauthorizedAccessException or FormatException or EntryPointNotFoundException)
+            or IOException or UnauthorizedAccessException or FormatException or EntryPointNotFoundException
+            or OverflowException or DllNotFoundException)
         {
             process?.Dispose();
             pidfd?.Dispose();

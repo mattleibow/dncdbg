@@ -610,7 +610,8 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
                     _targetPid = pid.GetInt32();
                     if (_launchedTarget && _ownsTarget && process.TryGetProperty("isLocalProcess", out var local)
                         && local.ValueKind == JsonValueKind.True
-                        && process.TryGetProperty("startMethod", out var startMethod) && startMethod.GetString() == "launch")
+                        && process.TryGetProperty("startMethod", out var startMethod)
+                        && startMethod.ValueKind == JsonValueKind.String && startMethod.GetString() == "launch")
                         _native?.TrackLaunchedLocalTarget(_targetPid.Value);
                 }
         }

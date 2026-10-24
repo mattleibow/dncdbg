@@ -18,7 +18,7 @@ args = parser.parse_args()
 if not args.inside:
     if sys.platform != "linux":
         print("SKIP intermediate-parent reuse: Linux namespace required", flush=True)
-        sys.exit(2)
+        sys.exit(77)
     sys.exit(subprocess.run(["sudo", "unshare", "--mount", "--pid", "--fork", "--mount-proc",
                             sys.executable, str(Path(__file__).resolve()), "--inside", "--dotnet", args.dotnet,
                             "--tests", args.tests, "--python", args.python, "--peer", args.peer]).returncode)
@@ -29,7 +29,7 @@ try:
     os.close(fd)
 except OSError as error:
     print("SKIP intermediate-parent reuse: private allocator unavailable: " + str(error), flush=True)
-    sys.exit(2)
+    sys.exit(77)
 
 worker = subprocess.Popen([args.dotnet, args.tests, args.python, args.peer, "parent-reuse-worker"],
                           stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)

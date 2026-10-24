@@ -46,6 +46,23 @@ jobs:
           dotnet run --project tests/DncDbg.MixedModeTests/WindowsProof -- build/validation/mixed-mode/fixture/Fixture.dll tests/DncDbg.MixedModeTests/fixture --attach 2>&1 |
             Tee-Object build/validation/mixed-mode/windows-attach-proof.log
           exit $LASTEXITCODE
+      - name: Run opt-in DNCDbg Windows vertical slice
+        shell: pwsh
+        run: |
+          dotnet publish src/DncDbg.Dap -c Release -o bin --nologo
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python tests/DncDbg.MixedModeTests/run.py --windows-engine --adapter bin/dncdbg-dap.exe 2>&1 |
+            Tee-Object build/validation/mixed-mode/windows-engine.log
+          exit $LASTEXITCODE
+      - name: Verify managed debugger regressions
+        shell: pwsh
+        run: |
+          dotnet run --project tests/DncDbg.SmokeTests -c Release -- bin/dncdbg-dap.exe 2>&1 |
+            Tee-Object build/validation/mixed-mode/windows-smoke.log
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          & ./test-suite/run_tests.ps1 TestBreakpoint TestStackTrace TestThreads TestStepping TestAttach TestDisconnect 2>&1 |
+            Tee-Object build/validation/mixed-mode/windows-regressions.log
+          exit $LASTEXITCODE
       - name: Preserve proof logs and binaries
         if: always()
         uses: actions/upload-artifact@v4

@@ -117,6 +117,7 @@ public sealed partial class DebugEngine : IDisposable
         _values = new ValueInspector(GetMetadata, this);
         Stopped += stop => _lastStoppedThreadId = stop.ThreadId;
         _callback.OnAnyEvent += OnManagedEvent;
+        _unmanagedCallback.OnDebugEvent += OnUnmanagedEvent;
     }
 
     // ---------------------------------------------------------------- session start
@@ -126,6 +127,7 @@ public sealed partial class DebugEngine : IDisposable
         using var operation = _lifetime.Enter();
         lock (_lock)
         {
+            VerifyNativeLaunch(options);
             NoDebug = options.NoDebug;
             if (_processId != 0 || _launching)
                 throw new DebuggerException("A debuggee is already running.");
@@ -133,6 +135,7 @@ public sealed partial class DebugEngine : IDisposable
                 throw new DebuggerException($"Program '{options.Program}' does not exist.");
             // An AnyCPU program runs as 32-bit when it prefers to (the default of old .NET Framework project templates).
             ProcessBitness.VerifyProgram(options.Program);
+            NativeDebugging = options.NativeDebugging;
             _launching = true;
             _dbgShim ??= LoadDbgShim();
         }
@@ -449,7 +452,9 @@ public sealed partial class DebugEngine : IDisposable
                 _corDebug = corDebug;
                 corDebug.Initialize();
                 corDebug.SetManagedHandler(_callback);
-                _process = corDebug.DebugActiveProcess(_processId, false);
+                if (NativeDebugging)
+                    corDebug.SetUnmanagedHandler(_unmanagedCallback);
+                _process = corDebug.DebugActiveProcess(_processId, NativeDebugging);
             }
             _attachOutcome?.TrySetResult(null);
             _ = Task.Run(() =>
@@ -607,6 +612,12 @@ public sealed partial class DebugEngine : IDisposable
 
     public void Terminate()
     {
+        if (NativeDebugging)
+        {
+            _terminating = true;
+            KillProcess();
+            return;
+        }
         bool viaCorDebug = false;
         lock (_lock)
         {
@@ -647,6 +658,8 @@ public sealed partial class DebugEngine : IDisposable
     {
         lock (_lock)
         {
+            if (NativeDebugging)
+                throw new DebuggerException("Detach is not supported for experimental native-debugging launches; terminate the session instead.");
             if (_relinquished)
                 return;
             _relinquished = true;
@@ -767,6 +780,7 @@ public sealed partial class DebugEngine : IDisposable
         }
         try
         {
+            _nativeSymbols?.Dispose();
             // Termination waits for callbacks, which must remain free to acquire the engine lock.
             debugger?.Terminate();
         }
@@ -1267,11 +1281,14 @@ public sealed partial class DebugEngine : IDisposable
         CorDebugProcess process = RequireProcess();
         if (!_stopped)
             throw new DebuggerException("The debuggee is running.");
+        if (IsNativeStopped)
+            throw new DebuggerException("This request requires a managed stop; native variables and stepping are not implemented.");
         return process;
     }
 
     private void ClearStopState()
     {
+        _nativeStoppedThread = 0;
         _stepReturnStop = null;
         _stopped = false;
         _frames.Clear();
@@ -1315,6 +1332,14 @@ public sealed partial class DebugEngine : IDisposable
         {
             if (_process == null || !_stopped)
                 return;
+            if (IsNativeStopped)
+            {
+                if (singleThread)
+                    throw new DebuggerException("Single-thread continuation is not supported at a native stop.");
+                ClearStopState();
+                _process.Continue(false);
+                return;
+            }
             SetExecutionThread(_process, threadId, singleThread);
             ClearAsyncStep();
             ClearStepInTarget();
@@ -1370,6 +1395,12 @@ public sealed partial class DebugEngine : IDisposable
         {
             if (_process == null)
                 return [];
+            if (IsNativeStopped)
+            {
+                using Process target = Process.GetProcessById(_processId);
+                return target.Threads.Cast<ProcessThread>().Select(t => new ThreadInfo(t.Id, $"Native thread {t.Id}"))
+                    .ToArray();
+            }
 
             bool stoppedHere = false;
             if (!_stopped)

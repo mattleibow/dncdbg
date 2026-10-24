@@ -109,6 +109,11 @@ internal sealed class DebugAdapter : IDisposable
                     break;
 
                 case "disconnect":
+                    if (_engine.NativeDebugging && message.GetArguments<DisconnectArguments>()?.TerminateDebuggee == false)
+                    {
+                        _connection.SendErrorResponse(message, "Experimental native-debugging launches require terminateDebuggee:true.");
+                        break;
+                    }
                     // whatever is running must not delay the end of the session
                     StopWorker();
                     Handle(message);
@@ -212,6 +217,9 @@ internal sealed class DebugAdapter : IDisposable
 
     private object? Dispatch(DapMessage request)
     {
+        if (_engine.IsNativeStopped && request.Command is not
+            ("stackTrace" or "threads" or "continue" or "pause" or "terminate" or "disconnect" or "dotnet/info"))
+            throw new DebuggerException("This request requires a managed stop; native variables and stepping are not implemented.");
         switch (request.Command)
         {
             case "initialize":
@@ -287,6 +295,8 @@ internal sealed class DebugAdapter : IDisposable
 
             case "restart":
             {
+                if (_engine.NativeDebugging)
+                    throw new DebuggerException("Restart is not supported for experimental native-debugging launches.");
                 if (_launchArguments == null && _attachArguments == null)
                     throw new DebuggerException("No session to restart.");
                 // the client may send an updated configuration
@@ -462,7 +472,24 @@ internal sealed class DebugAdapter : IDisposable
                     ["runtime"] = System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription,
                     ["os"] = System.Runtime.InteropServices.RuntimeInformation.RuntimeIdentifier,
                     ["debuggeeProcessId"] = _engine.ProcessId,
+                    ["nativeDebugging"] = _engine.NativeDebugging,
+                    ["nativeStopped"] = _engine.IsNativeStopped,
                 };
+
+            case "dotnet/setNativeBreakpoint":
+            {
+                var args = request.GetArguments<NativeBreakpointArguments>()
+                    ?? throw new DebuggerException("Missing native breakpoint arguments.");
+                if (!args.OneShot)
+                    throw new DebuggerException("The experimental native breakpoint must explicitly specify oneShot:true.");
+                BreakpointInfo breakpoint = _engine.SetNativeBreakpoint(args.Module,
+                    args.Source.Path ?? throw new DebuggerException("A native source path is required."), LineFromClient(args.Line));
+                return new
+                {
+                    breakpoint.Id, breakpoint.Verified, OneShot = true,
+                    Line = LineToClient(breakpoint.Line), Source = ToBreakpoint(breakpoint).Source,
+                };
+            }
 
             case "threads":
                 return new ThreadsResponseBody
@@ -731,6 +758,7 @@ internal sealed class DebugAdapter : IDisposable
             Environment = launch.Environment,
             StopAtEntry = args.StopAtEntry,
             NoDebug = args.NoDebug,
+            NativeDebugging = args.NativeDebugging,
             JustMyCode = args.JustMyCode ?? true,
             StepFiltering = args.EnableStepFiltering ?? true,
             SourceFileMap = args.SourceFileMap,
@@ -748,6 +776,8 @@ internal sealed class DebugAdapter : IDisposable
 
     private void Attach(AttachArguments args)
     {
+        if (args.NativeDebugging)
+            throw new DebuggerException("Experimental native debugging supports launch only, not attach.");
         _engine.AllowImplicitFuncEval = args.ExpressionEvaluationOptions?.AllowImplicitFuncEval ?? args.AllowImplicitFuncEval ?? true;
         _engine.ShowRawValues = args.ExpressionEvaluationOptions?.ShowRawValues ?? false;
         _engine.Attach(args.GetProcessId(), args.JustMyCode ?? true, args.SourceFileMap, args.StopAtEntry);

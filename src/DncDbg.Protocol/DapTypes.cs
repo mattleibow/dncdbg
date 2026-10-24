@@ -74,6 +74,7 @@ public sealed class LaunchArguments
     public bool StopAtEntry { get; set; }
     public bool? JustMyCode { get; set; }
     public bool NoDebug { get; set; }
+    public bool NativeDebugging { get; set; }
 
     /// <summary>Project file or directory; the alternative to <see cref="Program"/>.</summary>
     public string? Project { get; set; }
@@ -166,6 +167,7 @@ public sealed class RunInTerminalResponseBody
 
 public sealed class AttachArguments
 {
+    public bool NativeDebugging { get; set; }
     public bool StopAtEntry { get; set; }
     public ExpressionEvaluationOptions? ExpressionEvaluationOptions { get; set; }
     public JsonElement ProcessId { get; set; }
@@ -179,6 +181,14 @@ public sealed class AttachArguments
         JsonValueKind.String => int.Parse(ProcessId.GetString()!),
         _ => throw new InvalidOperationException("'processId' is required for attach."),
     };
+}
+
+public sealed class NativeBreakpointArguments
+{
+    public string Module { get; set; } = "";
+    public Source Source { get; set; } = new();
+    public int Line { get; set; }
+    public bool OneShot { get; set; }
 }
 
 public sealed class ExpressionEvaluationOptions

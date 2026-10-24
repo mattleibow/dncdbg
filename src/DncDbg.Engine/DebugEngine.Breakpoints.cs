@@ -366,9 +366,9 @@ public sealed partial class DebugEngine
                 foreach (UserBreakpoint bp in matches)
                 {
                     var evaluator = new Evaluator(this, TopFrame(threadId), allowCalls: true);
-                    try
+                    if (bp.Condition != null)
                     {
-                        if (bp.Condition != null)
+                        try
                         {
                             object? outcome = evaluator.EvaluateToHost(bp.Condition);
                             if (outcome is not bool)
@@ -376,23 +376,39 @@ public sealed partial class DebugEngine
                             if (outcome is false)
                                 continue;
                         }
-                        ++bp.HitCount;
-                        if (bp.HitCondition != null && evaluator.EvaluateToHost($"{bp.HitCount}>({bp.HitCondition})") is not true)
-                            continue;
-                        if (bp.LogMessage != null)
+                        catch (DebuggerException e)
                         {
-                            string message = FormatLogMessage(bp.LogMessage, evaluator);
-                            events.Add(() => Output?.Invoke("console", message + Environment.NewLine));
-                            continue;
+                            string condition = bp.Condition;
+                            string error = BreakpointExpressionError(bp, "condition", condition, e.Message);
+                            events.Add(() => Output?.Invoke("stderr", error));
+                            events.Add(() => BreakpointChanged?.Invoke(bp.ToInfo() with { Message = error }));
+                            bp.Condition = null;
                         }
                     }
-                    catch (DebuggerException e)
+
+                    ++bp.HitCount;
+                    if (bp.HitCondition != null)
                     {
-                        // A broken condition must not silently disable the breakpoint.
-                        string error = $"Breakpoint condition '{bp.Condition ?? bp.LogMessage}' failed: {e.Message}{Environment.NewLine}";
-                        events.Add(() => Output?.Invoke("console", error));
-                        bp.Condition = null;
-                        bp.HitCondition = null;
+                        try
+                        {
+                            if (evaluator.EvaluateToHost($"{bp.HitCount}>({bp.HitCondition})") is not true)
+                                continue;
+                        }
+                        catch (DebuggerException e)
+                        {
+                            string hitCondition = bp.HitCondition;
+                            string error = BreakpointExpressionError(bp, "hitCondition", hitCondition, e.Message);
+                            events.Add(() => Output?.Invoke("stderr", error));
+                            events.Add(() => BreakpointChanged?.Invoke(bp.ToInfo() with { Message = error }));
+                            bp.HitCondition = null;
+                        }
+                    }
+
+                    if (bp.LogMessage != null)
+                    {
+                        string message = FormatLogMessage(bp.LogMessage, evaluator);
+                        events.Add(() => Output?.Invoke("console", message + "\n"));
+                        continue;
                     }
                     stopping.Add(bp);
                 }
@@ -427,6 +443,15 @@ public sealed partial class DebugEngine
 
         foreach (Action action in events)
             action();
+    }
+
+    private static string BreakpointExpressionError(UserBreakpoint breakpoint, string kind, string expression, string error)
+    {
+        string location = breakpoint.Path == null
+            ? breakpoint.FunctionName ?? ""
+            : $"{breakpoint.Path}:{breakpoint.Resolved?.Line ?? breakpoint.RequestedLine}:{breakpoint.Resolved?.Column ?? breakpoint.RequestedColumn ?? 0}";
+        return $"Breakpoint error: The {kind} for a breakpoint failed to evaluate and will be removed. "
+            + $"The {kind} was '{expression}'. The error returned was '{error}'. - {location}\n";
     }
 
     // "5" / "==5": exactly the fifth hit;  ">=5", ">5", "<5", "<=5";  "%5": every fifth hit

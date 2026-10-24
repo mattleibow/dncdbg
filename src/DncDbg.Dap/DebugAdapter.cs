@@ -593,8 +593,11 @@ internal sealed class DebugAdapter : IDisposable
                 };
 
             case "continue":
-                _engine.Continue(request.GetArguments<ThreadArguments>()!.ThreadId, SingleThread(request));
-                return new ContinueResponseBody();
+            {
+                bool singleThread = SingleThread(request);
+                _engine.Continue(request.GetArguments<ThreadArguments>()!.ThreadId, singleThread);
+                return new ContinueResponseBody { AllThreadsContinued = !singleThread };
+            }
 
             case "next":
                 _engine.Step(request.GetArguments<ThreadArguments>()!.ThreadId, StepKind.Over, singleThread: SingleThread(request));

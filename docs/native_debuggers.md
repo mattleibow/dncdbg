@@ -381,13 +381,18 @@ whether its untrusted event says attach or launch. A session with a failed or
 uncertain launch still retains admission without acquiring arbitrary PID authority.
 
 Linux uses the public `pidfd_open`/`pidfd_send_signal` APIs. A pidfd is opened
-before PID-based metadata/ancestry checks; signal zero verifies that retained
-generation remains live after validation. All later independent signals use
-the pidfd, **never a numeric PID**, so forced PID reuse (including equal creation
-ticks) cannot target its replacement. `/proc` ancestry is required for every
-Linux adoption and malformed/truncated records fail closed. If libc/kernel
-pidfd support or permissions are missing, independent termination is unavailable
-and logged rather than falling back to check-then-signal.
+before PID-based metadata/ancestry checks for the target and every resolved
+parent, including the adapter. Every ancestry generation remains pinned through
+final chain validation. Signal zero and pidfd polling reject exited generations,
+including zombies; each child's `/proc` PPID is reread after its parent is pinned
+and again for the completed chain. Changed relationships and equal child/parent
+creation ticks fail closed: ambiguous chronology cannot establish provenance.
+All later independent target signals use the target pidfd, **never a numeric
+PID**, so forced PID reuse (including equal creation ticks) cannot target its
+replacement. `/proc` ancestry is required for every Linux adoption and
+malformed/truncated records fail closed. If libc/kernel pidfd support or
+permissions are missing, independent termination is unavailable and logged
+rather than falling back to check-then-signal.
 
 Windows pins `Process.SafeHandle` before reading creation time, validates its
 Toolhelp32 parent chain and creation-time boundaries, and signals only that

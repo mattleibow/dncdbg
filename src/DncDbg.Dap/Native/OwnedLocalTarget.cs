@@ -33,20 +33,16 @@ internal sealed class OwnedLocalTarget : IDisposable
         SafeFileHandle? pidfd = null;
         try
         {
-            // Open the kernel identity before reading PID-based metadata. If that
-            // generation exits during validation, signal 0 on its pidfd rejects it.
+            // Open the kernel identity before reading PID-based metadata.
             if (OperatingSystem.IsLinux())
-            {
-                int descriptor = PidfdOpen(pid, 0);
-                if (descriptor < 0)
-                    throw new Win32Exception(Marshal.GetLastPInvokeError());
-                pidfd = new SafeFileHandle(descriptor, ownsHandle: true);
-            }
+                pidfd = OpenLinuxIdentity(pid);
             process = Process.GetProcessById(pid);
             SafeProcessHandle? handle = OperatingSystem.IsWindows() ? process.SafeHandle : null;
             DateTime started = process.StartTime.ToUniversalTime();
-            if (started < adapterStarted || process.HasExited || !DescendsFrom(pid, adapterPid, started, adapterStarted, log)
-                || pidfd != null && PidfdSendSignal(pidfd, 0, IntPtr.Zero, 0) != 0)
+            if (started < adapterStarted || process.HasExited
+                || !(pidfd != null
+                    ? LinuxDescendsFrom(pid, adapterPid, started, adapterStarted, pidfd, log)
+                    : WindowsDescendsFrom(pid, adapterPid, started, adapterStarted, log)))
             {
                 log($"Native target {pid} lacks live corroborated launch ancestry; independent cleanup is not authorized.");
                 process.Dispose();
@@ -65,25 +61,83 @@ internal sealed class OwnedLocalTarget : IDisposable
         }
     }
 
-    private static bool DescendsFrom(int pid, int ancestor, DateTime childStarted, DateTime adapterStarted, Action<string> log)
+    private static bool LinuxDescendsFrom(int pid, int ancestor, DateTime childStarted, DateTime adapterStarted,
+        SafeFileHandle childIdentity, Action<string> log)
     {
-        Dictionary<int, int>? parents = OperatingSystem.IsWindows() ? WindowsParents() : null;
+        var retained = new List<SafeFileHandle>();
+        var edges = new List<(int Child, int Parent, SafeFileHandle ChildIdentity, SafeFileHandle ParentIdentity)>();
+        var seen = new HashSet<int>();
+        try
+        {
+            while (pid > 1 && seen.Add(pid))
+            {
+                if (!LinuxIdentityIsLive(childIdentity)
+                    || LinuxParent(File.ReadAllText($"/proc/{pid}/stat")) is not { } parent)
+                    return false;
+                log($"Native launch ancestry edge {pid} -> {parent} requires generation validation.");
+                SafeFileHandle parentIdentity = OpenLinuxIdentity(parent);
+                retained.Add(parentIdentity);
+                using Process parentProcess = Process.GetProcessById(parent);
+                DateTime parentStarted = parentProcess.StartTime.ToUniversalTime();
+                // Equal creation ticks cannot prove that the resolved parent predates
+                // this child. Pinning the parent must also precede a fresh PPID check.
+                if (parentStarted >= childStarted || parentStarted < adapterStarted
+                    || !LinuxEdgeIsLive(pid, parent, childIdentity, parentIdentity))
+                    return false;
+                edges.Add((pid, parent, childIdentity, parentIdentity));
+                if (parent == ancestor)
+                {
+                    if (parentStarted != adapterStarted)
+                        return false;
+                    foreach (var edge in edges)
+                        if (!LinuxEdgeIsLive(edge.Child, edge.Parent, edge.ChildIdentity, edge.ParentIdentity))
+                            return false;
+                    return true;
+                }
+                pid = parent;
+                childStarted = parentStarted;
+                childIdentity = parentIdentity;
+            }
+            return false;
+        }
+        finally
+        {
+            foreach (SafeFileHandle identity in retained)
+                identity.Dispose();
+        }
+    }
+
+    private static bool LinuxEdgeIsLive(int child, int parent, SafeFileHandle childIdentity, SafeFileHandle parentIdentity) =>
+        LinuxIdentityIsLive(parentIdentity) && LinuxIdentityIsLive(childIdentity)
+        && LinuxParent(File.ReadAllText($"/proc/{child}/stat")) == parent
+        && LinuxIdentityIsLive(childIdentity) && LinuxIdentityIsLive(parentIdentity);
+
+    private static SafeFileHandle OpenLinuxIdentity(int pid)
+    {
+        int descriptor = PidfdOpen(pid, 0);
+        if (descriptor < 0)
+            throw new Win32Exception(Marshal.GetLastPInvokeError());
+        return new SafeFileHandle(descriptor, ownsHandle: true);
+    }
+
+    private static bool LinuxIdentityIsLive(SafeFileHandle identity)
+    {
+        // A zombie can still accept signal zero; pidfd readability also detects exit.
+        var descriptor = new PollDescriptor { File = identity.DangerousGetHandle().ToInt32(), Events = 1 };
+        int ready = Poll(ref descriptor, 1, 0);
+        if (ready < 0 || PidfdSendSignal(identity, 0, IntPtr.Zero, 0) != 0)
+            throw new Win32Exception(Marshal.GetLastPInvokeError());
+        return ready == 0 && descriptor.ReturnedEvents == 0;
+    }
+
+    private static bool WindowsDescendsFrom(int pid, int ancestor, DateTime childStarted, DateTime adapterStarted, Action<string> log)
+    {
+        Dictionary<int, int> parents = WindowsParents();
         var seen = new HashSet<int>();
         while (pid > 1 && seen.Add(pid))
         {
-            int parent;
-            if (parents != null)
-            {
-                if (!parents.TryGetValue(pid, out parent))
-                    return false;
-            }
-            else
-            {
-                string stat = File.ReadAllText($"/proc/{pid}/stat");
-                if (LinuxParent(stat) is not { } parsed)
-                    return false;
-                parent = parsed;
-            }
+            if (!parents.TryGetValue(pid, out int parent))
+                return false;
             log($"Native launch ancestry edge {pid} -> {parent} requires generation validation.");
             using Process parentProcess = Process.GetProcessById(parent);
             DateTime parentStarted = parentProcess.StartTime.ToUniversalTime();

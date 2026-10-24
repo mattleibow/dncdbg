@@ -92,7 +92,13 @@ internal sealed class NativeAdapterSession : IDisposable
     public void SendMessage(DapMessage message)
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-        _connection.SendMessageAsync(message, timeout.Token).GetAwaiter().GetResult();
+        try { _connection.SendMessageAsync(message, timeout.Token).GetAwaiter().GetResult(); }
+        catch (Exception error) when (error is OperationCanceledException or IOException or ObjectDisposedException or TimeoutException)
+        {
+            if (_connection.WriteFailed && !_disposing)
+                _failed(new IOException("The native DAP response write did not complete; the transport is unusable.", error));
+            throw;
+        }
     }
 
     public void StopTransport(bool terminateTarget)

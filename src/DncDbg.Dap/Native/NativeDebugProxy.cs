@@ -41,6 +41,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
     private bool _supportsInvalidated;
     private bool _supportsMemory;
     private bool _supportsConfiguration;
+    private bool _configurationDone, _startupEvidence;
     private string? _runtimeDirectory;
     private Exception? _backendFailure;
     private int? _targetPid;
@@ -108,12 +109,12 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
             try { Handle(work); }
             catch (OperationCanceledException)
             {
-                client.SendErrorResponse(work.Request, "cancelled: native stop or session changed");
+                SendClientError(work.Request, "cancelled: native stop or session changed");
             }
             catch (Exception error)
             {
                 log($"Native proxy request '{work.Request.Command}' failed: {error}");
-                client.SendErrorResponse(work.Request, ErrorText.Describe(error));
+                SendClientError(work.Request, ErrorText.Describe(error));
             }
             finally
             {
@@ -236,7 +237,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
             arguments["variablesReference"] = variable.Id;
         long? nativeFrameContext = frame?.NativeId ?? variable?.NativeFrame
             ?? (command == "evaluate" ? arguments["frameId"]?.GetValue<long>() : null);
-        long? restoreFrame = variable?.NativeFrame ?? (command == "evaluate" && frame == null ? nativeFrameContext : null);
+        long? restoreFrame = variable?.NativeFrame ?? (command == "evaluate" ? nativeFrameContext : null);
         if (restoreFrame is { } owningFrame)
             LldbSnapshotTarget.Body(native.Request("scopes", new { frameId = owningFrame }, OperationToken()));
         Transform(arguments, "sourceReference", id => _references.ResolveSource(checked((int)id), session));
@@ -246,16 +247,25 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         if (readOnlyEvaluation)
             arguments["context"] = "hover";
         bool mutation = !executionControl && !readOnlyEvaluation && command is not ("stackTrace" or "dotnet/nativeStackTrace" or "scopes" or "variables" or "threads"
-            or "readMemory" or "modules" or "loadedSources" or "source" or "breakpointLocations" or "disassemble" or "exceptionInfo");
+            or "readMemory" or "modules" or "loadedSources" or "source" or "breakpointLocations" or "disassemble" or "exceptionInfo"
+            or "dataBreakpointInfo" or "completions");
         if (mutation)
         {
             if (_managed && _inspection != null && !_supportsInvalidated)
                 throw new DebuggerException("Native mutation would invalidate managed inspection references. Advertise supportsInvalidatedEvent or use native-only mode.");
+            Invalidate(execution: false, stopped: null, cancelOperation: false);
+            CloseView();
         }
 
         string backendCommand = command == "dotnet/nativeStackTrace" ? "stackTrace" : command;
+        bool stopOwned = backendCommand is "stackTrace" or "scopes" or "variables" or "readMemory"
+            || frame != null || variable != null || nativeFrameContext != null;
         if (command == "configurationDone")
-            lock (_state) { _startupDeadline?.CancelAfter(TimeSpan.FromSeconds(30)); }
+            lock (_state)
+            {
+                _configurationDone = true;
+                _startupDeadline?.CancelAfter(TimeSpan.FromSeconds(30));
+            }
         DapMessage response;
         try { response = native.Request(backendCommand, arguments, OperationToken()); }
         catch
@@ -268,8 +278,6 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         {
             if (executionControl && work.Stop == StopEpoch())
                 Invalidate(execution: true, stopped: false, cancelOperation: false);
-            else if (mutation)
-                Invalidate(execution: false, stopped: null, cancelOperation: false);
             if (executionControl || mutation)
                 CloseView();
             JsonObject body = Object(response.Body);
@@ -277,16 +285,27 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
             {
                 RequireStop(work);
                 bool enrich = command != "dotnet/nativeStackTrace" && _managed;
-                MapStack(body, Integer(arguments, "threadId"), enrich, work);
+                MapStack(body, arguments["threadId"]?.GetValue<long>() ?? throw new DebuggerException("Missing 'threadId'."), enrich, work);
                 VerifyStop(work);
             }
-            Transform(body, "variablesReference", id => _references.Variable(id, false, StopEpoch(), 0, nativeFrameContext));
+            Transform(body, "variablesReference", id => _references.Variable(id, false, work.Stop, 0, nativeFrameContext));
             Transform(body, "sourceReference", id => _references.Source(id, session));
             response.Body = body;
         }
         else
             RestoreControlState(work);
-        ForwardResponse(request, response);
+        if (response.Success == true && stopOwned)
+        {
+            // Publication and stop transitions share a gate; mapping must never
+            // rebind an old response's children to the current stop.
+            lock (_state)
+            {
+                VerifyStop(work);
+                ForwardResponse(request, response);
+            }
+        }
+        else
+            ForwardResponse(request, response);
     }
 
     private void Initialize(DapMessage request, JsonObject arguments)
@@ -306,6 +325,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         _managed = false;
         _supportsMemory = false;
         _started = false;
+        _configurationDone = _startupEvidence = false;
         _ownsTarget = true;
         _targetPid = null;
         _selectedNativeFrame = null;
@@ -376,13 +396,13 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         _managed = managed;
         _runtimeDirectory = (option as JsonObject)?["runtimeDirectory"]?.GetValue<string>();
         _targetEnded = false;
+        _startupEvidence = false;
         _started = true;
         long session = Session();
         CancellationToken sessionToken;
         lock (_state) { sessionToken = _sessionCancellation.Token; }
         var startup = CancellationTokenSource.CreateLinkedTokenSource(sessionToken, _lifetime.Token);
-        if (!_supportsConfiguration)
-            startup.CancelAfter(TimeSpan.FromSeconds(30));
+        startup.CancelAfter(TimeSpan.FromSeconds(30));
         lock (_state) { _startupDeadline = startup; }
         Task<DapMessage> pending;
         try { pending = native.SendAsync(request.Command!, arguments, startup.Token); }
@@ -400,18 +420,19 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
             {
                 DapMessage response = await pending;
                 if (session != Session())
-                    client.SendErrorResponse(request, "Native session was replaced.");
+                    SendClientError(request, "Native session was replaced.");
                 else if (!_stopping)
                 {
-                    if (response.Success != true)
-                        _started = false;
+                    lock (_state)
+                        if (response.Success != true && !_startupEvidence)
+                            _started = false;
                     ForwardResponse(request, response);
                 }
             }
-            catch (Exception error) when (error is OperationCanceledException or TimeoutException or IOException)
+            catch (Exception error) when (error is OperationCanceledException or TimeoutException or IOException or ObjectDisposedException)
             {
                 if (!_stopping)
-                    client.SendErrorResponse(request, "Native startup failed with unknown target outcome; disconnect or reinitialize before retrying: " + error.Message);
+                    SendClientError(request, "Native startup failed with unknown target outcome; disconnect or reinitialize before retrying: " + error.Message);
             }
             finally
             {
@@ -422,7 +443,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
             _starts.Add(completion);
     }
 
-    private void MapStack(JsonObject body, int thread, bool enrich, Work work)
+    private void MapStack(JsonObject body, long thread, bool enrich, Work work)
     {
         JsonArray frames = body["stackFrames"] as JsonArray ?? throw new DebuggerException("Native stackTrace did not return a frame array.");
         IReadOnlyList<ManagedInspectionFrame> managed = [];
@@ -430,7 +451,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         {
             try
             {
-                managed = Inspection().GetStackTrace(thread);
+                managed = Inspection().GetStackTrace(checked((int)thread));
                 body["dncdbgManagedInspection"] = new JsonObject { ["status"] = "read-only", ["snapshot"] = _snapshotSerial };
             }
             catch (Exception error) when (error is not (OperationCanceledException or OutOfMemoryException))
@@ -444,7 +465,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
             }
         }
         VerifyStop(work);
-        long stop = StopEpoch(), inspection = InspectionEpoch();
+        long stop = work.Stop, inspection = InspectionEpoch();
         var nativePCs = frames.OfType<JsonObject>().Select(f => f["instructionPointerReference"] is JsonValue pc && pc.TryGetValue<string>(out var text)
                 && ulong.TryParse(text.AsSpan(text.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? 2 : 0),
                     NumberStyles.HexNumber, CultureInfo.InvariantCulture, out ulong address) ? (ulong?)address : null)
@@ -526,9 +547,18 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         {
             if (message.Event == "stopped")
             {
-                Invalidate(true, true, false);
                 lock (_state)
+                {
+                    _startupEvidence = true;
                     _allStopped = message.Body is JsonElement body && body.TryGetProperty("allThreadsStopped", out var all) && all.ValueKind == JsonValueKind.True;
+                    Invalidate(true, true, false);
+                }
+            }
+            else if (message.Event == "initialized")
+            {
+                lock (_state)
+                    if (_supportsConfiguration && !_configurationDone)
+                        _startupDeadline?.CancelAfter(Timeout.InfiniteTimeSpan);
             }
             else if (message.Event == "continued")
                 Invalidate(true, false, true);
@@ -543,7 +573,11 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
                 Invalidate(false, null, true, notify: false);
             else if (message.Event == "process" && message.Body is JsonElement process
                 && process.TryGetProperty("systemProcessId", out var pid))
-                _targetPid = pid.GetInt32();
+                lock (_state)
+                {
+                    _startupEvidence = true;
+                    _targetPid = pid.GetInt32();
+                }
         }
         _events.Add(new BackendMessage(session, StopEpoch(), InspectionEpoch(), message));
     }
@@ -624,7 +658,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         {
             response = client.SendRequestAsync(request.Command!, request.Arguments, timeout.Token).GetAwaiter().GetResult();
         }
-        catch (Exception error) when (error is OperationCanceledException or IOException or ObjectDisposedException)
+        catch (Exception error) when (error is OperationCanceledException or IOException or ObjectDisposedException or TimeoutException)
         {
             if (generation.IsCancellationRequested || _lifetime.IsCancellationRequested)
                 return;
@@ -729,6 +763,16 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         Success = response.Success, Message = response.Message, Body = response.Body,
     });
 
+    private void SendClientError(DapMessage request, string message)
+    {
+        try { client.SendErrorResponse(request, message); }
+        catch (Exception error) when (error is IOException or ObjectDisposedException or OperationCanceledException or TimeoutException)
+        {
+            log("Client DAP error response could not be delivered: " + error.Message);
+            _lifetime.Cancel();
+        }
+    }
+
     private bool RequestDisconnect(DapMessage request)
     {
         bool stopped, allStopped;
@@ -741,6 +785,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
             stopped = _stopped;
             allStopped = _allStopped;
             _operation?.Cancel();
+            _startupDeadline?.Cancel();
         }
         Invalidate(true, false, true);
         var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -769,7 +814,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
             ForwardResponse(request, response);
         }
         catch (Exception error) when (error is IOException or OperationCanceledException or TimeoutException)
-        { client.SendErrorResponse(request, "Native disconnect failed: " + error.Message); }
+        { SendClientError(request, "Native disconnect failed: " + error.Message); }
         finally
         {
             lock (_state)

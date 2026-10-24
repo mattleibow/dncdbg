@@ -730,6 +730,215 @@ def frameless_evaluation_contract(adapter, mode="selected-frame"):
     print("PASS frame-less evaluation restores the client-selected native frame", flush=True)
 
 
+def inspection_stop_publication_contract(adapter, command="variables"):
+    with Dap(adapter, "inspection-stop-publication-" + command, arguments("dap", "transition-" + command)) as peer:
+        peer.request("initialize", dict(adapterID="dncdbg"))
+        peer.request("launch", dict(program="owned-test-target"))
+        peer.event("initialized")
+        peer.request("configurationDone")
+        peer.event("stopped")
+        frame = peer.request("stackTrace", dict(threadId=7))["stackFrames"][0]["id"]
+        generation = peer.request("dotnet/info")["stopGeneration"]
+        args = dict(frameId=frame)
+        if command == "variables":
+            scope = peer.request("scopes", args)["scopes"][0]["variablesReference"]
+            args = dict(variablesReference=scope)
+        request = peer.send(command, args)
+        peer.event("continued")
+        peer.event("stopped")
+        response = peer.receive(lambda m: m.get("type") == "response" and m.get("request_seq") == request)
+        current = peer.request("dotnet/info")["stopGeneration"]
+        check(current > generation, "Test peer failed to advance the native stop")
+        check(not response["success"] and "cancel" in response.get("message", "").lower() and not response.get("body", {}).get(command),
+              "Old " + command + " response published across stop " + str(generation) + " -> " + str(current)
+              + ": success=" + str(response["success"]))
+        peer.request("scopes", dict(frameId=frame), success=False)
+        current_frame = peer.request("stackTrace", dict(threadId=7))["stackFrames"][0]["id"]
+        scope = peer.request("scopes", dict(frameId=current_frame))["scopes"][0]["variablesReference"]
+        value = peer.request("variables", dict(variablesReference=scope))["variables"][0]
+        check(peer.request("variables", dict(variablesReference=value["variablesReference"]))["variables"][0]["value"] == "42",
+              "Fresh stop inspection failed after rejecting the expired response")
+        peer.request("disconnect")
+    print("PASS native " + command + " publication rejects old values and child handles across a stop transition", flush=True)
+
+
+def explicit_repl_contract(adapter):
+    with Dap(adapter, "explicit-native-repl-selection", arguments("dap", "selected-repl")) as peer:
+        peer.request("initialize", dict(adapterID="dncdbg"))
+        peer.request("launch", dict(program="owned-test-target"))
+        peer.event("initialized")
+        peer.request("configurationDone")
+        peer.event("stopped")
+        frame = peer.request("stackTrace", dict(threadId=7))["stackFrames"][0]["id"]
+        peer.request("scopes", dict(frameId=frame))
+        peer.request("selectOtherFrame")
+        result = peer.request("evaluate", dict(frameId=frame, expression="`frame info", context="repl"))
+        check(result["result"] == "1", "Explicit-frame REPL observed backend frame " + result["result"] + " instead of client frame 1")
+        peer.request("disconnect")
+    print("PASS explicit native REPL restores actual backend selection before global-state commands", flush=True)
+
+
+def real_explicit_repl_contract(adapter, lldb):
+    with Dap(adapter, "real-explicit-repl-selection", ["--native-debugger=lldb", "--native-debugger-path=" + lldb]) as peer:
+        peer.request("initialize", dict(adapterID="dncdbg", supportsInvalidatedEvent=True))
+        launch = peer.send("launch", dict(program=shutil.which("dotnet"), args=[str(DLL)],
+                                          env=["DNCDBG_MIXED_CHECKPOINTS=1"], managedInspection=True))
+        peer.event("initialized")
+        peer.request("setBreakpoints", dict(source=dict(path=str(FIXTURE / "native.c")),
+                                           breakpoints=[dict(line=line(FIXTURE / "native.c", "NATIVE_BREAK"))]))
+        peer.request("configurationDone")
+        peer.response(launch)
+        stop = peer.event("stopped")
+        raw = peer.request("dotnet/nativeStackTrace", dict(threadId=stop["threadId"]))["stackFrames"]
+        caller = raw[1]
+        check("native_add" in caller["name"], "Fixture did not expose native caller frame #1")
+        peer.request("scopes", dict(frameId=caller["id"]))
+        enriched = peer.request("stackTrace", dict(threadId=stop["threadId"]))["stackFrames"]
+        check(any("[Managed]" in f["name"] for f in enriched), "Real explicit-frame REPL proof did not open a managed snapshot")
+        result = peer.request("evaluate", dict(frameId=caller["id"], expression="`frame info", context="repl"))["result"]
+        check("frame #1:" in result and "native_add" in result,
+              "Real overlay explicit-frame REPL returned another selected frame: " + result)
+        peer.request("disconnect", dict(terminateDebuggee=True))
+    print("PASS real LLDB explicit caller-frame REPL survives internal overlay register selection", flush=True)
+
+
+def startup_deadline_gaps_contract(adapter, mode="startup-preinitialized"):
+    with Dap(adapter, mode, arguments("dap", mode)) as peer:
+        peer.request("initialize", dict(adapterID="dncdbg"))
+        launch = peer.send("launch", dict(program="owned-test-target"))
+        if mode == "startup-postconfig-retry":
+            peer.event("initialized")
+            peer.request("configurationDone")
+            peer.response(launch, success=False)
+            launch = peer.send("launch", dict(program="retry-test-target"))
+            peer.event("initialized")
+        try:
+            peer.response(launch, success=False, timeout=35)
+        except queue.Empty:
+            raise AssertionError("No bounded startup deadline for " + mode) from None
+        peer.request("disconnect")
+    print("PASS bounded startup deadline: " + mode, flush=True)
+
+
+def startup_failed_evidence_contract(adapter):
+    with Dap(adapter, "startup-failed-evidence", arguments("dap", "startup-failed-evidence")) as peer:
+        peer.request("initialize", dict(adapterID="dncdbg"))
+        peer.request("launch", dict(program="owned-test-target"), success=False)
+        peer.event("stopped")
+        request = peer.send("launch", dict(program="second-test-target"))
+        response = peer.receive(lambda m: m.get("type") == "response" and m.get("request_seq") == request)
+        check(not response["success"] and peer.request("ownershipStatus")["launches"] == 1,
+              "Explicit failed launch discarded observed process/stopped ownership")
+        peer.request("disconnect")
+    print("PASS explicit startup failure retains admission after actual target evidence", flush=True)
+
+
+def disconnect_blocked_startup_contract(adapter):
+    gate = OUT / "disconnect-blocked-launch"
+    gate.unlink(missing_ok=True)
+    gate.with_suffix(".ready").unlink(missing_ok=True)
+    with Dap(adapter, gate.name, arguments("dap", "blocked-writes", barrier=gate)) as peer:
+        try:
+            peer.request("initialize", dict(adapterID="dncdbg"))
+            launch = peer.send("launch", dict(program="owned-test-target", payload="x" * (8 * 1024 * 1024)))
+            wait_file(gate.with_suffix(".ready"))
+            disconnect = peer.send("disconnect", dict(terminateDebuggee=False))
+            try:
+                peer.response(disconnect, success=False, timeout=5)
+            except queue.Empty:
+                raise AssertionError("Disconnect did not cancel blocked launch transport ownership") from None
+            peer.response(launch, success=False, timeout=5)
+            peer.process.stdin.close()
+            peer.disconnected = True
+            peer.process.wait(timeout=15)
+            check(peer.process.returncode == 0, "Blocked-launch disconnect shutdown failed")
+        finally:
+            gate.write_text("release")
+    gate.unlink(missing_ok=True)
+    gate.with_suffix(".ready").unlink(missing_ok=True)
+    print("PASS disconnect cancels blocked startup writes before queuing its own request", flush=True)
+
+
+def wide_thread_contract(adapter):
+    with Dap(adapter, "native-wide-threads", arguments("dap", "wide-threads")) as peer:
+        peer.request("initialize", dict(adapterID="dncdbg"))
+        peer.request("launch", dict(program="owned-test-target"))
+        peer.event("initialized")
+        peer.request("configurationDone")
+        stop = peer.event("stopped")
+        tid = (1 << 40) + 7
+        check(stop["threadId"] == tid and peer.request("threads")["threads"][0]["id"] == tid, "Native thread event identity lost")
+        frame = peer.request("stackTrace", dict(threadId=tid))["stackFrames"][0]
+        peer.request("scopes", dict(frameId=frame["id"]))
+        peer.request("disconnect")
+    print("PASS native-only 64-bit thread IDs round-trip without CLR API narrowing", flush=True)
+
+
+def uncertain_mutation_contract(adapter, lldb, mode="mutation-failure", command="evaluate"):
+    import base64
+    import re
+    gate = OUT / (mode + "-" + command)
+    for suffix in (".arm", ".ready"):
+        gate.with_suffix(suffix).unlink(missing_ok=True)
+    with Dap(adapter, gate.name, arguments("lldb", mode, lldb=lldb, barrier=gate)) as peer:
+        peer.request("initialize", dict(adapterID="dncdbg", supportsInvalidatedEvent=True))
+        launch = peer.send("launch", dict(program=shutil.which("dotnet"), args=[str(DLL)],
+                                          env=["DNCDBG_MIXED_CHECKPOINTS=1"], managedInspection=True))
+        peer.event("initialized")
+        peer.request("setBreakpoints", dict(source=dict(path=str(FIXTURE / "native.c")),
+                                           breakpoints=[dict(line=line(FIXTURE / "native.c", "NATIVE_CHECKPOINT"))]))
+        peer.request("configurationDone")
+        peer.response(launch)
+        stop = peer.event("stopped")
+        raw = peer.request("dotnet/nativeStackTrace", dict(threadId=stop["threadId"]))["stackFrames"][0]
+        if command == "writeMemory":
+            address = peer.request("evaluate", dict(frameId=raw["id"], expression="&phase", context="repl"))["result"]
+            pointer = re.findall(r"0x[0-9a-fA-F]+", address)[-1]
+            args = dict(memoryReference=pointer, data=base64.b64encode((9).to_bytes(4, "little")).decode())
+        else:
+            args = dict(frameId=raw["id"], expression="phase = 9", context="repl")
+        frames = peer.request("stackTrace", dict(threadId=stop["threadId"]))["stackFrames"]
+        managed = next(f for f in frames if "[Managed]" in f["name"] and "ManagedCall" in f["name"])
+        serial = peer.request("dotnet/info")["managedSnapshot"]
+        gate.with_suffix(".arm").write_text("arm")
+        peer.response(peer.send(command, args), success=False, timeout=35)
+        wait_file(gate.with_suffix(".ready"))
+        request = peer.send("scopes", dict(frameId=managed["id"]))
+        response = peer.receive(lambda m: m.get("type") == "response" and m.get("request_seq") == request)
+        check(not response["success"], "Failed-after-side-effect " + command + " retained a cached managed snapshot")
+        updated = peer.request("stackTrace", dict(threadId=stop["threadId"]))["stackFrames"]
+        check(peer.request("dotnet/info")["managedSnapshot"] > serial, "Unknown native mutation reused the CLR view")
+        _, locals = integration["locals_for"](peer, updated[0]["id"])
+        check(locals["phase"] == "9", "Test mutation did not actually change native memory: " + str(locals))
+        peer.request("disconnect", dict(terminateDebuggee=True))
+    for suffix in (".arm", ".ready"):
+        gate.with_suffix(suffix).unlink(missing_ok=True)
+    print("PASS managed snapshot expires before failed/timed-out native mutation: " + mode + "/" + command, flush=True)
+
+
+def nonmutating_queries_contract(adapter, lldb):
+    with Dap(adapter, "nonmutating-native-queries", ["--native-debugger=lldb", "--native-debugger-path=" + lldb]) as peer:
+        peer.request("initialize", dict(adapterID="dncdbg"))
+        launch = peer.send("launch", dict(program=shutil.which("dotnet"), args=[str(DLL)],
+                                          env=["DNCDBG_MIXED_CHECKPOINTS=1"], managedInspection=True))
+        peer.event("initialized")
+        peer.request("setBreakpoints", dict(source=dict(path=str(FIXTURE / "native.c")),
+                                           breakpoints=[dict(line=line(FIXTURE / "native.c", "NATIVE_CHECKPOINT"))]))
+        peer.request("configurationDone")
+        peer.response(launch)
+        stop = peer.event("stopped")
+        frames = peer.request("stackTrace", dict(threadId=stop["threadId"]))["stackFrames"]
+        managed = next(f for f in frames if "[Managed]" in f["name"] and "ManagedCall" in f["name"])
+        for command, args in (("completions", dict(frameId=frames[0]["id"], text="pha", column=4)),
+                              ("dataBreakpointInfo", dict(frameId=frames[0]["id"], name="phase"))):
+            seq = peer.send(command, args)
+            response = peer.receive(lambda m: m.get("type") == "response" and m.get("request_seq") == seq)
+            check("Native mutation" not in response.get("message", ""), command + " was incorrectly treated as mutation")
+            peer.request("scopes", dict(frameId=managed["id"]))
+        peer.request("disconnect", dict(terminateDebuggee=True))
+    print("PASS completion/data-breakpoint queries preserve the live managed view without invalidation support", flush=True)
+
+
 def native_only_watch_contract(adapter):
     with Dap(adapter, "native-only-watch-semantics", arguments("lldb")) as peer:
         peer.request("initialize", dict(adapterID="dncdbg"))
@@ -918,6 +1127,14 @@ if __name__ == "__main__":
     refused_admission_contract(options.adapter)
     frameless_evaluation_contract(options.adapter)
     frameless_evaluation_contract(options.adapter, mode="selected-repl")
+    inspection_stop_publication_contract(options.adapter)
+    inspection_stop_publication_contract(options.adapter, command="scopes")
+    explicit_repl_contract(options.adapter)
+    startup_deadline_gaps_contract(options.adapter)
+    startup_deadline_gaps_contract(options.adapter, mode="startup-postconfig-retry")
+    startup_failed_evidence_contract(options.adapter)
+    disconnect_blocked_startup_contract(options.adapter)
+    wide_thread_contract(options.adapter)
     native_only_watch_contract(options.adapter)
     managed_launch_scope_contract(options.adapter)
     unsupported_overlay_controls(options.adapter)
@@ -931,6 +1148,11 @@ if __name__ == "__main__":
         native_watch_contract(options.adapter, options.lldb_dap)
         native_watch_contract(options.adapter, options.lldb_dap, invalidation=True)
         duplicate_native_pc_contract(options.adapter, options.lldb_dap)
+        real_explicit_repl_contract(options.adapter, options.lldb_dap)
+        nonmutating_queries_contract(options.adapter, options.lldb_dap)
+        for mode in ("mutation-failure", "mutation-timeout"):
+            for command in ("evaluate", "writeMemory"):
+                uncertain_mutation_contract(options.adapter, options.lldb_dap, mode=mode, command=command)
         if options.attach_restart_proof:
             real_restart_contract(options.adapter, options.lldb_dap)
             real_attach_contract(options.adapter, options.lldb_dap)

@@ -6,6 +6,86 @@ if (args.Length is < 2 or > 3)
     throw new ArgumentException("Supply the public Python executable and fake_native_adapter.py test peer.");
 string python = args[0], fake = args[1];
 
+if (args.Length == 2 || args[2] == "closed-client")
+{
+    using var output = new ClosedClientOutput();
+    byte[] body = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new DncDbg.Protocol.DapMessage
+    { Seq = 1, Type = "request", Command = "initialize", Arguments = System.Text.Json.JsonSerializer.SerializeToElement(new { adapterID = "test" }) });
+    using var input = new GatedClientInput([.. System.Text.Encoding.ASCII.GetBytes($"Content-Length: {body.Length}\r\n\r\n"), .. body],
+        output.Attempted);
+    using var connection = new DncDbg.Protocol.DapConnection(input, output);
+    using var proxy = new NativeDebugProxy(connection, new NativeAdapterDescriptor("dap", python, [fake], "test", null,
+        RuntimeInformation.RuntimeIdentifier, []), Console.Error.WriteLine);
+    proxy.Run();
+    Console.WriteLine("PASS closed client output cannot throw an unhandled error-response exception during shutdown");
+    if (args.Length == 3)
+        return;
+}
+
+if (args.Length == 2 || args[2] == "reverse-write")
+{
+    string gate = Path.GetFullPath($"build/validation/mixed-mode/reverse-write-{Environment.ProcessId}");
+    Directory.CreateDirectory(Path.GetDirectoryName(gate)!);
+    int failures = 0;
+    using var backend = new NativeAdapterSession(new NativeAdapterDescriptor("dap", python,
+        [fake, "--mode=blocked-writes", "--barrier=" + gate], "test", null, RuntimeInformation.RuntimeIdentifier, []),
+        _ => { }, _ => Interlocked.Increment(ref failures), Console.Error.WriteLine);
+    backend.Request("initialize", new { adapterID = "test" });
+    try
+    {
+        backend.SendMessage(new DncDbg.Protocol.DapMessage { Type = "response", RequestSeq = 500,
+            Command = "runInTerminal", Success = true, Body = new { payload = new string('x', 8 * 1024 * 1024) } });
+        throw new InvalidOperationException("A blocked reverse response was not bounded.");
+    }
+    catch (OperationCanceledException) { }
+    if (failures == 0)
+        throw new InvalidOperationException("Native SendMessage did not surface its interrupted transport failure.");
+    Console.WriteLine("PASS native reverse-response write failure notifies the owning session");
+    if (args.Length == 3)
+        return;
+}
+
+if (args.Length == 2 || args[2] == "reverse-client-timeout")
+{
+    const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+    using var connection = new DncDbg.Protocol.DapConnection(Stream.Null, new TimeoutClientOutput());
+    using var proxy = new NativeDebugProxy(connection, new NativeAdapterDescriptor("dap", python, [fake], "test", null,
+        RuntimeInformation.RuntimeIdentifier, []), Console.Error.WriteLine);
+    var backend = Session("normal");
+    typeof(NativeDebugProxy).GetField("_native", flags)!.SetValue(proxy, backend);
+    var envelope = Activator.CreateInstance(typeof(NativeDebugProxy).GetNestedType("BackendMessage", System.Reflection.BindingFlags.NonPublic)!,
+        [0L, 0L, 0L, new DncDbg.Protocol.DapMessage { Seq = 500, Type = "request", Command = "runInTerminal" }])!;
+    typeof(NativeDebugProxy).GetMethod("ForwardReverse", flags)!.Invoke(proxy, [envelope]);
+    var body = (System.Text.Json.JsonElement)backend.Request("reverseStatus", new { }).Body!;
+    if (body.GetProperty("response").GetProperty("success").GetBoolean())
+        throw new InvalidOperationException("A timed-out client write did not fail back to the originating backend.");
+    Console.WriteLine("PASS client reverse-write timeout fails explicitly to the originating backend");
+    if (args.Length == 3)
+        return;
+}
+
+if (args.Length == 2 || args[2] == "atomic-stop")
+{
+    const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+    using var connection = new DncDbg.Protocol.DapConnection(Stream.Null, Stream.Null);
+    using var proxy = new NativeDebugProxy(connection, new NativeAdapterDescriptor("dap", python, [], "test", null,
+        RuntimeInformation.RuntimeIdentifier, []), _ => { });
+    object Field(string name) => typeof(NativeDebugProxy).GetField(name, flags)!.GetValue(proxy)!;
+    bool consistent = false;
+    using var registration = ((CancellationTokenSource)Field("_snapshotCancellation")).Token.Register(() =>
+        consistent = (bool)Field("_stopped") && (bool)Field("_allStopped"));
+    typeof(NativeDebugProxy).GetMethod("Receive", flags)!.Invoke(proxy, [0L, new DncDbg.Protocol.DapMessage
+    {
+        Type = "event", Event = "stopped",
+        Body = System.Text.Json.JsonSerializer.SerializeToElement(new { allThreadsStopped = true }),
+    }]);
+    if (!consistent)
+        throw new InvalidOperationException("Snapshot invalidation exposed stopped=true before allStopped=true.");
+    Console.WriteLine("PASS stopped/all-stop state commits atomically before snapshot cancellation observers");
+    if (args.Length == 3)
+        return;
+}
+
 if (args.Length == 2 || args[2] == "binary-flags")
 {
     var method = typeof(LldbSnapshotTarget).GetMethod("Number", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
@@ -99,4 +179,30 @@ NativeAdapterSession Session(string mode)
     return new NativeAdapterSession(new NativeAdapterDescriptor("dap", python,
         [fake, "--mode=" + mode, "--arch=" + architecture], "test", null, RuntimeInformation.RuntimeIdentifier, []),
         _ => { }, error => Console.Error.WriteLine(error.Message), Console.Error.WriteLine);
+}
+
+sealed class ClosedClientOutput : MemoryStream
+{
+    public TaskCompletionSource Attempted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
+    {
+        Attempted.TrySetResult();
+        return ValueTask.FromException(new IOException("Test client closed its output pipe."));
+    }
+}
+
+sealed class GatedClientInput(byte[] bytes, TaskCompletionSource attempted) : MemoryStream(bytes)
+{
+    public override int ReadByte()
+    {
+        if (Position == Length)
+            attempted.Task.WaitAsync(TimeSpan.FromSeconds(10)).GetAwaiter().GetResult();
+        return base.ReadByte();
+    }
+}
+
+sealed class TimeoutClientOutput : MemoryStream
+{
+    public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default) =>
+        ValueTask.FromException(new TimeoutException("Test client output timed out."));
 }

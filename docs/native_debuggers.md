@@ -60,10 +60,16 @@ client-facing IDs remain separate proxy-owned 32-bit values. Rejected launch,
 attach or continue/step requests preserve the live stop epoch and references.
 Resume epochs advance only after accepted control, a native event, or an
 uncertain execution outcome, not merely when a request enters the queue.
+Native inspection responses and their child references belong to the captured
+request stop, never the stop that happens to be current when mapping finishes.
+Final stop validation and response publication share the state-transition gate:
+a continued/stopped event during a sizeable scopes/variables response rejects
+the expired result rather than exposing old values under fresh child handles.
 Replies are bound to their originating backend generation. A client timeout or
 failure produces a failed reply to that backend, never to its replacement.
 Each native request has its own cancellation/timeout registration; one timeout
-does not cancel unrelated requests. Explicitly failed startup releases launch admission
+does not cancel unrelated requests. Explicitly failed startup without target
+evidence releases launch admission
 and a refused continue restores the previous partial-stop/all-stop state rather
 than inventing an all-stop.
 A timeout/transport failure is not a confirmed refusal: execution state is
@@ -72,11 +78,16 @@ An unsupported restart is rejected without expiring the unchanged stop/frames.
 An unanswered startup retains admission, even without target evidence: process,
 initialized or stopped events can precede its missing response. Disconnect or
 reinitialize to reconcile the session before another launch.
-The startup response deadline begins at `configurationDone`, not during IDE
-breakpoint/configuration setup. An explicit failed startup response permits a
-retry; a timeout does not establish absence of a target.
+Startup has a bounded deadline before the backend emits `initialized`. Only
+that event can suspend the timer for IDE breakpoint/configuration setup.
+`configurationDone` arms the response deadline again; retries in an already
+configured session remain bounded. An explicit failed startup response permits
+a retry only if no process/stopped target evidence was observed; otherwise
+ownership still requires reconciliation.
 For backends that do not advertise `configurationDone`, the deadline starts
 with startup instead, so the absence of that optional phase cannot hang launch.
+Disconnect cancels the startup token as well as the active request token,
+including a launch still holding an unread backend pipe's write gate.
 
 Writes use a cancellable async serialization gate and bounded async pipe
 write/flush awaits. Cancellation while waiting for the gate does not affect
@@ -85,6 +96,11 @@ unusable; the proxy never appends a new frame to a potentially partial one.
 EOF cancels requests and stops/aborts the native transport **before** joining
 its request worker. The pipe-fill tests prove worker admission by consuming
 only the next header and one payload byte before the backend stops reading.
+If a client pipe has already failed, error-response delivery logs the transport
+failure and cancels the lifetime instead of throwing an unhandled exception
+from a background worker. Native reverse-response writes report partial-write
+failure to the session owner; client reverse-write timeouts fail explicitly to
+the originating backend.
 
 ## Find an installed debugger
 
@@ -229,17 +245,28 @@ banks are not required. Requested-but-missing registers fail inspection instead
 of supplying invented zero values. Partial memory reads retain their valid
 prefix when the next page is unmapped.
 
-Native REPL evaluation or successful breakpoint mutation at a stop expires the managed view.
+Native mutation expires the managed view **before** it is sent, not only after
+a successful response. REPL evaluation or `writeMemory` can side-effect and
+then fail or time out; old managed handles remain expired in either case.
+Read-only `dataBreakpointInfo` and `completions` queries do not expire the view.
 Clients must advertise `supportsInvalidatedEvent` to mutate an active managed
 view; the proxy sends stacks/variables invalidation and the client refreshes.
 Backend frame-scoped invalidation is broadened to stacks/variables instead of
 leaking backend frame IDs. Unsupported cancel/restart capabilities stay masked
 on both initialize and later capability events.
 Frame-less native evaluation restores the last explicit client frame, rather
-than inheriting an internal register read's selected frame. Binary-formatted
-x64 EFLAGS is supported. If the backend omits optional MXCSR, integer/control
+than inheriting an internal register read's selected frame.
+Explicit-frame evaluation also restores the actual backend selection through
+`scopes` before forwarding: REPL commands such as `` `frame info `` can consult
+global LLDB frame selection even when `evaluate.frameId` is present.
+Binary-formatted x64 EFLAGS is supported. If the backend omits optional MXCSR, integer/control
 context remains usable but the floating-point validity flag is cleared and a
 diagnostic is emitted; no floating-point bank is fabricated.
+Native-only thread IDs also retain signed 64-bit backend identity. Only the
+optional CoreCLR API's thread lookup narrows to its supported integer range;
+an unrepresentable overlay thread degrades to native-only inspection.
+The stopped/all-threads-stopped flags and stop invalidation commit under one
+state lock, including for snapshot-cancellation observers.
 
 ### Execution versus inspection matrix
 
@@ -395,6 +422,10 @@ x64 in [run 40090679373](https://github.com/mattleibow/dncdbg/actions/runs/40090
 `An absent optional MXCSR lost the valid integer/control context.` This was a
 test-only commit before the register fix. Additional exact red/green excerpts
 are committed in `evidence/expanded-proxy-review-red-green.txt`.
+The later frozen-tip review has exact evidence in
+`evidence/84696b30-publication-repl-red-green.txt` and
+`evidence/84696b30-additional-af-red-green.txt`, including actual LLDB native
+memory side effects before failed/timed-out mutation responses.
 
 Real attach reached SIGSTOP with a verified native checkpoint breakpoint, but
 did not reach the checkpoint after continue. The current Xcode adapter also

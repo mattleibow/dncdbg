@@ -75,6 +75,13 @@ if options.lldb:
                 os._exit(child.wait(timeout=5))
             if message.get("request_seq") == internal_seq:
                 continue
+            if options.mode in ("mutation-failure", "mutation-timeout") and message.get("command") in ("evaluate", "writeMemory"):
+                if options.barrier and options.barrier.with_suffix(".arm").exists():
+                    options.barrier.with_suffix(".arm").unlink()
+                    options.barrier.with_suffix(".ready").write_text("native mutation completed")
+                    if options.mode == "mutation-timeout":
+                        continue
+                    message.update(success=False, message="Test relay: native side effect completed before failure")
             if options.mode == "decimal-modules" and message.get("command") == "modules":
                 for module in message.get("body", {}).get("modules", []):
                     address = module.get("addressRange", "")
@@ -120,9 +127,11 @@ launch_count = 0
 deferred = None
 disconnects = []
 module_reads = 0
+inspection_transitioned = False
 
 
 def response(request, body=None, success=True, message=None):
+    global inspection_transitioned
     if options.mode == "wide-ids" and body is not None:
         def widen(value):
             if isinstance(value, dict):
@@ -143,6 +152,20 @@ def response(request, body=None, success=True, message=None):
         value["body"] = body
     if message:
         value["message"] = message
+    if (not inspection_transitioned and options.mode in ("transition-variables", "transition-scopes")
+            and request["command"] == options.mode.removeprefix("transition-")):
+        inspection_transitioned = True
+        key = "variables" if request["command"] == "variables" else "scopes"
+        value["body"][key] *= 24000
+        messages = [value,
+                    dict(seq=0, type="event", event="continued", body=dict(threadId=7, allThreadsContinued=True)),
+                    dict(seq=0, type="event", event="stopped", body=dict(reason="step", threadId=7, allThreadsStopped=True))]
+        data = b"".join(f"Content-Length: {len(payload)}\r\n\r\n".encode() + payload
+                        for payload in (json.dumps(m).encode() for m in messages))
+        with write_lock:
+            sys.stdout.buffer.write(data)
+            sys.stdout.buffer.flush()
+        return
     write(sys.stdout.buffer, value)
 
 
@@ -183,6 +206,12 @@ while True:
                 time.sleep(0.01)
     elif command in ("launch", "attach"):
         launch_count += 1
+        if options.mode == "startup-preinitialized":
+            continue
+        if options.mode == "startup-postconfig-retry":
+            deferred = request
+            event("initialized")
+            continue
         if options.mode in ("startup-timeout", "startup-no-configuration") and launch_count == 1:
             continue
         if options.mode == "startup-config" and launch_count == 1:
@@ -193,6 +222,11 @@ while True:
             event("process", dict(systemProcessId=os.getpid(), name="test-target-evidence", isLocalProcess=True))
             event("initialized")
             event("stopped", dict(reason="breakpoint", threadId=7, allThreadsStopped=True))
+            continue
+        if options.mode == "startup-failed-evidence" and launch_count == 1:
+            event("process", dict(systemProcessId=os.getpid(), name="test-target-evidence", isLocalProcess=True))
+            event("stopped", dict(reason="breakpoint", threadId=7, allThreadsStopped=True))
+            response(request, success=False, message="Startup failed after target evidence")
             continue
         if options.mode == "startup-failure" and launch_count == 1:
             response(request, success=False, message="Explicit startup rejection")
@@ -207,8 +241,15 @@ while True:
         response(request)
         if options.mode == "startup-config":
             response(deferred)
-        event("stopped", dict(reason="breakpoint", threadId=7, allThreadsStopped=options.mode != "refused-control"))
+        if options.mode == "startup-postconfig-retry" and launch_count == 1:
+            response(deferred, success=False, message="Explicit failure after configuration")
+            continue
+        event("stopped", dict(reason="breakpoint", threadId=(1 << 40) + 7 if options.mode == "wide-threads" else 7,
+                              allThreadsStopped=options.mode != "refused-control"))
     elif command == "stackTrace":
+        if options.mode == "wide-threads" and args["threadId"] != (1 << 40) + 7:
+            response(request, success=False, message="Native thread identity truncated")
+            continue
         response(request, dict(totalFrames=2, stackFrames=[dict(id=1, name="native", line=3, column=1,
                                                                instructionPointerReference="0x1000",
                                                                source=dict(name="native.c", sourceReference=1)),
@@ -252,7 +293,7 @@ while True:
         event("continued", dict(threadId=7, allThreadsContinued=True))
         event("stopped", dict(reason="step", threadId=7, allThreadsStopped=True))
     elif command == "threads":
-        response(request, dict(threads=[dict(id=7, name="Native")]))
+        response(request, dict(threads=[dict(id=(1 << 40) + 7 if options.mode == "wide-threads" else 7, name="Native")]))
     elif command == "evaluate":
         if options.mode == "selected-repl":
             response(request, dict(result=str(selected_frame), variablesReference=0))

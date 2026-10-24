@@ -85,6 +85,8 @@ internal sealed class WindowsNativeSymbols : IDisposable
                         hasSource ? location.LineNumber : 0, hasSource ? 1 : 0,
                         PresentationHint: hasSource ? null : "subtle"));
                 }
+                if (result.Count == 0)
+                    throw new DebuggerException("DbgHelp could not unwind the stopped native thread.");
                 return result;
             }
             finally { Check(CloseHandle(thread), "CloseHandle"); }

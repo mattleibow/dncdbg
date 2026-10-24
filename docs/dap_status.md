@@ -43,7 +43,7 @@ None is implied by passing a native-only baseline.
 | Approach | Public surface and restrictions | Decision |
 | --- | --- | --- |
 | Direct ICorDebug interop | `SetUnmanagedHandler`, `DebugActiveProcess(pid, true)`, `ICorDebugUnmanagedCallback`, `ICorDebugProcess2.SetUnmanagedBreakpoint`/`ClearUnmanagedBreakpoint`, and native thread contexts. Runtime interop is compiled for **Windows x86, x64 and arm64**, not Unix. An unmanaged callback is initially OS-stopped, not necessarily CLR-synchronized; out-of-band callbacks require special continuation discipline. | Windows-only proof first; do not just flip `win32Attach` in the managed engine. |
-| DbgEng / WinDbg | Documented Windows execution control, native symbols/stacks/threads. The public `Microsoft.Debugging.Platform.DbgEng` NuGet package describes redistributable debugger DLLs, headers and libraries, but has Microsoft-specific license terms, not an open-source engine license. A managed wrapper does not relicense its native engine. Two independent Win32 debugger owners cannot simply attach concurrently. | Public option, but no package or debugger binary added. Prefer the runtime's existing interop controller for the first Windows proof. |
+| DbgEng / WinDbg | Documented Windows execution control, native symbols/stacks/threads. The public `Microsoft.Debugging.Platform.DbgEng` NuGet package describes redistributable debugger DLLs, headers and libraries; its [license metadata](https://www.nuget.org/packages/Microsoft.Debugging.Platform.DbgEng/20260319.1511.0/License) points to the [Microsoft Windows SDK license](https://aka.ms/WinSDKLicenseURL), not an open-source engine license. A managed wrapper does not relicense its native engine. Two independent Win32 debugger owners cannot simply attach concurrently. | Public API option, but no package or debugger binary added or redistributed. Prefer the runtime's existing interop controller for the first Windows proof. |
 | LLDB SB API embedding | Public native execution controller, C/C++ symbols and typed SB APIs. Requires matching native libraries, process/debugserver components, signing/permissions, and potentially a matching Python distribution. It does not itself supply ICorDebug mixed-mode synchronization or C# source support. | More in-process ABI/distribution coupling than a subprocess proof; rejected for the initial slice. |
 | LLDB / `lldb-dap` subprocess | Public native debugger and DAP interface; toolchain-supplied or upstream LLVM binaries. `lldb-server`/debugserver provide the native process transport, not managed debugging. | Native-only baseline works on this host. Concurrent ICorDebug/LLDB control fails the macOS transition probe; not enabled in production. Linux is unproven, not inferred from macOS. |
 | DAP multiplexer | Can route requests and translate handles/events, but cannot fix OS stop ownership, runtime helper-thread starvation, exception-port conflicts, or synthesize merged stacks. Requires explicit stop ownership, capability intersection, ID lifetimes, and coordinated lifecycle. | Do not implement a protocol facade over a failing engine baseline. |
@@ -119,6 +119,15 @@ corrupted the result and failed the `42` assertion. Neither assertion was
 weakened. The working baseline restores the opcode and instruction pointer.
 The DNCDbg DAP test was also run before implementation and failed with
 `Unsupported request 'dotnet/setNativeBreakpoint'`.
+
+The native-stop termination probe additionally proved that a raw OS stop must
+first be CLR-synchronized (`ICorDebugController.Stop`), followed by
+`ICorDebugController.Terminate`. Terminating an unsynchronized raw stop returns
+`CORDBG_E_PROCESS_NOT_SYNCHRONIZED`; killing the OS process without continuing its
+outstanding debug event stalled the adapter lifecycle test. The production path
+therefore uses the synchronized CLR termination path, not a kill-only shortcut.
+See the [documented termination contract](https://learn.microsoft.com/dotnet/core/unmanaged-api/debugging/icordebug/icordebugcontroller-terminate-method)
+and [CoreCLR's native-event continuation during termination](https://github.com/dotnet/runtime/blob/v10.0.13/src/coreclr/debug/di/process.cpp#L3296-L3365).
 
 Next incremental slice: prove a native breakpoint rearm plus a managed/native
 transition stepper on Windows x64, including an unoptimized and optimized DLL,

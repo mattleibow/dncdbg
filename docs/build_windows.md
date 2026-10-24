@@ -125,6 +125,8 @@ dotnet run --project tests/DncDbg.MixedModeTests/WindowsProof -- `
   build/validation/mixed-mode/fixture/Fixture.dll tests/DncDbg.MixedModeTests/fixture
 dotnet run --project tests/DncDbg.MixedModeTests/WindowsProof -- `
   build/validation/mixed-mode/fixture/Fixture.dll tests/DncDbg.MixedModeTests/fixture --attach
+dotnet run --project tests/DncDbg.MixedModeTests/WindowsProof -- `
+  build/validation/mixed-mode/fixture/Fixture.dll tests/DncDbg.MixedModeTests/fixture --terminate-native
 
 dotnet publish src/DncDbg.Dap -c Release -o bin
 python tests/DncDbg.MixedModeTests/run.py --windows-engine --adapter bin/dncdbg-dap.exe
@@ -140,8 +142,11 @@ fixture waits on an explicit release file, not a race against a sleep.
 The DNCDbg DAP harness verifies managed -> native -> managed continuation, exact
 source/stack/breakpoint-ID shapes, result `42`, one-shot behavior on a second
 native call, rejected unsupported operations, and normal/terminate/disconnect
-cleanup. It checks that the target has actually exited, not just that a response
-was sent.
+and EOF cleanup. It checks that the target has actually exited, not just that a
+response was sent. Native shutdown first synchronizes the raw OS stop with the
+CLR and then uses public ICorDebug termination, which continues outstanding
+native events. Killing a still-debug-stopped process alone cannot complete
+Windows termination.
 
 The branch-scoped
 [public proof workflow](../.github/workflows/mixed-mode-proof.yml) preserves full

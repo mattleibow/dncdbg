@@ -68,7 +68,7 @@ public sealed partial class DebugEngine
             }
             IDisposable operation;
             try { operation = _lifetime.Enter(); }
-            catch (OperationCanceledException) { KillProcess(); return; }
+            catch (OperationCanceledException) { _ = Task.Run(Terminate); return; }
             _ = Task.Run(() =>
             {
                 using (operation)
@@ -79,7 +79,7 @@ public sealed partial class DebugEngine
                     {
                         if (_shuttingDown || _terminating)
                         {
-                            KillProcess();
+                            _ = Task.Run(Terminate);
                             return;
                         }
                         stop = HandleNativeEvent(process, native);
@@ -143,7 +143,7 @@ public sealed partial class DebugEngine
         finally
         {
             if (!_processExited)
-                KillProcess();
+                _ = Task.Run(Terminate);
         }
     }
 

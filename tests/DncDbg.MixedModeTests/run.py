@@ -137,8 +137,9 @@ def build():
     OUT.mkdir(parents=True, exist_ok=True)
     subprocess.run(["dotnet", "build", str(FIXTURE / "Fixture.csproj"), "-o", str(DLL.parent),
                     "--nologo", "-v", "quiet"], check=True)
-    subprocess.run(["cmake", "-S", str(FIXTURE), "-B", str(OUT / "native"),
-                    "-DCMAKE_BUILD_TYPE=Debug"], check=True)
+    configure = ["cmake", "-S", str(FIXTURE), "-B", str(OUT / "native")]
+    configure += ["-A", "x64"] if sys.platform == "win32" else ["-DCMAKE_BUILD_TYPE=Debug"]
+    subprocess.run(configure, check=True)
     subprocess.run(["cmake", "--build", str(OUT / "native"), "--config", "Debug"], check=True)
     candidates = [p for p in (OUT / "native").rglob("*mixedfixture*")
                   if p.suffix in (".dylib", ".so", ".dll")]
@@ -286,7 +287,7 @@ def windows_engine(adapter, finish):
             session.request("disconnect")
         elif finish == "terminate":
             session.request("terminate")
-            session.event("exited")
+            check(session.event("exited")["exitCode"] == -1, "Native termination exit code")
             session.request("disconnect")
         elif finish == "disconnect":
             session.request("disconnect", dict(terminateDebuggee=True))

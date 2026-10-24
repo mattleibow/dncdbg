@@ -587,6 +587,7 @@ public sealed partial class DebugEngine : IDisposable
         lock (_lock)
         {
             _processExited = true;
+            _nativeStoppedThread = 0;
             _stopped = false;
             Monitor.PulseAll(_lock);
         }
@@ -612,17 +613,6 @@ public sealed partial class DebugEngine : IDisposable
 
     public void Terminate()
     {
-        if (NativeDebugging)
-        {
-            lock (_lock)
-            {
-                if (_relinquished || _processExited || _processId == 0 || _terminating)
-                    return;
-                _terminating = true;
-            }
-            KillProcess();
-            return;
-        }
         bool viaCorDebug = false;
         lock (_lock)
         {
@@ -636,7 +626,9 @@ public sealed partial class DebugEngine : IDisposable
             {
                 try
                 {
-                    if (!_stopped)
+                    // An OS-native stop is not yet a CLR-synchronized stop. Terminate then
+                    // continues the outstanding native event so Windows can finish exiting.
+                    if (!_stopped || IsNativeStopped)
                         Synchronize(_process);
                     _process.Terminate(TerminatedExitCode);
                     viaCorDebug = true;

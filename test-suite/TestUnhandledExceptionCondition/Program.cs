@@ -21,8 +21,8 @@ class Program
                 Context.Initialize(@"__FILE__:__LINE__");
                 Context.AddBreakpoint(@"__FILE__:__LINE__", "after_caught");
                 Context.SetBreakpoints(@"__FILE__:__LINE__");
-                Context.AddExceptionBreakpointFilterAllWithOptions("!System.InvalidOperationException");
-                Context.AddExceptionBreakpointFilterUserUnhandledWithOptions("!System.InvalidOperationException");
+                Context.AddExceptionBreakpointFilterAllWithConditions("!System.InvalidOperationException");
+                Context.AddExceptionBreakpointFilterUserUnhandledWithConditions("!System.InvalidOperationException");
                 Context.SetExceptionBreakpoints(@"__FILE__:__LINE__");
                 Context.ConfigurationDone(@"__FILE__:__LINE__");
                 Context.Launch(@"__FILE__:__LINE__", JMC: true);

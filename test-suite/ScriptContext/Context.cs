@@ -1175,11 +1175,11 @@ partial class Context
         ExceptionFilterAll = true;
     }
 
-    public void AddExceptionBreakpointFilterAllWithOptions(string options)
+    public void AddExceptionBreakpointFilterAllWithConditions(string conditions)
     {
         ExceptionFilterAllOptions = new ExceptionFilterOptions();
         ExceptionFilterAllOptions.filterId = "all";
-        ExceptionFilterAllOptions.condition = options;
+        ExceptionFilterAllOptions.condition = conditions;
     }
 
     public void AddExceptionBreakpointFilterUserUnhandled()
@@ -1187,18 +1187,18 @@ partial class Context
         ExceptionFilterUserUnhandled = true;
     }
 
-    public void AddExceptionBreakpointFilterUserUnhandledWithOptions(string options)
+    public void AddExceptionBreakpointFilterUserUnhandledWithConditions(string conditions)
     {
         ExceptionFilterUserUnhandledOptions = new ExceptionFilterOptions();
         ExceptionFilterUserUnhandledOptions.filterId = "user-unhandled";
-        ExceptionFilterUserUnhandledOptions.condition = options;
+        ExceptionFilterUserUnhandledOptions.condition = conditions;
     }
 
-    public void AddExceptionBreakpointFilterUnhandledWithOptions(string options)
+    public void AddExceptionBreakpointFilterUnhandledWithConditions(string conditions)
     {
         ExceptionFilterUnhandledOptions = new ExceptionFilterOptions();
         ExceptionFilterUnhandledOptions.filterId = "unhandled";
-        ExceptionFilterUnhandledOptions.condition = options;
+        ExceptionFilterUnhandledOptions.condition = conditions;
     }
 
     public void ResetExceptionBreakpoints()

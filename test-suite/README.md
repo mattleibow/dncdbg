@@ -80,15 +80,20 @@ These tests preserve observable native behavior, not assumptions about DAP synta
 | `TestContinueResponse` | The continue response body contains a Boolean `allThreadsContinued`: `true` for explicit `singleThread:false` and for an omitted `singleThread`, and `false` for `singleThread:true`. This tests the response, not multi-thread scheduling. All threads are resumed before process shutdown. |
 | `TestUnhandledExceptionCondition` | With `!System.InvalidOperationException` on `all` and `user-unhandled`, a caught exception does not stop execution. An uncaught exception of the same type still stops at the throw line, with `exceptionInfo.breakMode == "unhandled"`, `exceptionId == "CLR/System.InvalidOperationException"`, and the matching full type name. These two filters do not suppress the final unhandled stop. |
 | `TestExceptionConditionMatching` | Thirty-seven cases cover per-token negation, negative-only conditions, positive/negative order, exclusion priority, ignored lone `!`, empty conditions, additive unconditional entries, duplicate filter options, comma/ASCII-whitespace separators, and wildcard prefixes. Wildcard cases include `*`, `!*`, positive/negative prefix conflicts across entries, ordinal case sensitivity, duplicate prefixes, zero-length suffixes, and literal internal/repeated asterisks and `?`. Every stop and its exact exception details/source line is collected before comparing the complete matrix. |
+| `TestExceptionWildcardCondition` | The unchanged upstream fixture checks `*`, `System.*`, `!System.Null*, *`, broader negated prefixes overriding specific positive prefixes, and `!*` overriding a positive prefix. Exact exception source/type/break-mode assertions and both source-breakpoint checkpoints are preserved. |
 | `TestUnhandledExceptionFilter` | Eighteen sessions cover the default unhandled stop, nonmatching positive conditions, matching/nonmatching exact and prefix exclusions, conflicting conditions in both orders, unconditional entries, lone `!`, and `!*`. Upstream scenarios include an exact nonmatching `!System.Exception` (no base-type matching) and a thrown stop followed by a suppressed final stop. Observed unhandled stops are continued through actual process exit rather than terminated by the test. Suppressed final stops require a nonzero exit code and both exited/terminated events. |
-| `TestInnerExceptionLimit` | Preserve the upstream 65-node fixture's default first/last inner messages (`level 62`/`level 31`) and assert every node's type/message plus the exact 32-inner cutoff. Eighteen additional launch/attach sessions prove zero, small and unsigned-maximum limits, invalid/overflow fallback, native numeric-prefix parsing, request overrides and reset to the default. Fully populated terminal nodes are required without empty placeholders. |
+| `TestInnerExceptionLimit` | Preserve the upstream 65-node fixture's default first/last inner messages (`level 62`/`level 31`) and assert every node's type/message plus the exact 32-inner cutoff. Twenty additional launch/attach sessions prove zero, small and unsigned-maximum limits, invalid/overflow fallback, native numeric-prefix parsing, request overrides and reset to the default. These include the upstream 50-inner cutoff (`level 62`/`level 13`) and limit 100 exposing the complete finite chain (`level 62`/`innermost`). Fully populated terminal nodes are required without empty placeholders. |
 
 These are bounded scenarios, not full coverage of hit conditions or exception handling.
 The exception-condition matrices and updated upstream exception/stack-trace
-fixtures are proven against upstream native `3276ed04`; the historical native
+fixtures are proven against the native reference built from `3276ed04`, whose
+production/build inputs are unchanged through upstream `bd26edcf`. This is not
+a rebuilt `bd26edcf` binary. The historical native
 checkpoint predates per-type negation, wildcard prefixes, and the configurable
 `unhandled` filter. See [exception conditions](../docs/exception_conditions.md)
 for the supported syntax.
+Exception-filter helpers use the upstream `WithConditions` naming; DAP
+`filterOptions` remains the protocol field name.
 `TestFormatSpecifiersAc` also verifies that a loaded type without a static
 constructor can expose its default static field with implicit evaluation
 disabled, alongside its existing initialized/uninitialized constructor checks.

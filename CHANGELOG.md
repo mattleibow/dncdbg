@@ -12,6 +12,7 @@ Upcoming changes compared to the previous version.
 - Added `supportsReadMemoryRequest` and `supportsWriteMemoryRequest` support in Capabilities.
 
 #### Added
+- Added the upstream `TestExceptionWildcardCondition` project, 50/100 inner-limit assertions, and `WithConditions` test-helper naming. Existing broader parity matrices are retained.
 - Added native-proven `TestInnerExceptionLimit` coverage and strengthened unhandled-exception exit assertions. Acceptance projects remain automatically discovered, including Windows Forms-only detection.
 - Added native-proven `TestExceptionConditionMatching` and `TestUnhandledExceptionFilter` acceptance coverage.
 - Added debugger configuration environment variable `DNCDBG_PDB_MMAP_POLICY`.

@@ -46,7 +46,13 @@ Command A (canary pipe inheritance + cross-stream splicing + DAP fallback stderr
   no-cli-version-malformed-flood TIMED OUT (RED: hung past 7s)
   version-leader-changes-pgid TIMED OUT (RED: hung past 7s)
 
-5. Post-fix GREEN:
+5. Pre-fix RED at 92747c117a795d2baf29b4f4fceb541b4a1710ca (partial-pipe EMFILE and spawn-failure client pipe descriptor leak):
+Command:
+  dotnet run --project tests/DncDbg.NativeTests -c Release -- "$(command -v python3)" "$PWD/tests/DncDbg.MixedModeTests/fake_native_adapter.py" version-probe-descriptors
+Output:
+  Unhandled exception. System.InvalidOperationException: Partial pipe construction failure leaked descriptors without GC: 125 -> 145.
+
+6. Post-fix GREEN:
 Command:
   dotnet run --project tests/DncDbg.NativeTests -c Release -- "$(command -v python3)" "$PWD/tests/DncDbg.MixedModeTests/fake_native_adapter.py" version-probe-descriptors
   python3 -c "import runpy; n=runpy.run_path('tests/DncDbg.MixedModeTests/proxy_contracts.py'); n['version_pipe_inheritance_contract']('bin/dncdbg-dap'); n['version_stdin_contract']('bin/dncdbg-dap')"
@@ -70,8 +76,9 @@ Output:
   PASS cross-stream version token splicing is rejected: version-splice-stderr-stdout
   PASS independent stream version is preserved alongside opposite stream output: version-stdout-no-newline-stderr-diagnostic
   PASS independent stream version is preserved alongside opposite stream output: version-stderr-no-newline-stdout-diagnostic
-  PASS Unix version probe kills and reaps hung leader even after setpgid
+  PASS Unix version probe kills direct leader after setpgid without signaling caller PGID (escaped helper limitation proven)
   PASS version discovery cannot read the frontend's DAP stdin
+
 
 
 

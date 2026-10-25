@@ -73,7 +73,9 @@ if options.version:
             os.setpgid(0, os.getpgid(os.getppid()))
         except OSError:
             pass
-        options.barrier.with_suffix(".pid").write_text(str(os.getpid()))
+        escaped = subprocess.Popen([sys.executable, __file__, "--target-gate", str(options.barrier)],
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        options.barrier.with_suffix(".pid").write_text(f"{os.getpid()} {escaped.pid}")
         while not options.barrier.exists():
             time.sleep(0.02)
         sys.exit(0)

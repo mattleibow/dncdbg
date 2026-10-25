@@ -10,7 +10,7 @@ if (args.Length == 2 || args[2] == "version-probe-descriptors")
 {
     string directory = Path.GetFullPath($"build/validation/mixed-mode/probe-descriptors-{Environment.ProcessId}");
     Directory.CreateDirectory(directory);
-    string probePath, failProbePath, fastWrapperPath;
+    string probePath, failProbePath, fastWrapperPath, brokenSpawnPath;
     string[] probeArguments, failProbeArguments, fastWrapperArguments;
     string fastGate = Path.Combine(directory, "fast-wrapper.release");
     string fastPidFile = Path.ChangeExtension(fastGate, ".pid");
@@ -20,6 +20,8 @@ if (args.Length == 2 || args[2] == "version-probe-descriptors")
         probeArguments = ["/c", "echo lldb version 21.1.8 & rem"];
         failProbePath = probePath;
         failProbeArguments = ["/c", "exit /b 1 & rem"];
+        brokenSpawnPath = Path.Combine(directory, "broken-probe.exe");
+        File.WriteAllBytes(brokenSpawnPath, []);
         string fastScript = Path.Combine(directory, "lldb-dap-fast.cmd");
         File.WriteAllText(fastScript,
             $"@echo off\r\nstart /b \"\" \"{python}\" \"{fake}\" --record-pid --target-gate \"{fastGate}\"\r\necho lldb version 21.1.8\r\nexit /b 0\r\n");
@@ -36,6 +38,9 @@ if (args.Length == 2 || args[2] == "version-probe-descriptors")
         File.WriteAllText(failProbePath, "#!/bin/sh\nexit 1\n");
         File.SetUnixFileMode(failProbePath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         failProbeArguments = [];
+        brokenSpawnPath = Path.Combine(directory, "lldb-dap-broken-spawn");
+        File.WriteAllText(brokenSpawnPath, "#!/nonexistent-dncdbg-interpreter\n");
+        File.SetUnixFileMode(brokenSpawnPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         fastWrapperPath = Path.Combine(directory, "lldb-dap-fast");
         File.WriteAllText(fastWrapperPath,
             $"#!/bin/sh\n\"{python}\" \"{fake}\" --record-pid --target-gate \"{fastGate}\" &\necho 'lldb version 21.1.8'\nexit 0\n");
@@ -86,6 +91,42 @@ if (args.Length == 2 || args[2] == "version-probe-descriptors")
                     if (!threw)
                         throw new InvalidOperationException($"Failure probe {i} unexpectedly succeeded.");
                 }
+            }
+            for (int i = 0; i < 20; i++)
+            {
+                bool threw = false;
+                try { _ = NativeAdapterLocator.Resolve("lldb", brokenSpawnPath, []); }
+                catch (Exception error) when (error is ArgumentException or IOException) { threw = true; }
+                if (!threw)
+                    throw new InvalidOperationException("Broken spawn probe unexpectedly succeeded.");
+            }
+            if (!OperatingSystem.IsWindows() && originalLimit is { } savedLimit)
+            {
+                int beforeEmfile = OpenHandleCount();
+                for (int round = 0; round < 10; round++)
+                {
+                    int currentOpen = OpenHandleCount();
+                    var partialCap = new RLimit { Cur = (ulong)(currentOpen + 2), Max = savedLimit.Max };
+                    if (setrlimit(resource, ref partialCap) != 0)
+                        throw new InvalidOperationException($"setrlimit partial cap failed: {Marshal.GetLastPInvokeError()}");
+                    try
+                    {
+                        bool threw = false;
+                        try { _ = NativeAdapterLocator.Resolve("lldb", probePath, probeArguments); }
+                        catch (Exception error) when (error is ArgumentException or IOException) { threw = true; }
+                        if (!threw)
+                            throw new InvalidOperationException("Partial-pipe EMFILE probe unexpectedly succeeded.");
+                    }
+                    finally
+                    {
+                        var restoreCap = new RLimit { Cur = Math.Min(savedLimit.Max, (ulong)Math.Max(baseline + 64, 256)), Max = savedLimit.Max };
+                        _ = setrlimit(resource, ref restoreCap);
+                    }
+                }
+                int afterEmfile = OpenHandleCount();
+                if (afterEmfile != beforeEmfile)
+                    throw new InvalidOperationException(
+                        $"Partial pipe construction failure leaked descriptors without GC: {beforeEmfile} -> {afterEmfile}.");
             }
             (int Gen0, int Gen1, int Gen2) collectionsAfter = (GC.CollectionCount(0), GC.CollectionCount(1), GC.CollectionCount(2));
             if (collectionsAfter != collectionsBefore)

@@ -296,133 +296,82 @@ internal static class NativeAdapterLocator
         using SafeFileHandle job = CreateJobObjectW(IntPtr.Zero, null);
         if (job.IsInvalid)
             throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
-        SafeFileHandle stdinWrite, stdoutRead, stderrRead;
-        SafeProcessHandle processHandle;
-        lock (SpawnLock)
+        (SafeFileHandle? StdinWrite, SafeFileHandle StdoutRead, SafeFileHandle StderrRead, SafeProcessHandle ProcessHandle) spawned =
+            SpawnWindowsProbe(executable, arguments, job, redirectInput: true);
+        using SafeFileHandle stdinWrite = spawned.StdinWrite!;
+        using SafeFileHandle stdoutRead = spawned.StdoutRead;
+        using SafeFileHandle stderrRead = spawned.StderrRead;
+        using SafeProcessHandle processHandle = spawned.ProcessHandle;
+        uint pipeMode = 1; // PIPE_NOWAIT
+        _ = SetNamedPipeHandleState(stdinWrite, ref pipeMode, IntPtr.Zero, IntPtr.Zero);
+        try
         {
-            var security = new SecurityAttributes
-            {
-                nLength = Marshal.SizeOf<SecurityAttributes>(),
-                lpSecurityDescriptor = IntPtr.Zero,
-                bInheritHandle = 1,
-            };
-            if (!CreatePipe(out SafeFileHandle stdinRead, out stdinWrite, ref security, 65536))
-                throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
-            try
-            {
-                if (!SetHandleInformation(stdinWrite, 1, 0))
-                    throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
-                if (!CreatePipe(out stdoutRead, out SafeFileHandle stdoutWrite, ref security, 65536))
-                    throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
-                try
+            bool outComplete = false, errComplete = false, errOverflow = false;
+            return ExecuteBoundedDapProbe(
+                timer,
+                (frame, outBytes, errBytes, scratch) =>
                 {
-                    if (!SetHandleInformation(stdoutRead, 1, 0))
-                        throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
-                    if (!CreatePipe(out stderrRead, out SafeFileHandle stderrWrite, ref security, 65536))
-                        throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
-                    try
+                    int offset = 0;
+                    while (offset < frame.Length && timer.ElapsedMilliseconds < 5000)
                     {
-                        if (!SetHandleInformation(stderrRead, 1, 0))
-                            throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
-                        processHandle = StartWindowsProbeInJob(executable, arguments, job, stdinRead, stdoutWrite, stderrWrite);
-                    }
-                    catch
-                    {
-                        stderrRead.Dispose();
-                        throw;
-                    }
-                    finally { stderrWrite.Dispose(); }
-                }
-                catch
-                {
-                    stdoutRead.Dispose();
-                    throw;
-                }
-                finally { stdoutWrite.Dispose(); }
-            }
-            catch
-            {
-                stdinWrite.Dispose();
-                throw;
-            }
-            finally { stdinRead.Dispose(); }
-        }
-        using (stdinWrite)
-        using (stdoutRead)
-        using (stderrRead)
-        using (processHandle)
-        {
-            uint pipeMode = 1; // PIPE_NOWAIT
-            _ = SetNamedPipeHandleState(stdinWrite, ref pipeMode, IntPtr.Zero, IntPtr.Zero);
-            try
-            {
-                bool outComplete = false, errComplete = false, errOverflow = false;
-                return ExecuteBoundedDapProbe(
-                    timer,
-                    (frame, outBytes, errBytes, scratch) =>
-                    {
-                        int offset = 0;
-                        while (offset < frame.Length && timer.ElapsedMilliseconds < 5000)
+                        bool outOverflow = false;
+                        _ = DrainWindowsPipe(stdoutRead, outBytes, scratch, ref outComplete, ref outOverflow);
+                        _ = DrainWindowsPipe(stderrRead, errBytes, scratch, ref errComplete, ref errOverflow);
+                        if (outOverflow)
+                            throw new IOException("Native adapter DAP version probe exceeded output cap.");
+                        unsafe
                         {
-                            bool outOverflow = false;
-                            _ = DrainWindowsPipe(stdoutRead, outBytes, scratch, ref outComplete, ref outOverflow);
-                            _ = DrainWindowsPipe(stderrRead, errBytes, scratch, ref errComplete, ref errOverflow);
-                            if (outOverflow)
-                                throw new IOException("Native adapter DAP version probe exceeded output cap.");
-                            unsafe
+                            fixed (byte* ptr = &frame[offset])
                             {
-                                fixed (byte* ptr = &frame[offset])
+                                if (WriteFile(stdinWrite, (IntPtr)ptr, (uint)(frame.Length - offset), out uint written, IntPtr.Zero) && written > 0)
                                 {
-                                    if (WriteFile(stdinWrite, (IntPtr)ptr, (uint)(frame.Length - offset), out uint written, IntPtr.Zero) && written > 0)
-                                    {
-                                        offset += (int)written;
-                                        continue;
-                                    }
+                                    offset += (int)written;
+                                    continue;
                                 }
                             }
-                            int error = Marshal.GetLastPInvokeError();
-                            if (error is not (0 or 232)) // ERROR_NO_DATA = 232 when PIPE_NOWAIT buffer is full
-                                throw new IOException("Cannot write DAP version probe request.", new System.ComponentModel.Win32Exception(error));
-                            _ = WaitForSingleObject(processHandle, (uint)Math.Clamp(5000 - (int)timer.ElapsedMilliseconds, 1, 10));
                         }
-                        if (offset < frame.Length)
-                            throw new TimeoutException("Native debugger DAP version probe timed out.");
-                    },
-                    (MemoryStream outBytes, MemoryStream errBytes, byte[] scratch, ref bool _, ref bool _, ref bool outOverflow, ref bool _) =>
-                        DrainWindowsPipe(stdoutRead, outBytes, scratch, ref outComplete, ref outOverflow)
-                        | DrainWindowsPipe(stderrRead, errBytes, scratch, ref errComplete, ref errOverflow),
-                    () => outComplete,
-                    waitMs => _ = WaitForSingleObject(processHandle, (uint)waitMs));
-            }
-            finally
-            {
-                _ = TerminateJobObject(job, 1);
-                _ = WaitForSingleObject(processHandle, 1000);
-                var cleanup = Stopwatch.StartNew();
-                while (cleanup.ElapsedMilliseconds < 1000
-                    && QueryInformationJobObject(job, 1, out var accounting,
-                        Marshal.SizeOf<JobObjectBasicAccountingInformation>(), IntPtr.Zero)
-                    && accounting.ActiveProcesses != 0)
-                    System.Threading.Thread.Sleep(10);
-            }
+                        int error = Marshal.GetLastPInvokeError();
+                        if (error is not (0 or 232)) // ERROR_NO_DATA = 232 when PIPE_NOWAIT buffer is full
+                            throw new IOException("Cannot write DAP version probe request.", new System.ComponentModel.Win32Exception(error));
+                        _ = WaitForSingleObject(processHandle, (uint)Math.Clamp(5000 - (int)timer.ElapsedMilliseconds, 1, 10));
+                    }
+                    if (offset < frame.Length)
+                        throw new TimeoutException("Native debugger DAP version probe timed out.");
+                },
+                (MemoryStream outBytes, MemoryStream errBytes, byte[] scratch, ref bool _, ref bool _, ref bool outOverflow, ref bool _) =>
+                    DrainWindowsPipe(stdoutRead, outBytes, scratch, ref outComplete, ref outOverflow)
+                    | DrainWindowsPipe(stderrRead, errBytes, scratch, ref errComplete, ref errOverflow),
+                () => outComplete,
+                waitMs => _ = WaitForSingleObject(processHandle, (uint)waitMs));
+        }
+        finally
+        {
+            _ = TerminateJobObject(job, 1);
+            _ = WaitForSingleObject(processHandle, 1000);
+            var cleanup = Stopwatch.StartNew();
+            while (cleanup.ElapsedMilliseconds < 1000
+                && QueryInformationJobObject(job, 1, out var accounting,
+                    Marshal.SizeOf<JobObjectBasicAccountingInformation>(), IntPtr.Zero)
+                && accounting.ActiveProcesses != 0)
+                System.Threading.Thread.Sleep(10);
         }
     }
 
     private static string ProbeDapVersionUnix(string executable, string[] arguments)
     {
         var timer = Stopwatch.StartNew();
-        System.IO.Pipes.AnonymousPipeServerStream stdin, stdout, stderr;
+        System.IO.Pipes.AnonymousPipeServerStream? stdin = null, stdout = null, stderr = null;
         int pid;
         lock (SpawnLock)
         {
-            stdin = new System.IO.Pipes.AnonymousPipeServerStream(
-                System.IO.Pipes.PipeDirection.Out, HandleInheritability.None);
-            stdout = new System.IO.Pipes.AnonymousPipeServerStream(
-                System.IO.Pipes.PipeDirection.In, HandleInheritability.None);
-            stderr = new System.IO.Pipes.AnonymousPipeServerStream(
-                System.IO.Pipes.PipeDirection.In, HandleInheritability.None);
             try
             {
+                stdin = new System.IO.Pipes.AnonymousPipeServerStream(
+                    System.IO.Pipes.PipeDirection.Out, HandleInheritability.None);
+                stdout = new System.IO.Pipes.AnonymousPipeServerStream(
+                    System.IO.Pipes.PipeDirection.In, HandleInheritability.None);
+                stderr = new System.IO.Pipes.AnonymousPipeServerStream(
+                    System.IO.Pipes.PipeDirection.In, HandleInheritability.None);
                 int inFd = stdin.ClientSafePipeHandle.DangerousGetHandle().ToInt32();
                 int outFd = stdout.ClientSafePipeHandle.DangerousGetHandle().ToInt32();
                 int errFd = stderr.ClientSafePipeHandle.DangerousGetHandle().ToInt32();
@@ -433,9 +382,9 @@ internal static class NativeAdapterLocator
             }
             catch
             {
-                stdin.Dispose();
-                stdout.Dispose();
-                stderr.Dispose();
+                DisposeUnixPipe(stdin);
+                DisposeUnixPipe(stdout);
+                DisposeUnixPipe(stderr);
                 throw;
             }
         }
@@ -551,11 +500,57 @@ internal static class NativeAdapterLocator
                 ? RunWindows(executable, arguments)
                 : RunUnix(executable, arguments);
         }
-        catch (System.ComponentModel.Win32Exception error)
+        catch (Exception error) when (error is System.ComponentModel.Win32Exception or IOException)
         { throw new ArgumentException("Error: Cannot execute native debugger: " + error.Message, error); }
     }
 
     private const int MaxProbeOutputBytes = 64 * 1024;
+
+    private static (SafeFileHandle? StdinWrite, SafeFileHandle StdoutRead, SafeFileHandle StderrRead, SafeProcessHandle ProcessHandle)
+        SpawnWindowsProbe(string executable, string[] arguments, SafeFileHandle job, bool redirectInput)
+    {
+        SafeFileHandle? stdinRead = null, stdinWrite = null, stdoutRead = null, stdoutWrite = null, stderrRead = null, stderrWrite = null;
+        lock (SpawnLock)
+        {
+            try
+            {
+                var security = new SecurityAttributes
+                {
+                    nLength = Marshal.SizeOf<SecurityAttributes>(),
+                    lpSecurityDescriptor = IntPtr.Zero,
+                    bInheritHandle = 1,
+                };
+                if (!CreatePipe(out stdinRead, out stdinWrite, ref security, 65536)
+                    || !SetHandleInformation(stdinWrite, 1, 0)
+                    || !CreatePipe(out stdoutRead, out stdoutWrite, ref security, 65536)
+                    || !SetHandleInformation(stdoutRead, 1, 0)
+                    || !CreatePipe(out stderrRead, out stderrWrite, ref security, 65536)
+                    || !SetHandleInformation(stderrRead, 1, 0))
+                    throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
+                if (!redirectInput)
+                {
+                    stdinWrite.Dispose();
+                    stdinWrite = null;
+                }
+                SafeProcessHandle processHandle = StartWindowsProbeInJob(
+                    executable, arguments, job, stdinRead, stdoutWrite, stderrWrite);
+                return (stdinWrite, stdoutRead, stderrRead, processHandle);
+            }
+            catch
+            {
+                stdinWrite?.Dispose();
+                stdoutRead?.Dispose();
+                stderrRead?.Dispose();
+                throw;
+            }
+            finally
+            {
+                stdinRead?.Dispose();
+                stdoutWrite?.Dispose();
+                stderrWrite?.Dispose();
+            }
+        }
+    }
 
     private static SafeProcessHandle StartWindowsProbeInJob(string executable, string[] arguments, SafeFileHandle job,
         SafeFileHandle stdinRead, SafeFileHandle stdoutWrite, SafeFileHandle stderrWrite)
@@ -628,53 +623,8 @@ internal static class NativeAdapterLocator
         using SafeFileHandle job = CreateJobObjectW(IntPtr.Zero, null);
         if (job.IsInvalid)
             throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
-        SafeFileHandle stdoutRead, stderrRead;
-        SafeProcessHandle processHandle;
-        lock (SpawnLock)
-        {
-            var security = new SecurityAttributes
-            {
-                nLength = Marshal.SizeOf<SecurityAttributes>(),
-                lpSecurityDescriptor = IntPtr.Zero,
-                bInheritHandle = 1,
-            };
-            if (!CreatePipe(out SafeFileHandle stdinRead, out SafeFileHandle stdinWrite, ref security, 0))
-                throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
-            try
-            {
-                if (!SetHandleInformation(stdinWrite, 1, 0))
-                    throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
-                stdinWrite.Dispose();
-                if (!CreatePipe(out stdoutRead, out SafeFileHandle stdoutWrite, ref security, 0))
-                    throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
-                try
-                {
-                    if (!SetHandleInformation(stdoutRead, 1, 0))
-                        throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
-                    if (!CreatePipe(out stderrRead, out SafeFileHandle stderrWrite, ref security, 0))
-                        throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
-                    try
-                    {
-                        if (!SetHandleInformation(stderrRead, 1, 0))
-                            throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
-                        processHandle = StartWindowsProbeInJob(executable, arguments, job, stdinRead, stdoutWrite, stderrWrite);
-                    }
-                    catch
-                    {
-                        stderrRead.Dispose();
-                        throw;
-                    }
-                    finally { stderrWrite.Dispose(); }
-                }
-                catch
-                {
-                    stdoutRead.Dispose();
-                    throw;
-                }
-                finally { stdoutWrite.Dispose(); }
-            }
-            finally { stdinRead.Dispose(); }
-        }
+        (SafeFileHandle? _, SafeFileHandle stdoutRead, SafeFileHandle stderrRead, SafeProcessHandle processHandle) =
+            SpawnWindowsProbe(executable, arguments, job, redirectInput: false);
         using (stdoutRead)
         using (stderrRead)
         using (processHandle)
@@ -828,16 +778,16 @@ internal static class NativeAdapterLocator
 
     private static (int ExitCode, string Stdout, string Stderr, bool Complete) RunUnix(string executable, string[] arguments)
     {
-        System.IO.Pipes.AnonymousPipeServerStream stdout, stderr;
+        System.IO.Pipes.AnonymousPipeServerStream? stdout = null, stderr = null;
         int pid;
         lock (SpawnLock)
         {
-            stdout = new System.IO.Pipes.AnonymousPipeServerStream(
-                System.IO.Pipes.PipeDirection.In, HandleInheritability.None);
-            stderr = new System.IO.Pipes.AnonymousPipeServerStream(
-                System.IO.Pipes.PipeDirection.In, HandleInheritability.None);
             try
             {
+                stdout = new System.IO.Pipes.AnonymousPipeServerStream(
+                    System.IO.Pipes.PipeDirection.In, HandleInheritability.None);
+                stderr = new System.IO.Pipes.AnonymousPipeServerStream(
+                    System.IO.Pipes.PipeDirection.In, HandleInheritability.None);
                 using SafeFileHandle devNull = File.OpenHandle("/dev/null", FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
                 int inFd = devNull.DangerousGetHandle().ToInt32();
                 int outFd = stdout.ClientSafePipeHandle.DangerousGetHandle().ToInt32();
@@ -848,8 +798,8 @@ internal static class NativeAdapterLocator
             }
             catch
             {
-                stdout.Dispose();
-                stderr.Dispose();
+                DisposeUnixPipe(stdout);
+                DisposeUnixPipe(stderr);
                 throw;
             }
         }
@@ -1047,6 +997,14 @@ internal static class NativeAdapterLocator
         if (result == 0 && span.IndexOfAnyExcept((byte)0) >= 0)
             return true;
         return result < 0 && Marshal.GetLastPInvokeError() != 4;
+    }
+
+    private static void DisposeUnixPipe(System.IO.Pipes.AnonymousPipeServerStream? pipe)
+    {
+        if (pipe == null)
+            return;
+        try { pipe.DisposeLocalCopyOfClientHandle(); } catch (Exception) { }
+        try { pipe.Dispose(); } catch (Exception) { }
     }
 
     private static void CleanupUnixProbe(int pid, ref bool reaped, ref int status)

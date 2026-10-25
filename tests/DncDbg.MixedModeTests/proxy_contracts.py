@@ -491,13 +491,14 @@ def version_pipe_inheritance_contract(adapter):
         gate.unlink(missing_ok=True)
         pid_file.unlink(missing_ok=True)
         leader_pid = None
+        escaped_pid = None
         try:
             started = time.monotonic()
             probe = subprocess.run([adapter, *arguments("lldb", "version-leader-changes-pgid", barrier=gate),
                                     "--native-debugger-info"], capture_output=True, text=True, timeout=8)
             elapsed = time.monotonic() - started
-            check(pid_file.exists(), "version-leader-changes-pgid did not record leader PID")
-            leader_pid = int(pid_file.read_text().strip())
+            check(pid_file.exists(), "version-leader-changes-pgid did not record leader and escaped helper PIDs")
+            leader_pid, escaped_pid = (int(token) for token in pid_file.read_text().strip().split())
             check(elapsed < 7 and probe.returncode != 0,
                   f"version-leader-changes-pgid did not fail within deadline: {elapsed:.2f}s, rc={probe.returncode}")
             deadline = time.monotonic() + 2
@@ -506,17 +507,20 @@ def version_pipe_inheritance_contract(adapter):
                       f"Probe leader {leader_pid} that changed PGID survived cleanup")
                 time.sleep(0.01)
             leader_pid = None
+            check(integration["alive"](escaped_pid),
+                  "Escaped helper in parent PGID did not demonstrate the documented Unix group-containment boundary")
         finally:
             gate.write_text("release")
-            if leader_pid and integration["alive"](leader_pid):
-                try:
-                    os.kill(leader_pid, getattr(signal, "SIGKILL", signal.SIGTERM))
-                except ProcessLookupError:
-                    pass
-                integration["exited"](leader_pid)
+            for pid in (leader_pid, escaped_pid):
+                if pid and integration["alive"](pid):
+                    try:
+                        os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+                    except ProcessLookupError:
+                        pass
+                    integration["exited"](pid)
             gate.unlink(missing_ok=True)
             pid_file.unlink(missing_ok=True)
-        print("PASS Unix version probe kills and reaps hung leader even after setpgid", flush=True)
+        print("PASS Unix version probe kills direct leader after setpgid without signaling caller PGID (escaped helper limitation proven)", flush=True)
 
 
 def selected_frame_contract(adapter):

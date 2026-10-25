@@ -140,38 +140,47 @@ internal static class NativeAdapterLocator
     internal static string? ParseVersion(string text)
     {
         // Xcode reports an LLVM adapter version and a different liblldb version; DAP reports the latter.
-        string[] tokens = text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
-            .Select(TrimTokenPunctuation)
-            .Where(t => t.Length > 0)
+        string[][] lines = text.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+            .Select(line => line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
+                .Select(TrimTokenPunctuation)
+                .Where(t => t.Length > 0)
+                .ToArray())
+            .Where(tokens => tokens.Length > 0)
             .ToArray();
 
-        for (int i = 0; i < tokens.Length; i++)
+        foreach (string[] tokens in lines)
         {
-            if (tokens[i].Equals("lldb", StringComparison.OrdinalIgnoreCase)
-                && i + 2 < tokens.Length
-                && tokens[i + 1].Equals("version", StringComparison.OrdinalIgnoreCase))
+            for (int i = 0; i < tokens.Length; i++)
             {
-                return TryParseWholeVersion(tokens[i + 2], out string? parsed) ? parsed : null;
-            }
-            string? hyphenSuffix = tokens[i].StartsWith("lldb-dap-", StringComparison.OrdinalIgnoreCase) ? tokens[i]["lldb-dap-".Length..]
-                : tokens[i].StartsWith("lldb-vscode-", StringComparison.OrdinalIgnoreCase) ? tokens[i]["lldb-vscode-".Length..]
-                : tokens[i].StartsWith("lldb-", StringComparison.OrdinalIgnoreCase) ? tokens[i]["lldb-".Length..]
-                : null;
-            if (hyphenSuffix is { Length: > 0 } && char.IsAsciiDigit(hyphenSuffix[0]))
-                return TryParseWholeVersion(hyphenSuffix, out string? parsed) ? parsed : null;
-        }
-
-        for (int i = 0; i + 2 < tokens.Length; i++)
-        {
-            if (tokens[i + 1].Equals("version", StringComparison.OrdinalIgnoreCase)
-                && (tokens[i].StartsWith("lldb", StringComparison.OrdinalIgnoreCase)
-                    || tokens[i].Equals("llvm", StringComparison.OrdinalIgnoreCase)))
-            {
-                return TryParseWholeVersion(tokens[i + 2], out string? parsed) ? parsed : null;
+                if (tokens[i].Equals("lldb", StringComparison.OrdinalIgnoreCase)
+                    && i + 2 < tokens.Length
+                    && tokens[i + 1].Equals("version", StringComparison.OrdinalIgnoreCase))
+                {
+                    return TryParseWholeVersion(tokens[i + 2], out string? parsed) ? parsed : null;
+                }
+                string? hyphenSuffix = tokens[i].StartsWith("lldb-dap-", StringComparison.OrdinalIgnoreCase) ? tokens[i]["lldb-dap-".Length..]
+                    : tokens[i].StartsWith("lldb-vscode-", StringComparison.OrdinalIgnoreCase) ? tokens[i]["lldb-vscode-".Length..]
+                    : tokens[i].StartsWith("lldb-", StringComparison.OrdinalIgnoreCase) ? tokens[i]["lldb-".Length..]
+                    : null;
+                if (hyphenSuffix is { Length: > 0 } && char.IsAsciiDigit(hyphenSuffix[0]))
+                    return TryParseWholeVersion(hyphenSuffix, out string? parsed) ? parsed : null;
             }
         }
 
-        return tokens.Length == 1 && TryParseWholeVersion(tokens[0], out string? standalone) ? standalone : null;
+        foreach (string[] tokens in lines)
+        {
+            for (int i = 0; i + 2 < tokens.Length; i++)
+            {
+                if (tokens[i + 1].Equals("version", StringComparison.OrdinalIgnoreCase)
+                    && (tokens[i].StartsWith("lldb", StringComparison.OrdinalIgnoreCase)
+                        || tokens[i].Equals("llvm", StringComparison.OrdinalIgnoreCase)))
+                {
+                    return TryParseWholeVersion(tokens[i + 2], out string? parsed) ? parsed : null;
+                }
+            }
+        }
+
+        return lines is [[string singleToken]] && TryParseWholeVersion(singleToken, out string? standalone) ? standalone : null;
     }
 
     private static string TrimTokenPunctuation(string token) =>

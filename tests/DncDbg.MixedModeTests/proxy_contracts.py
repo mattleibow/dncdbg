@@ -1488,8 +1488,12 @@ def orphan_target_contract(adapter, reverse=False, attached=False, detached=Fals
                 request("disconnect", dict(terminateDebuggee=False))
             elif reverse:
                 send("reverse")
-                length = header()
-                check(length > 8000000 and process.stdout.read(1) == b"{", "No admitted partial reverse request")
+                while True:
+                    length = header()
+                    if length > 8000000:
+                        break
+                    process.stdout.read(length)
+                check(process.stdout.read(1) == b"{", "No admitted partial reverse request")
             else:
                 request("die")
                 deadline = time.monotonic() + 5

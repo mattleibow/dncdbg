@@ -660,6 +660,8 @@ if (args.Length == 2 || args[2] == "version-probe-descriptors")
         if (NativeAdapterLocator.ParseVersion(invalidVersion) != null)
             throw new InvalidOperationException($"Malformed version token '{invalidVersion}' was accepted as valid.");
     if (NativeAdapterLocator.ParseVersion("lldb version 21.1.8") != "21.1.8"
+        || NativeAdapterLocator.ParseVersion("(lldb) version\nlldb version 18.1.3\n") != "18.1.3"
+        || NativeAdapterLocator.ParseVersion("(lldb) version\nlldb-2103.0.34.103\nApple Swift version 6.4\n") != "2103.0.34.103"
         || NativeAdapterLocator.ParseVersion("lldb version 21.0.0git (https://github.com/llvm/llvm-project.git)") != "21.0.0"
         || NativeAdapterLocator.ParseVersion("liblldb: lldb-2103.0.34.103") != "2103.0.34.103"
         || NativeAdapterLocator.ParseVersion("warning: lldb-python plugin unavailable\nlldb-dap version 21.1.8") != "21.1.8"

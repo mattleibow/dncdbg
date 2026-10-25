@@ -137,6 +137,8 @@ partial class Context
         attachRequest.arguments.processId = testProcess.Id;
 
         attachRequest.arguments.stopAtEntry = StopAtEntry;
+        if (env.Count != 0)
+            attachRequest.arguments.env = env;
 
         if (sourceFileMap.Count != 0)
         {
@@ -1229,6 +1231,8 @@ partial class Context
                     @"__FILE__:__LINE__" + "\n" + caller_trace);
     }
 
+    static readonly JsonSerializerSettings ExceptionInfoJsonSettings = new JsonSerializerSettings { MaxDepth = 512 };
+
     public void TestExceptionInfo(string caller_trace, string excCategory, string excMode, string excName)
     {
         ExceptionInfoRequest exceptionInfoRequest = new ExceptionInfoRequest();
@@ -1237,7 +1241,7 @@ partial class Context
         Assert.True(ret.Success, @"__FILE__:__LINE__" + "\n" + caller_trace);
 
         ExceptionInfoResponse exceptionInfoResponse =
-            JsonConvert.DeserializeObject<ExceptionInfoResponse>(ret.ResponseStr)!;
+            JsonConvert.DeserializeObject<ExceptionInfoResponse>(ret.ResponseStr, ExceptionInfoJsonSettings)!;
 
         Assert.Equal(excMode, exceptionInfoResponse.body.breakMode, @"__FILE__:__LINE__" + "\n" + caller_trace);
         Assert.Equal(excCategory + "/" + excName, exceptionInfoResponse.body.exceptionId, @"__FILE__:__LINE__" + "\n" + caller_trace);
@@ -1252,7 +1256,7 @@ partial class Context
         Assert.True(ret.Success, @"__FILE__:__LINE__" + "\n" + caller_trace);
 
         ExceptionInfoResponse exceptionInfoResponse =
-            JsonConvert.DeserializeObject<ExceptionInfoResponse>(ret.ResponseStr)!;
+            JsonConvert.DeserializeObject<ExceptionInfoResponse>(ret.ResponseStr, ExceptionInfoJsonSettings)!;
 
         ExceptionDetails exceptionDetails = exceptionInfoResponse.body.details!.innerException![0]!;
         for (int i = 0; i < innerLevel; ++i)
@@ -1260,6 +1264,22 @@ partial class Context
 
         Assert.Equal(excName, exceptionDetails.fullTypeName, @"__FILE__:__LINE__" + "\n" + caller_trace);
         Assert.Equal(excMessage, exceptionDetails.message, @"__FILE__:__LINE__" + "\n" + caller_trace);
+    }
+
+    public void TestInnerExceptionMessages(string caller_trace, string ExpectedFirst, string ExpectedLast)
+    {
+        ExceptionInfoRequest request = new ExceptionInfoRequest();
+        request.arguments.threadId = threadId;
+        var ret = DAPDebugger.Request(request);
+        Assert.True(ret.Success, caller_trace);
+        var response = JsonConvert.DeserializeObject<ExceptionInfoResponse>(ret.ResponseStr, ExceptionInfoJsonSettings)!;
+        var inner = response.body.details!.innerException!;
+        Assert.True(inner.Count > 0, caller_trace);
+        Assert.Equal(ExpectedFirst, inner[0].message, caller_trace);
+        ExceptionDetails last = inner[0];
+        while (last.innerException is { Count: > 0 })
+            last = last.innerException[0];
+        Assert.Equal(ExpectedLast, last.message, caller_trace);
     }
 
     public void TestStackTrace(string caller_trace, string[] FrameNames, string[] FrameLocations)

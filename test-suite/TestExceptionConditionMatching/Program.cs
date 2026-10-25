@@ -25,7 +25,7 @@ class Program
                 Context.WasEntryPointHit(@"__FILE__:__LINE__");
             });
 
-        for (int i = 0; i < 13; i++)
+        for (int i = 0; i < 37; i++)
         {
             try
             {
@@ -86,6 +86,30 @@ partial class Context
             (false, new[] { "!" + invalid, invalid }, ""),
             (false, new[] { "!, !" + invalid + ",\t" + nullRef }, nullRef),
             (true, new[] { "!\f !" + invalid + "\v" + nullRef }, nullRef),
+            (false, new[] { "*" }, invalid + "," + nullRef),
+            (false, new[] { "System.*" }, invalid + "," + nullRef),
+            (false, new[] { "System.Invalid*" }, invalid),
+            (false, new[] { "System.Missing*" }, ""),
+            (false, new[] { "System.*, !System.Null*" }, invalid),
+            (false, new[] { "System.*, !*" }, ""),
+            (false, new[] { "!*" }, ""),
+            (false, new[] { "!System.Invalid*" }, ""),
+            (false, new[] { "*, !System.Invalid*" }, nullRef),
+            (false, new[] { "!System.Invalid*, *" }, nullRef),
+            (false, new[] { "*", "!System.Invalid*" }, nullRef),
+            (false, new[] { "!System.Invalid*", "*" }, nullRef),
+            (false, new[] { invalid, "!System.Invalid*" }, ""),
+            (false, new[] { "System.Invalid*", "!" + invalid }, ""),
+            (false, new[] { "System.invalid*" }, ""),
+            (false, new[] { "System.*Exception" }, ""),
+            (false, new[] { "System.*Exception*" }, ""),
+            (false, new[] { "System.Invalid**" }, ""),
+            (false, new[] { "**" }, ""),
+            (false, new[] { "System.InvalidOperationExceptio?" }, ""),
+            (false, new[] { invalid + "*" }, invalid),
+            (false, new[] { "System.Invalid*, System.Invalid*, System.Null*" }, invalid + "," + nullRef),
+            (true, new[] { "!System.*" }, ""),
+            (true, new[] { "!System.Missing*" }, invalid + "," + nullRef),
         };
         var actual = new List<string>();
         var expected = new List<string>();

@@ -36,16 +36,24 @@ partial class Context
 {
     public void CheckUnhandledExceptionFilters(string caller_trace)
     {
-        var cases = new (bool All, string[] Conditions, bool Stop)[]
+        var cases = new (bool All, string[] Conditions, bool Stop, bool Thrown)[]
         {
-            (false, Array.Empty<string>(), true),
-            (false, new[] { "System.NullReferenceException" }, true),
-            (true, new[] { "!System.InvalidOperationException" }, false),
-            (false, new[] { "", "!System.InvalidOperationException" }, false),
-            (false, new[] { "System.InvalidOperationException", "!System.InvalidOperationException" }, false),
-            (false, new[] { "!System.InvalidOperationException", "System.InvalidOperationException" }, false),
-            (false, new[] { "!" }, true),
-            (false, new[] { "!System.NullReferenceException" }, true),
+            (false, Array.Empty<string>(), true, false),
+            (false, new[] { "System.NullReferenceException" }, true, false),
+            (true, new[] { "!System.InvalidOperationException" }, false, false),
+            (false, new[] { "", "!System.InvalidOperationException" }, false, false),
+            (false, new[] { "System.InvalidOperationException", "!System.InvalidOperationException" }, false, false),
+            (false, new[] { "!System.InvalidOperationException", "System.InvalidOperationException" }, false, false),
+            (false, new[] { "!" }, true, false),
+            (false, new[] { "!System.NullReferenceException" }, true, false),
+            (false, new[] { "!System.InvalidOperation*" }, false, false),
+            (false, new[] { "!System.Missing*" }, true, false),
+            (false, new[] { "!*" }, false, false),
+            (false, new[] { "System.Missing*" }, true, false),
+            (false, new[] { "*", "!System.InvalidOperation*" }, false, false),
+            (false, new[] { "!System.InvalidOperation*", "*" }, false, false),
+            (false, new[] { "!System.*Exception" }, true, false),
+            (false, new[] { "!System.InvalidOperation*" }, false, true),
         };
         foreach (var scenario in cases)
         {
@@ -60,6 +68,8 @@ partial class Context
                     filterId = "all", condition = "!System.InvalidOperationException"
                 });
             }
+            if (scenario.Thrown)
+                request.arguments.filterOptions.Add(new ExceptionFilterOptions { filterId = "all", condition = "*" });
             foreach (string condition in scenario.Conditions)
                 request.arguments.filterOptions.Add(new ExceptionFilterOptions { filterId = "unhandled", condition = condition });
             Assert.True(DAPDebugger.Request(request).Success, caller_trace);
@@ -67,6 +77,11 @@ partial class Context
             Launch(caller_trace, JMC: true);
             WasEntryPointHit(caller_trace);
             Continue(caller_trace);
+            if (scenario.Thrown)
+            {
+                WasExceptionBreakpointHit(caller_trace, "throw", "CLR", "always", "System.InvalidOperationException");
+                Continue(caller_trace);
+            }
             if (scenario.Stop)
             {
                 WasExceptionBreakpointHit(caller_trace, "throw", "CLR", "unhandled", "System.InvalidOperationException");

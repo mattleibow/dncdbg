@@ -207,19 +207,21 @@ four-component version tokens (including LLVM `git`, Apple four-component, and
 hyphenated SemVer prerelease/build suffixes) and rejects malformed prefixes or
 trailing garbage. Child handle inheritance is restricted to the probe's own
 stdio pipes (`STARTUPINFOEXW` `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` on Windows;
-`O_CLOEXEC` pipes plus `posix_spawn_file_actions_addclose` on open non-`CLOEXEC`
-descriptors on Unix), and probe pipe handles are explicitly disposed when bounded
-collection or setup fails. Both CLI `--version` and self-contained non-blocking DAP
-initialize/version fallback probes establish launch-scoped cleanup ownership:
-Windows assigns the suspended probe (`CREATE_SUSPENDED`) to a Job Object before
-`ResumeThread` and terminates the job on every completion path; Unix starts the
-probe in a new process group (`posix_spawn` `POSIX_SPAWN_SETPGROUP`) and signals
-that original process group (`-pid`) plus the unreaped direct probe leader
-(`pid`) before bounded `WNOHANG` reaping, without relying on ThreadPool timers or
-auto-replies. Unix cleanup never signals the caller's process group, so a helper
-that explicitly detaches into another process group or session (`setpgid`/`setsid`)
-is outside Unix process-group containment and may survive. Candidates must actually
-execute; merely
+`POSIX_SPAWN_CLOEXEC_DEFAULT` on macOS and `posix_spawn_file_actions_addclosefrom_np`
+from descriptor `3` on Linux), and probe pipe handles are explicitly disposed
+when bounded collection or setup fails. Both CLI `--version` and self-contained
+non-blocking DAP initialize/version fallback probes establish launch-scoped
+cleanup ownership: Windows assigns the suspended probe (`CREATE_SUSPENDED`) to a
+Job Object before `ResumeThread` and terminates the job on every completion
+path; Unix starts the probe in a new process group (`posix_spawn`
+`POSIX_SPAWN_SETPGROUP`), verifies the probe remains an unreaped child before
+signaling (`waitid` `WNOWAIT`, treating `ECHILD` as permanent ownership loss),
+and signals that original process group (`-pid`) plus the unreaped direct probe
+leader (`pid`) before bounded `WNOHANG` reaping, without relying on ThreadPool
+timers or auto-replies. Unix cleanup never signals the caller's process group,
+so a helper that explicitly detaches into another process group or session
+(`setpgid`/`setsid`) is outside Unix process-group containment and may survive.
+Candidates must actually execute; merely
 finding an executable is not a usable-toolchain check.
 
 The Windows runner's public LLVM imports `python310.dll`. Its CI lane installs

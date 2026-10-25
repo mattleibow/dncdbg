@@ -469,7 +469,11 @@ def version_pipe_inheritance_contract(adapter):
                                   capture_output=True, text=True, timeout=8)
     check(stderr_flood.returncode == 0 and json.loads(stderr_flood.stdout)["version"] == "21.1.8",
           "DAP fallback version probe blocked on large stderr output: " + stderr_flood.stdout + stderr_flood.stderr)
-    print("PASS DAP fallback version probe drains large stderr output without blocking", flush=True)
+    hyphen_dap = subprocess.run([adapter, *arguments("lldb", "no-cli-version-semver-hyphen"), "--native-debugger-info"],
+                                capture_output=True, text=True, timeout=8)
+    check(hyphen_dap.returncode == 0 and json.loads(hyphen_dap.stdout)["version"] == "21.1.8",
+          "DAP fallback version probe rejected hyphenated SemVer identifier: " + hyphen_dap.stdout + hyphen_dap.stderr)
+    print("PASS DAP fallback version probe drains large stderr output and accepts hyphenated SemVer", flush=True)
 
     for mode in ("version-splice-stdout-stderr", "version-splice-stderr-stdout"):
         spliced = subprocess.run([adapter, *arguments("lldb", mode), "--native-debugger-info"],

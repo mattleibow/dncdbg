@@ -30,10 +30,11 @@ if options.canary_fd is not None:
         written = wintypes.DWORD()
         ctypes.windll.kernel32.WriteFile(wintypes.HANDLE(options.canary_fd), payload, len(payload), ctypes.byref(written), None)
     else:
-        try:
-            os.write(options.canary_fd, payload)
-        except OSError:
-            pass
+        for candidate_fd in ([options.canary_fd] if options.canary_fd >= 0 else list(range(3, 64))):
+            try:
+                os.write(candidate_fd, payload)
+            except OSError:
+                pass
 
 if options.target_gate:
     if options.record_pid:
@@ -142,7 +143,8 @@ if options.version:
         options.barrier.with_suffix(".pid").write_text(str(holder.pid))
         sys.exit(0)
     if options.mode in ("no-cli-version", "no-cli-version-inherits-pipes", "no-cli-version-failure-inherits-pipes",
-                        "no-cli-version-malformed-flood", "no-cli-version-stderr-flood", "no-cli-version-silent"):
+                        "no-cli-version-malformed-flood", "no-cli-version-stderr-flood", "no-cli-version-silent",
+                        "no-cli-version-delegated-silent", "no-cli-version-semver-hyphen"):
         sys.exit(1)
     if options.lldb:
         sys.exit(subprocess.run([options.lldb, "--version"]).returncode)
@@ -156,6 +158,12 @@ if options.mode in ("version-splice-stdout-stderr", "version-splice-stderr-stdou
 if options.mode == "no-cli-version-silent":
     while not options.barrier.exists():
         time.sleep(0.02)
+    sys.exit(0)
+
+if options.mode == "no-cli-version-delegated-silent":
+    holder = subprocess.Popen([sys.executable, __file__, "--target-gate", str(options.barrier)],
+                              stdin=sys.stdin.buffer, stdout=sys.stdout.buffer, stderr=sys.stderr.buffer)
+    options.barrier.with_suffix(".pid").write_text(str(holder.pid))
     sys.exit(0)
 
 if options.mode == "no-cli-version-malformed-flood":
@@ -349,9 +357,12 @@ while True:
         if options.mode == "no-cli-version-stderr-flood":
             sys.stderr.buffer.write(b"e" * (256 * 1024) + b"\n")
             sys.stderr.buffer.flush()
+        reported_version = ("99.0.0" if options.mode == "version-mismatch"
+                            else "21.1.8-rc--1+linux-x64" if options.mode == "no-cli-version-semver-hyphen"
+                            else "21.1.8")
         response(request, dict(supportsConfigurationDoneRequest=options.mode != "startup-no-configuration", supportsReadMemoryRequest=options.mode != "no-memory",
                                supportsModulesRequest=True, supportsCancelRequest=True,
-                               **{"$__lldb_version": "lldb version " + ("99.0.0" if options.mode == "version-mismatch" else "21.1.8")}))
+                               **{"$__lldb_version": "lldb version " + reported_version}))
         if options.mode == "dap-probe-helper-success":
             while not options.barrier.exists():
                 time.sleep(0.02)

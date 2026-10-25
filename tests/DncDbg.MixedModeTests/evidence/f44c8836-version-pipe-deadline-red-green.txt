@@ -52,7 +52,7 @@ Command:
 Output:
   Unhandled exception. System.InvalidOperationException: Partial pipe construction failure leaked descriptors without GC: 125 -> 145.
 
-6. Post-fix GREEN:
+6. Post-fix GREEN (including atomic POSIX_SPAWN_CLOEXEC_DEFAULT / addclosefrom_np descriptor exclusion under external thread churn, waitid ECHILD ownership-loss zero-signal enforcement, ABI-correct macOS arm64 O_NONBLOCK configuration, post-exit Windows DAP fallback sleep, and multi-hyphen SemVer identifiers):
 Command:
   dotnet run --project tests/DncDbg.NativeTests -c Release -- "$(command -v python3)" "$PWD/tests/DncDbg.MixedModeTests/fake_native_adapter.py" version-probe-descriptors
   python3 -c "import runpy; n=runpy.run_path('tests/DncDbg.MixedModeTests/proxy_contracts.py'); n['version_pipe_inheritance_contract']('bin/dncdbg-dap'); n['version_stdin_contract']('bin/dncdbg-dap')"
@@ -71,13 +71,14 @@ Output:
   PASS DAP fallback version probe cleans up delegated helper: no-cli-version-inherits-pipes
   PASS DAP fallback version probe cleans up delegated helper: no-cli-version-failure-inherits-pipes
   PASS DAP fallback version probe cleans up delegated helper: no-cli-version-malformed-flood
-  PASS DAP fallback version probe drains large stderr output without blocking
+  PASS DAP fallback version probe drains large stderr output and accepts hyphenated SemVer
   PASS cross-stream version token splicing is rejected: version-splice-stdout-stderr
   PASS cross-stream version token splicing is rejected: version-splice-stderr-stdout
   PASS independent stream version is preserved alongside opposite stream output: version-stdout-no-newline-stderr-diagnostic
   PASS independent stream version is preserved alongside opposite stream output: version-stderr-no-newline-stdout-diagnostic
   PASS Unix version probe kills direct leader after setpgid without signaling caller PGID (escaped helper limitation proven)
   PASS version discovery cannot read the frontend's DAP stdin
+
 
 
 

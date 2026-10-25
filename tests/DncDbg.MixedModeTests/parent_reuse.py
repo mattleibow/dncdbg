@@ -142,6 +142,10 @@ try:
         result = receive()
         # This target still belongs to the live replacement root, not PID1.
         # Inspect its state; waitpid is valid only after that parent is reaped.
+        parent_exited, parent_status = os.waitpid(parent, os.WNOHANG)
+        if parent_exited:
+            parent = None
+            raise AssertionError(f"CleanupUnixProbe or root cleanup killed reused root PID; same_tick={matched}, status={parent_status}")
         stat = Path(f"/proc/{target}/stat").read_text()
         if stat[stat.rindex(")") + 2:].split()[0] in ("Z", "X"):
             raise AssertionError(f"Replacement adapter root authorized killing its unrelated target; same_tick={matched}")

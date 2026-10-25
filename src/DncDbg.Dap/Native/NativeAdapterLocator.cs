@@ -129,7 +129,7 @@ internal static class NativeAdapterLocator
     }
 
     private const string SemVerSegmentsPattern =
-        @"[0-9A-Za-z]+(?:-[0-9A-Za-z]+)*(?:\.[0-9A-Za-z]+(?:-[0-9A-Za-z]+)*)*";
+        @"[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*";
     private const string VersionTokenPattern =
         @"(\d+(?:\.\d+){2,3})(?:git|(?:-" + SemVerSegmentsPattern + @")?(?:\+" + SemVerSegmentsPattern + @")?)?(?=$|[\s),;])";
     private static readonly object SpawnLock = new();
@@ -304,6 +304,15 @@ internal static class NativeAdapterLocator
         using SafeProcessHandle processHandle = spawned.ProcessHandle;
         uint pipeMode = 1; // PIPE_NOWAIT
         _ = SetNamedPipeHandleState(stdinWrite, ref pipeMode, IntPtr.Zero, IntPtr.Zero);
+        bool processExited = false;
+        void WaitWindowsProbe(int waitMs)
+        {
+            uint clamped = (uint)Math.Clamp(waitMs, 1, 10);
+            if (!processExited)
+                processExited = WaitForSingleObject(processHandle, clamped) == 0;
+            else
+                System.Threading.Thread.Sleep((int)clamped);
+        }
         try
         {
             bool outComplete = false, errComplete = false, errOverflow = false;
@@ -333,7 +342,7 @@ internal static class NativeAdapterLocator
                         int error = Marshal.GetLastPInvokeError();
                         if (error is not (0 or 232)) // ERROR_NO_DATA = 232 when PIPE_NOWAIT buffer is full
                             throw new IOException("Cannot write DAP version probe request.", new System.ComponentModel.Win32Exception(error));
-                        _ = WaitForSingleObject(processHandle, (uint)Math.Clamp(5000 - (int)timer.ElapsedMilliseconds, 1, 10));
+                        WaitWindowsProbe(5000 - (int)timer.ElapsedMilliseconds);
                     }
                     if (offset < frame.Length)
                         throw new TimeoutException("Native debugger DAP version probe timed out.");
@@ -342,7 +351,7 @@ internal static class NativeAdapterLocator
                     DrainWindowsPipe(stdoutRead, outBytes, scratch, ref outComplete, ref outOverflow)
                     | DrainWindowsPipe(stderrRead, errBytes, scratch, ref errComplete, ref errOverflow),
                 () => outComplete,
-                waitMs => _ = WaitForSingleObject(processHandle, (uint)waitMs));
+                WaitWindowsProbe);
         }
         finally
         {
@@ -395,14 +404,14 @@ internal static class NativeAdapterLocator
             int inWriteFd = stdin.SafePipeHandle.DangerousGetHandle().ToInt32();
             int outPipeFd = stdout.SafePipeHandle.DangerousGetHandle().ToInt32();
             int errPipeFd = stderr.SafePipeHandle.DangerousGetHandle().ToInt32();
-            int nonBlockFlag = OperatingSystem.IsMacOS() ? 0x0004 : 0x0800;
-            int statusFlags = fcntl(inWriteFd, 3, 0);
-            if (statusFlags >= 0)
-                _ = fcntl(inWriteFd, 4, statusFlags | nonBlockFlag);
             bool reaped = false;
             int status = 0;
             try
             {
+                int nonBlockFlag = OperatingSystem.IsMacOS() ? 0x0004 : 0x0800;
+                int actualFlags = ConfigureUnixNonBlockingInput(stdin.SafePipeHandle);
+                if (actualFlags < 0 || (actualFlags & nonBlockFlag) == 0)
+                    throw new IOException("Cannot configure non-blocking DAP version probe input pipe.");
                 bool outComplete = false, errComplete = false, errOverflow = false;
                 return ExecuteBoundedDapProbe(
                     timer,
@@ -411,6 +420,11 @@ internal static class NativeAdapterLocator
                         int offset = 0;
                         while (offset < frame.Length && timer.ElapsedMilliseconds < 5000)
                         {
+                            if (PollUnixChildState(pid) == UnixChildState.OwnershipLost)
+                            {
+                                reaped = true;
+                                throw new IOException("Native debugger version probe lost child process ownership.");
+                            }
                             bool outOverflow = false;
                             _ = DrainUnixPipe(stdout, outPipeFd, outBytes, scratch, ref outComplete, ref outOverflow);
                             _ = DrainUnixPipe(stderr, errPipeFd, errBytes, scratch, ref errComplete, ref errOverflow);
@@ -437,8 +451,15 @@ internal static class NativeAdapterLocator
                             throw new TimeoutException("Native debugger DAP version probe timed out.");
                     },
                     (MemoryStream outBytes, MemoryStream errBytes, byte[] scratch, ref bool _, ref bool _, ref bool outOverflow, ref bool _) =>
-                        DrainUnixPipe(stdout, outPipeFd, outBytes, scratch, ref outComplete, ref outOverflow)
-                        | DrainUnixPipe(stderr, errPipeFd, errBytes, scratch, ref errComplete, ref errOverflow),
+                    {
+                        if (PollUnixChildState(pid) == UnixChildState.OwnershipLost)
+                        {
+                            reaped = true;
+                            throw new IOException("Native debugger version probe lost child process ownership.");
+                        }
+                        return DrainUnixPipe(stdout, outPipeFd, outBytes, scratch, ref outComplete, ref outOverflow)
+                            | DrainUnixPipe(stderr, errPipeFd, errBytes, scratch, ref errComplete, ref errOverflow);
+                    },
                     () => outComplete,
                     waitMs => WaitUnixPipes(outPipeFd, outComplete, errPipeFd, errComplete, waitMs));
             }
@@ -447,6 +468,13 @@ internal static class NativeAdapterLocator
                 CleanupUnixProbe(pid, ref reaped, ref status);
             }
         }
+    }
+
+    internal static int ConfigureUnixNonBlockingInput(SafeHandle pipeHandle)
+    {
+        if (SetIsNonBlocking(pipeHandle, 1) != 0)
+            return -1;
+        return fcntl_getfl(pipeHandle.DangerousGetHandle().ToInt32(), 3); // F_GETFL = 3
     }
 
     private static string Under(string root, string relative)
@@ -500,7 +528,8 @@ internal static class NativeAdapterLocator
                 ? RunWindows(executable, arguments)
                 : RunUnix(executable, arguments);
         }
-        catch (Exception error) when (error is System.ComponentModel.Win32Exception or IOException)
+        catch (Exception error) when (error is System.ComponentModel.Win32Exception or IOException
+            or EntryPointNotFoundException or DllNotFoundException)
         { throw new ArgumentException("Error: Cannot execute native debugger: " + error.Message, error); }
     }
 
@@ -821,10 +850,19 @@ internal static class NativeAdapterLocator
                 {
                     bool progressed = DrainUnixPipe(stdout, outPipeFd, outBytes, buffer, ref outComplete, ref outOverflow)
                         | DrainUnixPipe(stderr, errPipeFd, errBytes, buffer, ref errComplete, ref errOverflow);
-                    if (!processExited && PollUnixExitedWithoutReap(pid))
+                    if (!processExited)
                     {
-                        processExited = true;
-                        continue;
+                        UnixChildState childState = PollUnixChildState(pid);
+                        if (childState == UnixChildState.OwnershipLost)
+                        {
+                            reaped = true;
+                            throw new IOException("Native debugger version probe lost child process ownership.");
+                        }
+                        if (childState == UnixChildState.ExitedUnreaped)
+                        {
+                            processExited = true;
+                            continue;
+                        }
                     }
                     if (processExited && outComplete && errComplete)
                         break;
@@ -834,8 +872,17 @@ internal static class NativeAdapterLocator
                         WaitUnixPipes(outPipeFd, outComplete, errPipeFd, errComplete, waitMs);
                     }
                 }
-                if (!processExited && !PollUnixExitedWithoutReap(pid))
-                    throw new ArgumentException("Error: Native debugger discovery/version probe timed out: " + executable);
+                if (!processExited)
+                {
+                    UnixChildState finalState = PollUnixChildState(pid);
+                    if (finalState == UnixChildState.OwnershipLost)
+                    {
+                        reaped = true;
+                        throw new IOException("Native debugger version probe lost child process ownership.");
+                    }
+                    if (finalState != UnixChildState.ExitedUnreaped)
+                        throw new ArgumentException("Error: Native debugger discovery/version probe timed out: " + executable);
+                }
                 while (timer.ElapsedMilliseconds < 5000 && (!outComplete || !errComplete))
                 {
                     if (!DrainUnixPipe(stdout, outPipeFd, outBytes, buffer, ref outComplete, ref outOverflow)
@@ -924,25 +971,13 @@ internal static class NativeAdapterLocator
             CheckSpawn(posix_spawn_file_actions_adddup2(actions, inFd, 0));
             CheckSpawn(posix_spawn_file_actions_adddup2(actions, outFd, 1));
             CheckSpawn(posix_spawn_file_actions_adddup2(actions, errFd, 2));
-            var closeFds = new HashSet<int> { inFd, outFd, errFd };
-            string fdDirectory = OperatingSystem.IsLinux() ? "/proc/self/fd" : "/dev/fd";
-            if (Directory.Exists(fdDirectory))
-            {
-                foreach (string entry in Directory.GetFileSystemEntries(fdDirectory))
-                    if (int.TryParse(System.IO.Path.GetFileName(entry), System.Globalization.NumberStyles.None,
-                        System.Globalization.CultureInfo.InvariantCulture, out int parsedFd) && parsedFd > 2)
-                        closeFds.Add(parsedFd);
-            }
-            foreach (int fd in closeFds)
-            {
-                if (fd <= 2)
-                    continue;
-                int fdFlags = fcntl(fd, 1, 0); // F_GETFD = 1
-                if (fdFlags >= 0 && ((fdFlags & 1) == 0 || fd == inFd || fd == outFd || fd == errFd))
-                    CheckSpawn(posix_spawn_file_actions_addclose(actions, fd));
-            }
+            short spawnFlags = 2; // POSIX_SPAWN_SETPGROUP
+            if (OperatingSystem.IsMacOS())
+                spawnFlags |= 0x4000; // POSIX_SPAWN_CLOEXEC_DEFAULT
+            else
+                CheckSpawn(posix_spawn_file_actions_addclosefrom_np(actions, 3));
             CheckSpawn(posix_spawnattr_setpgroup(attr, 0));
-            CheckSpawn(posix_spawnattr_setflags(attr, 2));
+            CheckSpawn(posix_spawnattr_setflags(attr, spawnFlags));
 
             var argv = new IntPtr[arguments.Length + 2];
             argv[0] = AllocateUtf8(executable, allocated);
@@ -987,16 +1022,27 @@ internal static class NativeAdapterLocator
         }
     }
 
-    private static unsafe bool PollUnixExitedWithoutReap(int pid)
+    internal enum UnixChildState
+    {
+        Running,
+        ExitedUnreaped,
+        OwnershipLost,
+    }
+
+    internal static unsafe UnixChildState PollUnixChildState(int pid)
     {
         int flags = 4 | 1 | (OperatingSystem.IsMacOS() ? 0x20 : 0x01000000);
         byte* info = stackalloc byte[128];
         var span = new Span<byte>(info, 128);
-        span.Clear();
-        int result = waitid(1, pid, (IntPtr)info, flags);
-        if (result == 0 && span.IndexOfAnyExcept((byte)0) >= 0)
-            return true;
-        return result < 0 && Marshal.GetLastPInvokeError() != 4;
+        while (true)
+        {
+            span.Clear();
+            int result = waitid(1, pid, (IntPtr)info, flags);
+            if (result == 0)
+                return span.IndexOfAnyExcept((byte)0) >= 0 ? UnixChildState.ExitedUnreaped : UnixChildState.Running;
+            if (Marshal.GetLastPInvokeError() != 4)
+                return UnixChildState.OwnershipLost;
+        }
     }
 
     private static void DisposeUnixPipe(System.IO.Pipes.AnonymousPipeServerStream? pipe)
@@ -1007,15 +1053,22 @@ internal static class NativeAdapterLocator
         try { pipe.Dispose(); } catch (Exception) { }
     }
 
-    private static void CleanupUnixProbe(int pid, ref bool reaped, ref int status)
+    internal static void CleanupUnixProbe(int pid, ref bool reaped, ref int status)
     {
-        if (!reaped)
+        if (reaped)
+            return;
+        if (PollUnixChildState(pid) == UnixChildState.OwnershipLost)
         {
-            _ = kill(-pid, 9);
-            _ = kill(pid, 9);
-            reaped = ReapUnix(pid, out status);
+            reaped = true;
+            status = -1;
+            return;
         }
+        _ = kill(-pid, 9);
+        _ = kill(pid, 9);
         var cleanup = Stopwatch.StartNew();
+        while (cleanup.ElapsedMilliseconds < 1000 && PollUnixChildState(pid) == UnixChildState.Running)
+            System.Threading.Thread.Sleep(5);
+        reaped = ReapUnix(pid, out status);
         while (cleanup.ElapsedMilliseconds < 1000 && kill(-pid, 0) == 0)
             System.Threading.Thread.Sleep(5);
     }
@@ -1029,7 +1082,7 @@ internal static class NativeAdapterLocator
             if (result == pid)
                 return true;
             if (result < 0 && Marshal.GetLastPInvokeError() != 4)
-                return false;
+                return true;
             System.Threading.Thread.Sleep(5);
         }
         status = 0;
@@ -1194,8 +1247,11 @@ internal static class NativeAdapterLocator
     [DllImport("libc", EntryPoint = "poll", SetLastError = true)]
     private static extern int Poll(ref PollDescriptor descriptor, nuint count, int timeout);
 
-    [DllImport("libc", SetLastError = true)]
-    private static extern int fcntl(int fd, int cmd, int arg);
+    [DllImport("libSystem.Native", EntryPoint = "SystemNative_FcntlSetIsNonBlocking", SetLastError = true)]
+    private static extern int SetIsNonBlocking(SafeHandle fd, int isNonBlocking);
+
+    [DllImport("libc", EntryPoint = "fcntl", SetLastError = true)]
+    private static extern int fcntl_getfl(int fd, int cmd);
 
     [DllImport("libc", SetLastError = true)]
     private static extern nint write(int fd, IntPtr buf, nuint count);
@@ -1222,7 +1278,7 @@ internal static class NativeAdapterLocator
     private static extern int posix_spawn_file_actions_adddup2(IntPtr actions, int fd, int newfd);
 
     [DllImport("libc", SetLastError = true)]
-    private static extern int posix_spawn_file_actions_addclose(IntPtr actions, int fd);
+    private static extern int posix_spawn_file_actions_addclosefrom_np(IntPtr actions, int lowfd);
 
     [DllImport("libc", SetLastError = true)]
     private static extern int posix_spawn(out int pid, [MarshalAs(UnmanagedType.LPUTF8Str)] string path,

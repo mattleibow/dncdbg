@@ -171,6 +171,150 @@ if (args.Length == 2 || args[2] == "version-probe-descriptors")
             if (canaryResolved.Version != "21.1.8" || leakedText.Length != 0)
                 throw new InvalidOperationException("Probe child inherited unrelated parent handle: " + leakedText);
         }
+        int stopChurn = 0;
+        int churnInheritedBytes = 0;
+        var churnThreads = Enumerable.Range(0, 2).Select(churnIndex => new System.Threading.Thread(() =>
+        {
+            var buf = new byte[64];
+            while (Volatile.Read(ref stopChurn) == 0)
+            {
+                using var churnPipe = new System.IO.Pipes.AnonymousPipeServerStream(
+                    System.IO.Pipes.PipeDirection.In, HandleInheritability.Inheritable);
+                _ = churnPipe.GetClientHandleAsString();
+                System.Threading.Thread.SpinWait(200);
+                churnPipe.DisposeLocalCopyOfClientHandle();
+                int read = churnPipe.Read(buf, 0, buf.Length);
+                if (read > 0)
+                    Interlocked.Add(ref churnInheritedBytes, read);
+            }
+        }) { IsBackground = true }).ToArray();
+        foreach (var churnThread in churnThreads)
+            churnThread.Start();
+        try
+        {
+            for (int i = 0; i < 30; i++)
+            {
+                var churnResolved = NativeAdapterLocator.Resolve("lldb", python, [fake, "--canary-fd=-1"]);
+                if (churnResolved.Version != "21.1.8")
+                    throw new InvalidOperationException("Unexpected version during descriptor churn: " + churnResolved.Version);
+            }
+        }
+        finally
+        {
+            Volatile.Write(ref stopChurn, 1);
+            foreach (var churnThread in churnThreads)
+                churnThread.Join(TimeSpan.FromSeconds(5));
+        }
+        if (churnInheritedBytes != 0)
+            throw new InvalidOperationException($"Concurrent external descriptor churn leaked {churnInheritedBytes} canary bytes into probe children.");
+        if (!OperatingSystem.IsWindows())
+        {
+            using (var nonBlockPipe = new System.IO.Pipes.AnonymousPipeServerStream(
+                System.IO.Pipes.PipeDirection.Out, HandleInheritability.None))
+            {
+                int expectedFlag = OperatingSystem.IsMacOS() ? 0x0004 : 0x0800;
+                int actualFlags = NativeAdapterLocator.ConfigureUnixNonBlockingInput(nonBlockPipe.SafePipeHandle);
+                nonBlockPipe.DisposeLocalCopyOfClientHandle();
+                if (actualFlags < 0 || (actualFlags & expectedFlag) == 0)
+                    throw new InvalidOperationException(
+                        $"Unix non-blocking pipe setup did not set O_NONBLOCK (flags=0x{actualFlags:X}, expected bit=0x{expectedFlag:X}).");
+            }
+            string lostChildGate = Path.Combine(directory, "lost-child.release");
+            var lostStart = new System.Diagnostics.ProcessStartInfo(python) { UseShellExecute = false };
+            lostStart.ArgumentList.Add(fake);
+            lostStart.ArgumentList.Add("--target-gate");
+            lostStart.ArgumentList.Add(lostChildGate);
+            using var nonChildCanary = System.Diagnostics.Process.Start(lostStart)!;
+            try
+            {
+                // Reap a real child first so its numeric PID has ECHILD status, and also test a live process where waitid fails or is already reaped.
+                var reapedStart = new System.Diagnostics.ProcessStartInfo(probePath) { UseShellExecute = false };
+                using var reapedChild = System.Diagnostics.Process.Start(reapedStart)!;
+                int reapedPid = reapedChild.Id;
+                reapedChild.WaitForExit(5000);
+                bool reapedFlag = false;
+                int reapedStatus = 0;
+                NativeAdapterLocator.CleanupUnixProbe(reapedPid, ref reapedFlag, ref reapedStatus);
+                if (!reapedFlag)
+                    throw new InvalidOperationException("CleanupUnixProbe did not mark ECHILD lost-ownership child as terminated.");
+                // Also test a grandchild (non-direct child of current process, so waitid returns ECHILD while the process is alive!).
+                string grandchildPidFile = Path.Combine(directory, "grandchild.pid");
+                var launcherStart = new System.Diagnostics.ProcessStartInfo(python) { UseShellExecute = false };
+                launcherStart.ArgumentList.Add(fake);
+                launcherStart.ArgumentList.Add("--mode=version-inherits-pipes");
+                launcherStart.ArgumentList.Add("--version");
+                launcherStart.ArgumentList.Add("--barrier=" + Path.Combine(directory, "grandchild.release"));
+                using (var launcher = System.Diagnostics.Process.Start(launcherStart)!)
+                    launcher.WaitForExit(5000);
+                int grandchildPid = int.Parse(File.ReadAllText(grandchildPidFile).Trim(), System.Globalization.CultureInfo.InvariantCulture);
+                try
+                {
+                    bool grandReaped = false;
+                    int grandStatus = 0;
+                    NativeAdapterLocator.CleanupUnixProbe(grandchildPid, ref grandReaped, ref grandStatus);
+                    using var grandProcess = System.Diagnostics.Process.GetProcessById(grandchildPid);
+                    if (grandProcess.HasExited || !grandReaped)
+                        throw new InvalidOperationException("CleanupUnixProbe signaled a live non-child process after waitid ECHILD.");
+                }
+                finally
+                {
+                    File.WriteAllText(Path.Combine(directory, "grandchild.release"), "release");
+                    try
+                    {
+                        using var grandCleanup = System.Diagnostics.Process.GetProcessById(grandchildPid);
+                        if (!grandCleanup.WaitForExit(2000))
+                            grandCleanup.Kill();
+                    }
+                    catch (ArgumentException) { }
+                }
+            }
+            finally
+            {
+                File.WriteAllText(lostChildGate, "release");
+                if (!nonChildCanary.HasExited)
+                    nonChildCanary.Kill();
+                nonChildCanary.WaitForExit(5000);
+            }
+        }
+        string delegatedSilentGate = Path.Combine(directory, "delegated-silent.release");
+        string delegatedSilentPidFile = Path.ChangeExtension(delegatedSilentGate, ".pid");
+        using (var selfProc = System.Diagnostics.Process.GetCurrentProcess())
+        {
+            TimeSpan cpuBefore = selfProc.TotalProcessorTime;
+            bool delegatedFailed = false;
+            try
+            {
+                _ = NativeAdapterLocator.Resolve("lldb", python,
+                    [fake, "--mode=no-cli-version-delegated-silent", "--barrier=" + delegatedSilentGate]);
+            }
+            catch (ArgumentException)
+            {
+                delegatedFailed = true;
+            }
+            finally
+            {
+                File.WriteAllText(delegatedSilentGate, "release");
+            }
+            selfProc.Refresh();
+            TimeSpan cpuDelta = selfProc.TotalProcessorTime - cpuBefore;
+            if (!delegatedFailed || cpuDelta > TimeSpan.FromSeconds(1.2))
+                throw new InvalidOperationException(
+                    $"Delegated silent DAP fallback busy-spun or did not fail cleanly (failed={delegatedFailed}, cpu={cpuDelta.TotalSeconds:F2}s).");
+            if (File.Exists(delegatedSilentPidFile))
+            {
+                int delegatedPid = int.Parse(File.ReadAllText(delegatedSilentPidFile).Trim(), System.Globalization.CultureInfo.InvariantCulture);
+                try
+                {
+                    using var leakedDelegated = System.Diagnostics.Process.GetProcessById(delegatedPid);
+                    if (!leakedDelegated.WaitForExit(1000))
+                    {
+                        leakedDelegated.Kill();
+                        throw new InvalidOperationException($"Delegated silent helper {delegatedPid} escaped DAP fallback cleanup.");
+                    }
+                }
+                catch (ArgumentException) { }
+            }
+        }
         ThreadPool.GetMinThreads(out int minWorkers, out int minIo);
         ThreadPool.GetMaxThreads(out int maxWorkers, out int maxIo);
         using var soleBlockerStarted = new ManualResetEventSlim(false);
@@ -298,8 +442,9 @@ if (args.Length == 2 || args[2] == "version-probe-descriptors")
         "lldb-2103.0.1garbage",
         "lldb version 21.1.8-",
         "lldb version 21.1.8+",
-        "lldb version 21.1.8--rc",
-        "lldb version 21.1.8-rc-",
+        "lldb version 21.1.8-rc.",
+        "lldb version 21.1.8-.rc",
+        "lldb version 21.1.8-rc..1",
         "lldb version 1.2.3.4.5",
         "lldb version 21.1",
         "x21.1.8",
@@ -311,6 +456,9 @@ if (args.Length == 2 || args[2] == "version-probe-descriptors")
         || NativeAdapterLocator.ParseVersion("liblldb: lldb-2103.0.34.103") != "2103.0.34.103"
         || NativeAdapterLocator.ParseVersion("lldb version 21.1.8-rc.1+build.42") != "21.1.8"
         || NativeAdapterLocator.ParseVersion("lldb version 21.1.8-rc-1") != "21.1.8"
+        || NativeAdapterLocator.ParseVersion("lldb version 21.1.8-rc--1") != "21.1.8"
+        || NativeAdapterLocator.ParseVersion("lldb version 21.1.8--rc") != "21.1.8"
+        || NativeAdapterLocator.ParseVersion("lldb version 21.1.8-rc-") != "21.1.8"
         || NativeAdapterLocator.ParseVersion("lldb version 21.1.8-rc.1+linux-x64") != "21.1.8"
         || NativeAdapterLocator.ParseVersion("21.1.8-alpha.1") != "21.1.8")
         throw new InvalidOperationException("Valid version format was rejected by ParseVersion.");
@@ -461,6 +609,11 @@ if (args.Length == 3 && args[2] == "parent-reuse-worker")
         if (command.StartsWith("CAPTURE_ROOT ", StringComparison.Ordinal))
         {
             int targetPid = int.Parse(command["CAPTURE_ROOT ".Length..], System.Globalization.CultureInfo.InvariantCulture);
+            bool probeReaped = false;
+            int probeStatus = 0;
+            NativeAdapterLocator.CleanupUnixProbe(rootProcess!.Id, ref probeReaped, ref probeStatus);
+            if (!probeReaped)
+                throw new InvalidOperationException("CleanupUnixProbe did not mark reaped/reused root PID as ownership-lost.");
             rootBackend!.TrackLaunchedLocalTarget(targetPid);
             var targets = (System.Collections.IDictionary)typeof(NativeAdapterSession).GetField("_ownedTargets",
                 System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(rootBackend)!;

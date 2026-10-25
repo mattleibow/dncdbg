@@ -650,6 +650,8 @@ if (args.Length == 2 || args[2] == "version-probe-descriptors")
         "lldb-21.1.8-01+lldb-2.3.4",
         "lldb version 21.1.8-rc.01+lldb-2.3.4",
         "21.1.8-01+lldb-2.3.4",
+        "warning: lldb-python version 3.12.7 unavailable",
+        "lldb version x21.1.8\nlldb version 21.1.8",
         "lldb version 21.1.8-rc.",
         "lldb version 21.1.8-.rc",
         "lldb version 21.1.8-rc..1",
@@ -664,7 +666,14 @@ if (args.Length == 2 || args[2] == "version-probe-descriptors")
         || NativeAdapterLocator.ParseVersion("(lldb) version\nlldb-2103.0.34.103\nApple Swift version 6.4\n") != "2103.0.34.103"
         || NativeAdapterLocator.ParseVersion("lldb version 21.0.0git (https://github.com/llvm/llvm-project.git)") != "21.0.0"
         || NativeAdapterLocator.ParseVersion("liblldb: lldb-2103.0.34.103") != "2103.0.34.103"
+        || NativeAdapterLocator.ParseVersion("lldb-dap-21.1.8\nliblldb: lldb-2103.0.34.103") != "2103.0.34.103"
+        || NativeAdapterLocator.ParseVersion("liblldb: lldb-2103.0.34.103\nlldb-dap-21.1.8") != "2103.0.34.103"
+        || NativeAdapterLocator.ParseVersion("lldb-dap version 21.1.8\nliblldb: lldb-2103.0.34.103") != "2103.0.34.103"
+        || NativeAdapterLocator.ParseVersion("liblldb: lldb-2103.0.34.103\nlldb-dap version 21.1.8") != "2103.0.34.103"
+        || NativeAdapterLocator.ParseVersion("lldb-dap-21.1.8") != "21.1.8"
         || NativeAdapterLocator.ParseVersion("warning: lldb-python plugin unavailable\nlldb-dap version 21.1.8") != "21.1.8"
+        || NativeAdapterLocator.ParseVersion("warning: lldb-python version 3.12.7 unavailable\nlldb-dap version 21.1.8") != "21.1.8"
+        || NativeAdapterLocator.ParseVersion("warning: lldb version unavailable\nlldb version 21.1.8") != "21.1.8"
         || NativeAdapterLocator.ParseVersion("lldb-dap version 21.1.8 (https://github.com/lldb-tools/llvm-project.git)") != "21.1.8"
         || NativeAdapterLocator.ParseVersion("lldb-dap version 21.1.8\nwarning: lldb-server helper unavailable") != "21.1.8"
         || NativeAdapterLocator.ParseVersion("21.1.8+lldb-2.3.4") != "21.1.8"

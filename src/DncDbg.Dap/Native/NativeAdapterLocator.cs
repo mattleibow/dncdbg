@@ -154,29 +154,38 @@ internal static class NativeAdapterLocator
             {
                 if (tokens[i].Equals("lldb", StringComparison.OrdinalIgnoreCase)
                     && i + 2 < tokens.Length
-                    && tokens[i + 1].Equals("version", StringComparison.OrdinalIgnoreCase))
+                    && tokens[i + 1].Equals("version", StringComparison.OrdinalIgnoreCase)
+                    && tokens[i + 2].Any(char.IsAsciiDigit))
                 {
                     return TryParseWholeVersion(tokens[i + 2], out string? parsed) ? parsed : null;
                 }
-                string? hyphenSuffix = tokens[i].StartsWith("lldb-dap-", StringComparison.OrdinalIgnoreCase) ? tokens[i]["lldb-dap-".Length..]
-                    : tokens[i].StartsWith("lldb-vscode-", StringComparison.OrdinalIgnoreCase) ? tokens[i]["lldb-vscode-".Length..]
-                    : tokens[i].StartsWith("lldb-", StringComparison.OrdinalIgnoreCase) ? tokens[i]["lldb-".Length..]
-                    : null;
-                if (hyphenSuffix is { Length: > 0 } && char.IsAsciiDigit(hyphenSuffix[0]))
-                    return TryParseWholeVersion(hyphenSuffix, out string? parsed) ? parsed : null;
+                if (tokens[i].StartsWith("lldb-", StringComparison.OrdinalIgnoreCase))
+                {
+                    string runtimeSuffix = tokens[i]["lldb-".Length..];
+                    if (runtimeSuffix.Length > 0 && char.IsAsciiDigit(runtimeSuffix[0]))
+                        return TryParseWholeVersion(runtimeSuffix, out string? parsed) ? parsed : null;
+                }
             }
         }
 
         foreach (string[] tokens in lines)
         {
-            for (int i = 0; i + 2 < tokens.Length; i++)
+            for (int i = 0; i < tokens.Length; i++)
             {
-                if (tokens[i + 1].Equals("version", StringComparison.OrdinalIgnoreCase)
-                    && (tokens[i].StartsWith("lldb", StringComparison.OrdinalIgnoreCase)
-                        || tokens[i].Equals("llvm", StringComparison.OrdinalIgnoreCase)))
+                if (i + 2 < tokens.Length
+                    && tokens[i + 1].Equals("version", StringComparison.OrdinalIgnoreCase)
+                    && (tokens[i].Equals("lldb-dap", StringComparison.OrdinalIgnoreCase)
+                        || tokens[i].Equals("lldb-vscode", StringComparison.OrdinalIgnoreCase)
+                        || tokens[i].Equals("llvm", StringComparison.OrdinalIgnoreCase))
+                    && tokens[i + 2].Any(char.IsAsciiDigit))
                 {
                     return TryParseWholeVersion(tokens[i + 2], out string? parsed) ? parsed : null;
                 }
+                string? adapterSuffix = tokens[i].StartsWith("lldb-dap-", StringComparison.OrdinalIgnoreCase) ? tokens[i]["lldb-dap-".Length..]
+                    : tokens[i].StartsWith("lldb-vscode-", StringComparison.OrdinalIgnoreCase) ? tokens[i]["lldb-vscode-".Length..]
+                    : null;
+                if (adapterSuffix is { Length: > 0 } && char.IsAsciiDigit(adapterSuffix[0]))
+                    return TryParseWholeVersion(adapterSuffix, out string? parsed) ? parsed : null;
             }
         }
 

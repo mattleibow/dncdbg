@@ -4,6 +4,9 @@ This table describes the C++ implementation before the C#/.NET migration.
 Its implementation-language and memory measurements do not describe the current
 managed debugger, and the feature comparisons have not been re-benchmarked.
 See the [current architecture and build instructions](../README.md).
+Current managed [exception conditions](exception_conditions.md) support trailing
+wildcard prefixes; that post-migration feature is not added to this historical
+comparison or used to make new claims about other debuggers.
 
 <details open>
 <summary><b>Legend</b></summary>

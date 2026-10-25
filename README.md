@@ -55,7 +55,7 @@ pwsh ./test-suite/run_tests.ps1
 
 The runner discovers `Test*/Test*.csproj` projects automatically and includes
 Windows-only projects when running on Windows. The macOS arm64 acceptance matrix
-contains 78 tests. Validation on one platform is not proof of parity on Windows,
+contains 79 tests. Validation on one platform is not proof of parity on Windows,
 Linux, or every DAP field. Tests default to `net10.0`; the existing
 `DNCDBG_TARGET_FRAMEWORK` override is preserved.
 See [local testing](test-suite/README.md) for focused cases and lifecycle regressions.

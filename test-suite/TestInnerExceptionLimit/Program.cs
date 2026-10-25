@@ -87,7 +87,9 @@ partial class Context
             ("2", 2, false),
             ("8", 8, false),
             ("32", 32, false),
+            ("50", 50, false),
             ("64", 64, false),
+            ("100", 64, false),
             ("4294967295", 64, false),
             ("not-a-number", 32, false),
             ("", 32, false),
@@ -116,6 +118,10 @@ partial class Context
             WasEntryPointHit(caller_trace);
             Continue(caller_trace);
             WasExceptionBreakpointHit(caller_trace, "point1", "CLR", "always", "System.InvalidOperationException");
+            if (scenario.Limit == "50")
+                TestInnerExceptionMessages(caller_trace, ExpectedFirst: "level 62", ExpectedLast: "level 13");
+            if (scenario.Limit == "100")
+                TestInnerExceptionMessages(caller_trace, ExpectedFirst: "level 62", ExpectedLast: "innermost");
             CheckInnerExceptionCount(caller_trace, scenario.Expected);
             Continue(caller_trace);
             WasExit(caller_trace);

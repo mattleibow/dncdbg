@@ -54,6 +54,8 @@ partial class Context
             (false, new[] { "!System.InvalidOperation*", "*" }, false, false),
             (false, new[] { "!System.*Exception" }, true, false),
             (false, new[] { "!System.InvalidOperation*" }, false, true),
+            (false, new[] { "!System.Exception" }, true, false),
+            (false, new[] { "!*" }, false, true),
         };
         foreach (var scenario in cases)
         {
@@ -85,7 +87,7 @@ partial class Context
             if (scenario.Stop)
             {
                 WasExceptionBreakpointHit(caller_trace, "throw", "CLR", "unhandled", "System.InvalidOperationException");
-                AbortExecution(caller_trace);
+                Continue(caller_trace);
                 WasExit(caller_trace, CheckExitCode: null);
             }
             else

@@ -2,6 +2,7 @@
 Upcoming changes compared to the previous version.
 
 #### DAP
+- Added `DNCDBG_INNER_EXCEPTION_WALK_LIMIT` with native-compatible process/session configuration, a default of 32 inner exceptions, and fully populated terminal details. Exception traversal and DAP conversion are iterative; outgoing chains may exceed the incoming message depth limit.
 - Matched upstream trailing-`*` prefix exception conditions, including negated prefixes and `!*`. Internal/repeated asterisks are literal rather than general glob patterns.
 - Ported upstream per-type exception-condition negation and deterministic exclusion priority across additive filter entries. A lone `!` is ignored.
 - Unhandled exceptions stop by default unless a matching negated condition on the `unhandled` filter excludes the type; positive conditions do not narrow this default.
@@ -11,6 +12,7 @@ Upcoming changes compared to the previous version.
 - Added `supportsReadMemoryRequest` and `supportsWriteMemoryRequest` support in Capabilities.
 
 #### Added
+- Added native-proven `TestInnerExceptionLimit` coverage and strengthened unhandled-exception exit assertions. Acceptance projects remain automatically discovered, including Windows Forms-only detection.
 - Added native-proven `TestExceptionConditionMatching` and `TestUnhandledExceptionFilter` acceptance coverage.
 - Added debugger configuration environment variable `DNCDBG_PDB_MMAP_POLICY`.
 - Added support for custom modifiers (`CustomMod*`) in literal field and local constant signatures.

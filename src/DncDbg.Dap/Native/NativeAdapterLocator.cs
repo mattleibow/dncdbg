@@ -143,9 +143,10 @@ internal static class NativeAdapterLocator
             RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
         if (runtime.Success)
             return runtime.Groups[1].Value;
-        if (Regex.IsMatch(text, @"\blldb\s+version\b", RegexOptions.CultureInvariant | RegexOptions.IgnoreCase))
+        if (Regex.IsMatch(text, @"\blldb(?:\s+version\b|-(?!dap\b|vscode\b|server\b)\S)",
+            RegexOptions.CultureInvariant | RegexOptions.IgnoreCase))
             return null;
-        Match version = Regex.Match(text, @"(?<![\w.-])" + VersionTokenPattern, RegexOptions.CultureInvariant);
+        Match version = Regex.Match(text, @"(?<![\w.+-])" + VersionTokenPattern, RegexOptions.CultureInvariant);
         return version.Success ? version.Groups[1].Value : null;
     }
 

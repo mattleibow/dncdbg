@@ -191,9 +191,8 @@ if (args.Length == 2 || args[2] == "version-probe-descriptors")
             {
                 if (!OperatingSystem.IsWindows())
                 {
-                    highUnixFd = 140;
-                    if (dup2(int.Parse(positiveHandle, System.Globalization.CultureInfo.InvariantCulture), highUnixFd) != highUnixFd)
-                        throw new InvalidOperationException($"dup2 to high fd {highUnixFd} failed: {Marshal.GetLastPInvokeError()}");
+                    highUnixFd = DuplicateHighInheritableFd(
+                        int.Parse(positiveHandle, System.Globalization.CultureInfo.InvariantCulture), 128);
                     positiveHandle = highUnixFd.ToString(System.Globalization.CultureInfo.InvariantCulture);
                 }
                 var controlStart = new System.Diagnostics.ProcessStartInfo(python)
@@ -231,9 +230,8 @@ if (args.Length == 2 || args[2] == "version-probe-descriptors")
             {
                 if (!OperatingSystem.IsWindows())
                 {
-                    highUnixFd = 140;
-                    if (dup2(int.Parse(canaryHandle, System.Globalization.CultureInfo.InvariantCulture), highUnixFd) != highUnixFd)
-                        throw new InvalidOperationException($"dup2 to high fd {highUnixFd} failed: {Marshal.GetLastPInvokeError()}");
+                    highUnixFd = DuplicateHighInheritableFd(
+                        int.Parse(canaryHandle, System.Globalization.CultureInfo.InvariantCulture), 128);
                     canaryTarget = $"{canaryHandle},{highUnixFd}";
                 }
                 var canaryResolved = NativeAdapterLocator.Resolve("lldb", python, [fake, "--canary-fd=" + canaryTarget]);
@@ -253,35 +251,82 @@ if (args.Length == 2 || args[2] == "version-probe-descriptors")
         }
         int stopChurn = 0;
         int churnInheritedBytes = 0;
-        var activeCanaries = new string?[2];
-        var churnThreads = Enumerable.Range(0, 2).Select(churnIndex => new System.Threading.Thread(() =>
+        int pinnedRoundBytes = 0;
+        string? pinnedTargets = null;
+        Exception? pinnedWorkerError = null;
+        using var pinnedRequestNext = new AutoResetEvent(false);
+        using var pinnedReady = new AutoResetEvent(false);
+        using var pinnedReleaseHold = new AutoResetEvent(false);
+        using var pinnedRoundDone = new AutoResetEvent(false);
+        var pinnedWorker = new System.Threading.Thread(() =>
+        {
+            try
+            {
+                var buf = new byte[64];
+                while (true)
+                {
+                    pinnedRequestNext.WaitOne();
+                    if (Volatile.Read(ref stopChurn) != 0)
+                        break;
+                    using var pinnedPipe = new System.IO.Pipes.AnonymousPipeServerStream(
+                        System.IO.Pipes.PipeDirection.In, HandleInheritability.Inheritable);
+                    string clientHandle = pinnedPipe.GetClientHandleAsString();
+                    int highFd = -1;
+                    try
+                    {
+                        if (!OperatingSystem.IsWindows())
+                        {
+                            highFd = DuplicateHighInheritableFd(
+                                int.Parse(clientHandle, System.Globalization.CultureInfo.InvariantCulture), 128);
+                            Volatile.Write(ref pinnedTargets, $"{clientHandle},{highFd}");
+                        }
+                        else
+                        {
+                            Volatile.Write(ref pinnedTargets, clientHandle);
+                        }
+                        pinnedReady.Set();
+                        pinnedReleaseHold.WaitOne();
+                    }
+                    finally
+                    {
+                        if (highFd >= 0)
+                            _ = close_fd(highFd);
+                        pinnedPipe.DisposeLocalCopyOfClientHandle();
+                    }
+                    int totalRead = 0;
+                    int n;
+                    while ((n = pinnedPipe.Read(buf, 0, buf.Length)) > 0)
+                        totalRead += n;
+                    Volatile.Write(ref pinnedRoundBytes, totalRead);
+                    pinnedRoundDone.Set();
+                }
+            }
+            catch (Exception error)
+            {
+                pinnedWorkerError = error;
+                pinnedReady.Set();
+                pinnedRoundDone.Set();
+            }
+        }) { IsBackground = true };
+        var churnThread = new System.Threading.Thread(() =>
         {
             var buf = new byte[64];
-            int highFd = 142 + churnIndex;
             while (Volatile.Read(ref stopChurn) == 0)
             {
                 using var churnPipe = new System.IO.Pipes.AnonymousPipeServerStream(
                     System.IO.Pipes.PipeDirection.In, HandleInheritability.Inheritable);
                 string clientHandle = churnPipe.GetClientHandleAsString();
-                bool duped = false;
+                int highFd = -1;
                 try
                 {
-                    if (!OperatingSystem.IsWindows()
-                        && dup2(int.Parse(clientHandle, System.Globalization.CultureInfo.InvariantCulture), highFd) == highFd)
-                    {
-                        duped = true;
-                        Volatile.Write(ref activeCanaries[churnIndex], $"{clientHandle},{highFd}");
-                    }
-                    else
-                    {
-                        Volatile.Write(ref activeCanaries[churnIndex], clientHandle);
-                    }
-                    System.Threading.Thread.Sleep(2);
+                    if (!OperatingSystem.IsWindows())
+                        highFd = DuplicateHighInheritableFd(
+                            int.Parse(clientHandle, System.Globalization.CultureInfo.InvariantCulture), 128);
+                    System.Threading.Thread.SpinWait(200);
                 }
                 finally
                 {
-                    Volatile.Write(ref activeCanaries[churnIndex], null);
-                    if (duped)
+                    if (highFd >= 0)
                         _ = close_fd(highFd);
                     churnPipe.DisposeLocalCopyOfClientHandle();
                 }
@@ -289,32 +334,76 @@ if (args.Length == 2 || args[2] == "version-probe-descriptors")
                 if (read > 0)
                     Interlocked.Add(ref churnInheritedBytes, read);
             }
-        }) { IsBackground = true }).ToArray();
-        foreach (var churnThread in churnThreads)
-            churnThread.Start();
+        }) { IsBackground = true };
+        pinnedWorker.Start();
+        churnThread.Start();
         try
         {
+            // Round 0: concurrent positive control proving the pinned worker handshake detects intentional inheritance.
+            pinnedRequestNext.Set();
+            if (!pinnedReady.WaitOne(TimeSpan.FromSeconds(5)) || pinnedWorkerError != null)
+                throw new InvalidOperationException("Pinned canary worker failed to prepare positive control.", pinnedWorkerError);
+            string controlTargets = Volatile.Read(ref pinnedTargets)
+                ?? throw new InvalidOperationException("Missing pinned positive-control targets.");
+            try
+            {
+                string controlTargetArg = !OperatingSystem.IsWindows() && controlTargets.Contains(',')
+                    ? controlTargets[(controlTargets.IndexOf(',') + 1)..]
+                    : controlTargets;
+                var controlStart = new System.Diagnostics.ProcessStartInfo(python)
+                {
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                };
+                controlStart.ArgumentList.Add(fake);
+                controlStart.ArgumentList.Add("--canary-fd=" + controlTargetArg);
+                controlStart.ArgumentList.Add("--version");
+                using var controlProcess = System.Diagnostics.Process.Start(controlStart)!;
+                _ = controlProcess.StandardOutput.ReadToEnd();
+                _ = controlProcess.StandardError.ReadToEnd();
+                controlProcess.WaitForExit(5000);
+            }
+            finally
+            {
+                pinnedReleaseHold.Set();
+            }
+            if (!pinnedRoundDone.WaitOne(TimeSpan.FromSeconds(5)) || pinnedWorkerError != null)
+                throw new InvalidOperationException("Pinned canary worker failed during positive control.", pinnedWorkerError);
+            if (Volatile.Read(ref pinnedRoundBytes) <= 0)
+                throw new InvalidOperationException("Concurrent pinned positive control did not detect intentional handle inheritance.");
+
             for (int i = 0; i < 30; i++)
             {
-                string? c0 = null, c1 = null;
-                var waitPin = System.Diagnostics.Stopwatch.StartNew();
-                while (waitPin.ElapsedMilliseconds < 1000
-                    && ((c0 = Volatile.Read(ref activeCanaries[0])) == null
-                        || (c1 = Volatile.Read(ref activeCanaries[1])) == null))
-                    System.Threading.Thread.SpinWait(50);
-                string pinnedTargets = string.Join(",", new[] { c0, c1 }.Where(s => !string.IsNullOrEmpty(s)));
-                if (pinnedTargets.Length == 0)
-                    throw new InvalidOperationException("Churn threads did not publish pinned canary handles.");
-                var churnResolved = NativeAdapterLocator.Resolve("lldb", python, [fake, "--canary-fd=" + pinnedTargets]);
-                if (churnResolved.Version != "21.1.8")
-                    throw new InvalidOperationException("Unexpected version during descriptor churn: " + churnResolved.Version);
+                pinnedRequestNext.Set();
+                if (!pinnedReady.WaitOne(TimeSpan.FromSeconds(5)) || pinnedWorkerError != null)
+                    throw new InvalidOperationException("Pinned canary worker failed to prepare probe round.", pinnedWorkerError);
+                string roundTargets = Volatile.Read(ref pinnedTargets)
+                    ?? throw new InvalidOperationException("Missing pinned canary targets.");
+                try
+                {
+                    var churnResolved = NativeAdapterLocator.Resolve("lldb", python, [fake, "--canary-fd=" + roundTargets]);
+                    if (churnResolved.Version != "21.1.8")
+                        throw new InvalidOperationException("Unexpected version during descriptor churn: " + churnResolved.Version);
+                }
+                finally
+                {
+                    pinnedReleaseHold.Set();
+                }
+                if (!pinnedRoundDone.WaitOne(TimeSpan.FromSeconds(5)) || pinnedWorkerError != null)
+                    throw new InvalidOperationException("Pinned canary worker failed after probe round.", pinnedWorkerError);
+                int leakedInRound = Volatile.Read(ref pinnedRoundBytes);
+                if (leakedInRound != 0)
+                    throw new InvalidOperationException($"Concurrent pinned canary leaked {leakedInRound} bytes on round {i}.");
             }
         }
         finally
         {
             Volatile.Write(ref stopChurn, 1);
-            foreach (var churnThread in churnThreads)
-                churnThread.Join(TimeSpan.FromSeconds(5));
+            pinnedRequestNext.Set();
+            pinnedReleaseHold.Set();
+            pinnedWorker.Join(TimeSpan.FromSeconds(5));
+            churnThread.Join(TimeSpan.FromSeconds(5));
         }
         if (churnInheritedBytes != 0)
             throw new InvalidOperationException($"Concurrent external descriptor churn leaked {churnInheritedBytes} canary bytes into probe children.");
@@ -555,6 +644,9 @@ if (args.Length == 2 || args[2] == "version-probe-descriptors")
         "lldb version 21.1.8+",
         "lldb version 21.1.8-01",
         "lldb version 21.1.8-rc.01",
+        "liblldb: lldb-21.1.8-rc.01+2.3.4",
+        "lldb-21.1.8-01+2.3.4",
+        "21.1.8-01+2.3.4",
         "lldb version 21.1.8-rc.",
         "lldb version 21.1.8-.rc",
         "lldb version 21.1.8-rc..1",
@@ -1260,14 +1352,31 @@ int OpenHandleCount()
     return GetProcessHandleCount(self.SafeHandle, out uint count) ? (int)count : self.HandleCount;
 }
 
+int DuplicateHighInheritableFd(int sourceFd, int minFd)
+{
+    int duplicated = fcntl_dupfd(sourceFd, 0, minFd, 0, 0, 0, 0, 0, minFd); // F_DUPFD = 0
+    if (duplicated < minFd)
+        throw new InvalidOperationException($"F_DUPFD(>={minFd}) failed: fd={duplicated}, errno={Marshal.GetLastPInvokeError()}");
+    int flags = fcntl_getfd(duplicated, 1); // F_GETFD = 1
+    if (flags < 0 || (flags & 1) != 0)
+    {
+        _ = close_fd(duplicated);
+        throw new InvalidOperationException($"F_DUPFD descriptor {duplicated} is not inheritable (flags={flags}).");
+    }
+    return duplicated;
+}
+
 [DllImport("libc", SetLastError = true)]
 static extern int getrlimit(int resource, out RLimit rlim);
 
 [DllImport("libc", SetLastError = true)]
 static extern int setrlimit(int resource, ref RLimit rlim);
 
-[DllImport("libc", SetLastError = true)]
-static extern int dup2(int oldfd, int newfd);
+[DllImport("libc", EntryPoint = "fcntl", SetLastError = true)]
+static extern int fcntl_dupfd(int fd, int cmd, nint r2, nint r3, nint r4, nint r5, nint r6, nint r7, nint stackArg);
+
+[DllImport("libc", EntryPoint = "fcntl", SetLastError = true)]
+static extern int fcntl_getfd(int fd, int cmd);
 
 [DllImport("libc", EntryPoint = "close", SetLastError = true)]
 static extern int close_fd(int fd);

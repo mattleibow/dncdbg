@@ -128,10 +128,12 @@ internal static class NativeAdapterLocator
         return new NativeAdapterDescriptor(kind, path, arguments, source, version, RuntimeInformation.RuntimeIdentifier, warnings);
     }
 
-    private const string SemVerSegmentsPattern =
+    private const string SemVerPrereleasePattern =
+        @"(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*";
+    private const string SemVerBuildPattern =
         @"[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*";
     private const string VersionTokenPattern =
-        @"(\d+(?:\.\d+){2,3})(?:git|(?:-" + SemVerSegmentsPattern + @")?(?:\+" + SemVerSegmentsPattern + @")?)?(?=$|[\s),;])";
+        @"(\d+(?:\.\d+){2,3})(?:git|(?:-" + SemVerPrereleasePattern + @")?(?:\+" + SemVerBuildPattern + @")?)?(?=$|[\s),;])";
     private static readonly object SpawnLock = new();
 
     internal static string? ParseVersion(string text)

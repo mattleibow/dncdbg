@@ -182,29 +182,109 @@ if (args.Length == 2 || args[2] == "version-probe-descriptors")
             }
         }
         catch (ArgumentException) { }
+        using (var positiveCanary = new System.IO.Pipes.AnonymousPipeServerStream(
+            System.IO.Pipes.PipeDirection.In, HandleInheritability.Inheritable))
+        {
+            string positiveHandle = positiveCanary.GetClientHandleAsString();
+            int highUnixFd = -1;
+            try
+            {
+                if (!OperatingSystem.IsWindows())
+                {
+                    highUnixFd = 140;
+                    if (dup2(int.Parse(positiveHandle, System.Globalization.CultureInfo.InvariantCulture), highUnixFd) != highUnixFd)
+                        throw new InvalidOperationException($"dup2 to high fd {highUnixFd} failed: {Marshal.GetLastPInvokeError()}");
+                    positiveHandle = highUnixFd.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                }
+                var controlStart = new System.Diagnostics.ProcessStartInfo(python)
+                {
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                };
+                controlStart.ArgumentList.Add(fake);
+                controlStart.ArgumentList.Add("--canary-fd=" + positiveHandle);
+                controlStart.ArgumentList.Add("--version");
+                using var controlProcess = System.Diagnostics.Process.Start(controlStart)!;
+                _ = controlProcess.StandardOutput.ReadToEnd();
+                _ = controlProcess.StandardError.ReadToEnd();
+                controlProcess.WaitForExit(5000);
+            }
+            finally
+            {
+                if (highUnixFd >= 0)
+                    _ = close_fd(highUnixFd);
+                positiveCanary.DisposeLocalCopyOfClientHandle();
+            }
+            using var positiveReader = new StreamReader(positiveCanary);
+            string positiveText = positiveReader.ReadToEnd();
+            if (!positiveText.Contains("UNRELATED_HANDLE_INHERITED", StringComparison.Ordinal))
+                throw new InvalidOperationException("Positive-control canary did not detect intentional handle inheritance.");
+        }
         using (var canary = new System.IO.Pipes.AnonymousPipeServerStream(
             System.IO.Pipes.PipeDirection.In, HandleInheritability.Inheritable))
         {
             string canaryHandle = canary.GetClientHandleAsString();
-            var canaryResolved = NativeAdapterLocator.Resolve("lldb", python, [fake, "--canary-fd=" + canaryHandle]);
-            canary.DisposeLocalCopyOfClientHandle();
+            int highUnixFd = -1;
+            string canaryTarget = canaryHandle;
+            try
+            {
+                if (!OperatingSystem.IsWindows())
+                {
+                    highUnixFd = 140;
+                    if (dup2(int.Parse(canaryHandle, System.Globalization.CultureInfo.InvariantCulture), highUnixFd) != highUnixFd)
+                        throw new InvalidOperationException($"dup2 to high fd {highUnixFd} failed: {Marshal.GetLastPInvokeError()}");
+                    canaryTarget = $"{canaryHandle},{highUnixFd}";
+                }
+                var canaryResolved = NativeAdapterLocator.Resolve("lldb", python, [fake, "--canary-fd=" + canaryTarget]);
+                if (canaryResolved.Version != "21.1.8")
+                    throw new InvalidOperationException("Unexpected canary probe version: " + canaryResolved.Version);
+            }
+            finally
+            {
+                if (highUnixFd >= 0)
+                    _ = close_fd(highUnixFd);
+                canary.DisposeLocalCopyOfClientHandle();
+            }
             using var canaryReader = new StreamReader(canary);
             string leakedText = canaryReader.ReadToEnd();
-            if (canaryResolved.Version != "21.1.8" || leakedText.Length != 0)
+            if (leakedText.Length != 0)
                 throw new InvalidOperationException("Probe child inherited unrelated parent handle: " + leakedText);
         }
         int stopChurn = 0;
         int churnInheritedBytes = 0;
+        var activeCanaries = new string?[2];
         var churnThreads = Enumerable.Range(0, 2).Select(churnIndex => new System.Threading.Thread(() =>
         {
             var buf = new byte[64];
+            int highFd = 142 + churnIndex;
             while (Volatile.Read(ref stopChurn) == 0)
             {
                 using var churnPipe = new System.IO.Pipes.AnonymousPipeServerStream(
                     System.IO.Pipes.PipeDirection.In, HandleInheritability.Inheritable);
-                _ = churnPipe.GetClientHandleAsString();
-                System.Threading.Thread.SpinWait(200);
-                churnPipe.DisposeLocalCopyOfClientHandle();
+                string clientHandle = churnPipe.GetClientHandleAsString();
+                bool duped = false;
+                try
+                {
+                    if (!OperatingSystem.IsWindows()
+                        && dup2(int.Parse(clientHandle, System.Globalization.CultureInfo.InvariantCulture), highFd) == highFd)
+                    {
+                        duped = true;
+                        Volatile.Write(ref activeCanaries[churnIndex], $"{clientHandle},{highFd}");
+                    }
+                    else
+                    {
+                        Volatile.Write(ref activeCanaries[churnIndex], clientHandle);
+                    }
+                    System.Threading.Thread.Sleep(2);
+                }
+                finally
+                {
+                    Volatile.Write(ref activeCanaries[churnIndex], null);
+                    if (duped)
+                        _ = close_fd(highFd);
+                    churnPipe.DisposeLocalCopyOfClientHandle();
+                }
                 int read = churnPipe.Read(buf, 0, buf.Length);
                 if (read > 0)
                     Interlocked.Add(ref churnInheritedBytes, read);
@@ -216,7 +296,16 @@ if (args.Length == 2 || args[2] == "version-probe-descriptors")
         {
             for (int i = 0; i < 30; i++)
             {
-                var churnResolved = NativeAdapterLocator.Resolve("lldb", python, [fake, "--canary-fd=-1"]);
+                string? c0 = null, c1 = null;
+                var waitPin = System.Diagnostics.Stopwatch.StartNew();
+                while (waitPin.ElapsedMilliseconds < 1000
+                    && ((c0 = Volatile.Read(ref activeCanaries[0])) == null
+                        || (c1 = Volatile.Read(ref activeCanaries[1])) == null))
+                    System.Threading.Thread.SpinWait(50);
+                string pinnedTargets = string.Join(",", new[] { c0, c1 }.Where(s => !string.IsNullOrEmpty(s)));
+                if (pinnedTargets.Length == 0)
+                    throw new InvalidOperationException("Churn threads did not publish pinned canary handles.");
+                var churnResolved = NativeAdapterLocator.Resolve("lldb", python, [fake, "--canary-fd=" + pinnedTargets]);
                 if (churnResolved.Version != "21.1.8")
                     throw new InvalidOperationException("Unexpected version during descriptor churn: " + churnResolved.Version);
             }
@@ -464,6 +553,8 @@ if (args.Length == 2 || args[2] == "version-probe-descriptors")
         "lldb-2103.0.1garbage",
         "lldb version 21.1.8-",
         "lldb version 21.1.8+",
+        "lldb version 21.1.8-01",
+        "lldb version 21.1.8-rc.01",
         "lldb version 21.1.8-rc.",
         "lldb version 21.1.8-.rc",
         "lldb version 21.1.8-rc..1",
@@ -477,6 +568,9 @@ if (args.Length == 2 || args[2] == "version-probe-descriptors")
         || NativeAdapterLocator.ParseVersion("lldb version 21.0.0git (https://github.com/llvm/llvm-project.git)") != "21.0.0"
         || NativeAdapterLocator.ParseVersion("liblldb: lldb-2103.0.34.103") != "2103.0.34.103"
         || NativeAdapterLocator.ParseVersion("lldb version 21.1.8-rc.1+build.42") != "21.1.8"
+        || NativeAdapterLocator.ParseVersion("lldb version 21.1.8-0") != "21.1.8"
+        || NativeAdapterLocator.ParseVersion("lldb version 21.1.8-00a") != "21.1.8"
+        || NativeAdapterLocator.ParseVersion("lldb version 21.1.8+01") != "21.1.8"
         || NativeAdapterLocator.ParseVersion("lldb version 21.1.8-rc-1") != "21.1.8"
         || NativeAdapterLocator.ParseVersion("lldb version 21.1.8-rc--1") != "21.1.8"
         || NativeAdapterLocator.ParseVersion("lldb version 21.1.8--rc") != "21.1.8"
@@ -1171,6 +1265,12 @@ static extern int getrlimit(int resource, out RLimit rlim);
 
 [DllImport("libc", SetLastError = true)]
 static extern int setrlimit(int resource, ref RLimit rlim);
+
+[DllImport("libc", SetLastError = true)]
+static extern int dup2(int oldfd, int newfd);
+
+[DllImport("libc", EntryPoint = "close", SetLastError = true)]
+static extern int close_fd(int fd);
 
 [DllImport("kernel32.dll", SetLastError = true)]
 [return: MarshalAs(UnmanagedType.Bool)]

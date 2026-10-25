@@ -18,19 +18,23 @@ parser.add_argument("--barrier", type=Path)
 parser.add_argument("--version", action="store_true")
 parser.add_argument("--target-gate", type=Path)
 parser.add_argument("--record-pid", action="store_true")
-parser.add_argument("--canary-fd", type=int)
+parser.add_argument("--canary-fd")
 parser.add_argument("--arch", default="arm64")
 options = parser.parse_args()
 
 if options.canary_fd is not None:
     payload = b"UNRELATED_HANDLE_INHERITED"
+    targets = [int(token) for token in options.canary_fd.split(",") if token.strip()]
     if sys.platform == "win32":
         import ctypes
         from ctypes import wintypes
-        written = wintypes.DWORD()
-        ctypes.windll.kernel32.WriteFile(wintypes.HANDLE(options.canary_fd), payload, len(payload), ctypes.byref(written), None)
+        for candidate_handle in targets:
+            if candidate_handle > 0:
+                written = wintypes.DWORD()
+                ctypes.windll.kernel32.WriteFile(
+                    wintypes.HANDLE(candidate_handle), payload, len(payload), ctypes.byref(written), None)
     else:
-        for candidate_fd in ([options.canary_fd] if options.canary_fd >= 0 else list(range(3, 64))):
+        for candidate_fd in (targets if targets and targets[0] >= 0 else list(range(3, 192))):
             try:
                 os.write(candidate_fd, payload)
             except OSError:

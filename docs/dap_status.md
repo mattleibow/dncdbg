@@ -294,6 +294,14 @@ How to read the blocks below:
 ✅  filterOptions?: ExceptionFilterOptions[];
 ❌  exceptionOptions?: ExceptionOptions[];
 ```
+Supported filter IDs in both `filters` and `filterOptions`:
+
+| Filter | When it stops |
+| --- | --- |
+| `all` | When an exception is thrown. |
+| `user-unhandled` | With Just My Code enabled, when an exception that passed through user code is caught by non-user code. |
+| `unhandled` | When no handler handles the exception; all types are covered by default. |
+
 The `all`, `user-unhandled`, and `unhandled` filters accept comma/whitespace-separated
 exception type conditions. Each `!TypeName` excludes only that type; it does not
 enable other types. Matching exclusions override positive or unconditional
@@ -738,6 +746,8 @@ for examples and VsDbg mappings.
 ✅  instructionPointerReference?: string;
 ```
 #### ExceptionFilterOptions
+`filterId` accepts the same `all`, `user-unhandled`, and `unhandled` filters
+described in [SetExceptionBreakpointsRequest](#setexceptionbreakpointsrequest-setexceptionbreakpoints).
 See [exception conditions](exception_conditions.md) for exact and prefix matching.
 
 ```text

@@ -1,4 +1,3 @@
-using System.Text.RegularExpressions;
 using ClrDebug;
 using DncDbg.Engine.Symbols;
 using DncDbg.Engine.Values;
@@ -7,7 +6,7 @@ namespace DncDbg.Engine;
 
 public sealed record GotoTargetInfo(int Id, string Label, int Line, int Column, int EndLine, int EndColumn);
 
-/// <param name="Condition">Comma/whitespace-separated exception type names; "!" excludes one type, "*" is a wildcard.</param>
+/// <param name="Condition">Comma/whitespace-separated exception type names; "!" excludes a token and a trailing "*" matches a prefix.</param>
 public sealed record ExceptionFilterRequest(string Filter, string? Condition = null);
 
 public sealed partial class DebugEngine
@@ -189,7 +188,7 @@ public sealed partial class DebugEngine
 
     // ---------------------------------------------------------------- exception filter conditions
 
-    private readonly Dictionary<string, List<(bool Exclude, Regex Pattern)>> _exceptionConditions = [];
+    private readonly Dictionary<string, List<(bool Exclude, bool Prefix, string Name)>> _exceptionConditions = [];
     private readonly HashSet<string> _unconditionalExceptionFilters = [];
 
     public void SetExceptionFilters(IReadOnlyCollection<ExceptionFilterRequest> filters)
@@ -217,7 +216,8 @@ public sealed partial class DebugEngine
                 {
                     bool exclude = token.StartsWith('!');
                     string name = exclude ? token[1..] : token;
-                    conditions.Add((exclude, new Regex("^" + Regex.Escape(name).Replace("\\*", ".*") + "$", RegexOptions.CultureInvariant)));
+                    bool prefix = name.EndsWith('*');
+                    conditions.Add((exclude, prefix, prefix ? name[..^1] : name));
                 }
             }
         }
@@ -235,10 +235,13 @@ public sealed partial class DebugEngine
             if (unwrapped == null)
                 return true;
             string name = _values.GetTypeName(unwrapped);
-            if (condition.Any(c => c.Exclude && c.Pattern.IsMatch(name)))
+            bool Matches((bool Exclude, bool Prefix, string Name) c) => c.Prefix
+                ? name.StartsWith(c.Name, StringComparison.Ordinal)
+                : name.Equals(c.Name, StringComparison.Ordinal);
+            if (condition.Any(c => c.Exclude && Matches(c)))
                 return false;
             return filter == FilterUnhandled || _unconditionalExceptionFilters.Contains(filter)
-                || condition.Any(c => !c.Exclude && c.Pattern.IsMatch(name));
+                || condition.Any(c => !c.Exclude && Matches(c));
         }
         catch (Exception e)
         {

@@ -303,6 +303,10 @@ types. Unhandled exceptions stop by default even when the filter is omitted or
 has only nonmatching positive conditions; only a matching exclusion on the
 `unhandled` filter suppresses that stop. Exclusions on `all` or `user-unhandled`
 do not suppress the final unhandled stop.
+Trailing `*` matches an exception type-name prefix, including in negated tokens;
+`*` matches every type and `!*` excludes every type. Earlier asterisks are
+literal, not arbitrary-position globs. See [exception conditions](exception_conditions.md)
+for examples and VsDbg mappings.
 
 #### SetExceptionBreakpointsResponse
 ```text
@@ -734,6 +738,8 @@ do not suppress the final unhandled stop.
 ✅  instructionPointerReference?: string;
 ```
 #### ExceptionFilterOptions
+See [exception conditions](exception_conditions.md) for exact and prefix matching.
+
 ```text
 ✅  filterId: string;
 ✅  condition?: string;

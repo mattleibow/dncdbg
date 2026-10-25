@@ -2,6 +2,7 @@
 Upcoming changes compared to the previous version.
 
 #### DAP
+- Matched upstream trailing-`*` prefix exception conditions, including negated prefixes and `!*`. Internal/repeated asterisks are literal rather than general glob patterns.
 - Ported upstream per-type exception-condition negation and deterministic exclusion priority across additive filter entries. A lone `!` is ignored.
 - Unhandled exceptions stop by default unless a matching negated condition on the `unhandled` filter excludes the type; positive conditions do not narrow this default.
 - Added `linesStartAt1`, `columnsStartAt1` and `supportsMemoryReferences` support in Initialize Request.

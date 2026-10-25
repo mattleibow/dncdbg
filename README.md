@@ -113,6 +113,7 @@ releasing the process.
 - [Inputting text into the target](docs/inputting_text.md)
 - [Evaluation format specifiers](docs/evaluation_format_specifiers.md)
 - [Persistent debug server](docs/debug_server.md)
+- [Exception conditions](docs/exception_conditions.md)
 
 ## History and contributing
 

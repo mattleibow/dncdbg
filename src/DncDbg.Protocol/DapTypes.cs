@@ -166,6 +166,7 @@ public sealed class RunInTerminalResponseBody
 
 public sealed class AttachArguments
 {
+    public Dictionary<string, string?>? Env { get; set; }
     public bool StopAtEntry { get; set; }
     public ExpressionEvaluationOptions? ExpressionEvaluationOptions { get; set; }
     public JsonElement ProcessId { get; set; }

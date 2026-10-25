@@ -750,7 +750,7 @@ internal sealed class DebugAdapter : IDisposable
     {
         _engine.AllowImplicitFuncEval = args.ExpressionEvaluationOptions?.AllowImplicitFuncEval ?? args.AllowImplicitFuncEval ?? true;
         _engine.ShowRawValues = args.ExpressionEvaluationOptions?.ShowRawValues ?? false;
-        _engine.Attach(args.GetProcessId(), args.JustMyCode ?? true, args.SourceFileMap, args.StopAtEntry);
+        _engine.Attach(args.GetProcessId(), args.JustMyCode ?? true, args.SourceFileMap, args.StopAtEntry, args.Env);
         _isAttach = true;
         SendProcessEvent(args.GetProcessId().ToString(), "attach");
     }
@@ -784,14 +784,27 @@ internal sealed class DebugAdapter : IDisposable
         });
     }
 
-    private static ExceptionDetails ToExceptionDetails(ExceptionData data) => new()
+    private static ExceptionDetails ToExceptionDetails(ExceptionData data)
     {
-        Message = data.Message,
-        FullTypeName = data.TypeName,
-        TypeName = data.TypeName[(data.TypeName.LastIndexOf('.') + 1)..],
-        StackTrace = data.StackTrace,
-        InnerException = data.Inner == null ? null : [ToExceptionDetails(data.Inner)],
-    };
+        ExceptionDetails? result = null;
+        ExceptionDetails? previous = null;
+        for (ExceptionData? current = data; current != null; current = current.Inner)
+        {
+            var details = new ExceptionDetails
+            {
+                Message = current.Message,
+                FullTypeName = current.TypeName,
+                TypeName = current.TypeName[(current.TypeName.LastIndexOf('.') + 1)..],
+                StackTrace = current.StackTrace,
+            };
+            if (previous != null)
+                previous.InnerException = [details];
+            else
+                result = details;
+            previous = details;
+        }
+        return result!;
+    }
 
     // The two numbers a client decides about paging by; they only make sense together, for values that have elements.
     private static int? Indexed(VariableInfo variable, int handle) => handle != 0 && variable.IndexedChildren > 0 ? variable.IndexedChildren : null;

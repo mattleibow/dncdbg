@@ -17,7 +17,9 @@ $suiteRoot = $PSScriptRoot
 $repoRoot = Split-Path -Parent $suiteRoot
 
 function Test-IsWindowsOnly([string] $ProjectPath) {
-    return (Get-Content -Raw $ProjectPath) -match "<TargetFramework[^>]*>[^<]*-windows</TargetFramework>"
+    $project = Get-Content -Raw $ProjectPath
+    return $project -match "<TargetFramework[^>]*>[^<]*-windows</TargetFramework>" -or
+        $project -match "<UseWindowsForms>\s*true\s*</UseWindowsForms>"
 }
 
 function Invoke-DotNet([string[]] $Arguments) {

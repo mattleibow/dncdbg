@@ -126,6 +126,7 @@ public sealed partial class DebugEngine : IDisposable
         using var operation = _lifetime.Enter();
         lock (_lock)
         {
+            ConfigureExceptionDetails(options.Environment);
             NoDebug = options.NoDebug;
             if (_processId != 0 || _launching)
                 throw new DebuggerException("A debuggee is already running.");
@@ -234,12 +235,14 @@ public sealed partial class DebugEngine : IDisposable
     /// <summary>.NET Framework launch: the console is switched to UTF-8 when the process exists, before managed code runs.</summary>
     private bool _switchConsoleOnStart;
 
-    public void Attach(int processId, bool justMyCode = true, IReadOnlyDictionary<string, string>? sourceFileMap = null, bool stopAtEntry = false)
+    public void Attach(int processId, bool justMyCode = true, IReadOnlyDictionary<string, string>? sourceFileMap = null, bool stopAtEntry = false,
+        IReadOnlyDictionary<string, string?>? environment = null)
     {
         using var operation = _lifetime.Enter();
         TaskCompletionSource<Exception?> outcome;
         lock (_lock)
         {
+            ConfigureExceptionDetails(environment);
             if (_processId != 0)
                 throw new DebuggerException("A debuggee is already running.");
             ProcessBitness.VerifyProcess(processId);

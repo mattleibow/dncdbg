@@ -132,22 +132,61 @@ internal static class NativeAdapterLocator
         @"(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*";
     private const string SemVerBuildPattern =
         @"[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*";
-    private const string VersionTokenPattern =
-        @"(\d+(?:\.\d+){2,3})(?:git|(?:-" + SemVerPrereleasePattern + @")?(?:\+" + SemVerBuildPattern + @")?)?(?=$|[\s),;])";
+    private static readonly Regex WholeVersionTokenRegex = new(
+        @"^(\d+(?:\.\d+){2,3})(?:git|(?:-" + SemVerPrereleasePattern + @")?(?:\+" + SemVerBuildPattern + @")?)?$",
+        RegexOptions.CultureInvariant);
     private static readonly object SpawnLock = new();
 
     internal static string? ParseVersion(string text)
     {
         // Xcode reports an LLVM adapter version and a different liblldb version; DAP reports the latter.
-        Match runtime = Regex.Match(text, @"\blldb(?:\s+version\s+|-)" + VersionTokenPattern,
-            RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
-        if (runtime.Success)
-            return runtime.Groups[1].Value;
-        if (Regex.IsMatch(text, @"\blldb(?:\s+version\b|-(?!dap\b|vscode\b|server\b)\S)",
-            RegexOptions.CultureInvariant | RegexOptions.IgnoreCase))
-            return null;
-        Match version = Regex.Match(text, @"(?<![\w.+-])" + VersionTokenPattern, RegexOptions.CultureInvariant);
-        return version.Success ? version.Groups[1].Value : null;
+        string[] tokens = text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
+            .Select(TrimTokenPunctuation)
+            .Where(t => t.Length > 0)
+            .ToArray();
+
+        for (int i = 0; i < tokens.Length; i++)
+        {
+            if (tokens[i].Equals("lldb", StringComparison.OrdinalIgnoreCase)
+                && i + 2 < tokens.Length
+                && tokens[i + 1].Equals("version", StringComparison.OrdinalIgnoreCase))
+            {
+                return TryParseWholeVersion(tokens[i + 2], out string? parsed) ? parsed : null;
+            }
+            string? hyphenSuffix = tokens[i].StartsWith("lldb-dap-", StringComparison.OrdinalIgnoreCase) ? tokens[i]["lldb-dap-".Length..]
+                : tokens[i].StartsWith("lldb-vscode-", StringComparison.OrdinalIgnoreCase) ? tokens[i]["lldb-vscode-".Length..]
+                : tokens[i].StartsWith("lldb-", StringComparison.OrdinalIgnoreCase) ? tokens[i]["lldb-".Length..]
+                : null;
+            if (hyphenSuffix is { Length: > 0 } && char.IsAsciiDigit(hyphenSuffix[0]))
+                return TryParseWholeVersion(hyphenSuffix, out string? parsed) ? parsed : null;
+        }
+
+        for (int i = 0; i + 2 < tokens.Length; i++)
+        {
+            if (tokens[i + 1].Equals("version", StringComparison.OrdinalIgnoreCase)
+                && (tokens[i].StartsWith("lldb", StringComparison.OrdinalIgnoreCase)
+                    || tokens[i].Equals("llvm", StringComparison.OrdinalIgnoreCase)))
+            {
+                return TryParseWholeVersion(tokens[i + 2], out string? parsed) ? parsed : null;
+            }
+        }
+
+        return tokens.Length == 1 && TryParseWholeVersion(tokens[0], out string? standalone) ? standalone : null;
+    }
+
+    private static string TrimTokenPunctuation(string token) =>
+        token.Trim('(', ')', '[', ']', ',', ';', ':');
+
+    private static bool TryParseWholeVersion(string token, out string? version)
+    {
+        Match match = WholeVersionTokenRegex.Match(token);
+        if (match.Success)
+        {
+            version = match.Groups[1].Value;
+            return true;
+        }
+        version = null;
+        return false;
     }
 
     private static string? ParseStreamVersion(string streamText) =>

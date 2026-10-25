@@ -647,6 +647,9 @@ if (args.Length == 2 || args[2] == "version-probe-descriptors")
         "liblldb: lldb-21.1.8-rc.01+2.3.4",
         "lldb-21.1.8-01+2.3.4",
         "21.1.8-01+2.3.4",
+        "lldb-21.1.8-01+lldb-2.3.4",
+        "lldb version 21.1.8-rc.01+lldb-2.3.4",
+        "21.1.8-01+lldb-2.3.4",
         "lldb version 21.1.8-rc.",
         "lldb version 21.1.8-.rc",
         "lldb version 21.1.8-rc..1",
@@ -659,6 +662,11 @@ if (args.Length == 2 || args[2] == "version-probe-descriptors")
     if (NativeAdapterLocator.ParseVersion("lldb version 21.1.8") != "21.1.8"
         || NativeAdapterLocator.ParseVersion("lldb version 21.0.0git (https://github.com/llvm/llvm-project.git)") != "21.0.0"
         || NativeAdapterLocator.ParseVersion("liblldb: lldb-2103.0.34.103") != "2103.0.34.103"
+        || NativeAdapterLocator.ParseVersion("warning: lldb-python plugin unavailable\nlldb-dap version 21.1.8") != "21.1.8"
+        || NativeAdapterLocator.ParseVersion("lldb-dap version 21.1.8 (https://github.com/lldb-tools/llvm-project.git)") != "21.1.8"
+        || NativeAdapterLocator.ParseVersion("lldb-dap version 21.1.8\nwarning: lldb-server helper unavailable") != "21.1.8"
+        || NativeAdapterLocator.ParseVersion("21.1.8+lldb-2.3.4") != "21.1.8"
+        || NativeAdapterLocator.ParseVersion("lldb version 21.1.8+lldb-2.3.4") != "21.1.8"
         || NativeAdapterLocator.ParseVersion("lldb version 21.1.8-rc.1+build.42") != "21.1.8"
         || NativeAdapterLocator.ParseVersion("lldb version 21.1.8-0") != "21.1.8"
         || NativeAdapterLocator.ParseVersion("lldb version 21.1.8-00a") != "21.1.8"

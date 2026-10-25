@@ -103,25 +103,47 @@ if (args.Length == 2 || args[2] == "version-probe-descriptors")
             if (!OperatingSystem.IsWindows() && originalLimit is { } savedLimit)
             {
                 int beforeEmfile = OpenHandleCount();
-                for (int round = 0; round < 10; round++)
+                var fillers = new List<Microsoft.Win32.SafeHandles.SafeFileHandle>();
+                try
                 {
-                    int currentOpen = OpenHandleCount();
-                    var partialCap = new RLimit { Cur = (ulong)(currentOpen + 2), Max = savedLimit.Max };
-                    if (setrlimit(resource, ref partialCap) != 0)
-                        throw new InvalidOperationException($"setrlimit partial cap failed: {Marshal.GetLastPInvokeError()}");
-                    try
+                    while (fillers.Count < 256)
                     {
-                        bool threw = false;
-                        try { _ = NativeAdapterLocator.Resolve("lldb", probePath, probeArguments); }
-                        catch (Exception error) when (error is ArgumentException or IOException) { threw = true; }
-                        if (!threw)
-                            throw new InvalidOperationException("Partial-pipe EMFILE probe unexpectedly succeeded.");
+                        var filler = File.OpenHandle("/dev/null", FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                        fillers.Add(filler);
+                        if (fillers.Count >= 2
+                            && fillers[^1].DangerousGetHandle().ToInt32() == fillers[^2].DangerousGetHandle().ToInt32() + 1
+                            && fillers[^1].DangerousGetHandle().ToInt32() >= beforeEmfile + 16)
+                            break;
                     }
-                    finally
+                    int allowedMaxFd = fillers[^1].DangerousGetHandle().ToInt32();
+                    fillers[^1].Dispose();
+                    fillers.RemoveAt(fillers.Count - 1);
+                    fillers[^1].Dispose();
+                    fillers.RemoveAt(fillers.Count - 1);
+                    for (int round = 0; round < 10; round++)
                     {
-                        var restoreCap = new RLimit { Cur = Math.Min(savedLimit.Max, (ulong)Math.Max(baseline + 64, 256)), Max = savedLimit.Max };
-                        _ = setrlimit(resource, ref restoreCap);
+                        var partialCap = new RLimit { Cur = (ulong)(allowedMaxFd + 1), Max = savedLimit.Max };
+                        if (setrlimit(resource, ref partialCap) != 0)
+                            throw new InvalidOperationException($"setrlimit partial cap failed: {Marshal.GetLastPInvokeError()}");
+                        try
+                        {
+                            bool threw = false;
+                            try { _ = NativeAdapterLocator.Resolve("lldb", probePath, probeArguments); }
+                            catch (Exception error) when (error is ArgumentException or IOException) { threw = true; }
+                            if (!threw)
+                                throw new InvalidOperationException("Partial-pipe EMFILE probe unexpectedly succeeded.");
+                        }
+                        finally
+                        {
+                            var restoreCap = new RLimit { Cur = Math.Min(savedLimit.Max, (ulong)Math.Max(baseline + 64, 256)), Max = savedLimit.Max };
+                            _ = setrlimit(resource, ref restoreCap);
+                        }
                     }
+                }
+                finally
+                {
+                    foreach (var filler in fillers)
+                        filler.Dispose();
                 }
                 int afterEmfile = OpenHandleCount();
                 if (afterEmfile != beforeEmfile)

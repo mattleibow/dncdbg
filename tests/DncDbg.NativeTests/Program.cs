@@ -484,6 +484,24 @@ if (args.Length == 2 || args[2] == "version-probe-descriptors")
         || NativeAdapterLocator.ParseVersion("lldb version 21.1.8-rc.1+linux-x64") != "21.1.8"
         || NativeAdapterLocator.ParseVersion("21.1.8-alpha.1") != "21.1.8")
         throw new InvalidOperationException("Valid version format was rejected by ParseVersion.");
+    foreach (Exception missingCloseFrom in new Exception[]
+    {
+        new EntryPointNotFoundException("posix_spawn_file_actions_addclosefrom_np"),
+        new DllNotFoundException("libc"),
+    })
+    {
+        bool rejected = false;
+        try
+        {
+            NativeAdapterLocator.AddLinuxCloseFromAction(IntPtr.Zero, (_, _) => throw missingCloseFrom);
+        }
+        catch (NotSupportedException error) when (error.Message.Contains("glibc 2.34+", StringComparison.Ordinal))
+        {
+            rejected = true;
+        }
+        if (!rejected)
+            throw new InvalidOperationException("Missing posix_spawn_file_actions_addclosefrom_np did not fail closed with glibc 2.34+ diagnostic.");
+    }
     Console.WriteLine("PASS 100 repeated version discoveries under low descriptor limit keep descriptor/handle count stable without GC");
     if (args.Length == 3)
         return;

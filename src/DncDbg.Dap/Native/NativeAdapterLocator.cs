@@ -178,7 +178,8 @@ internal static class NativeAdapterLocator
                 : ProbeDapVersionUnix(path, arguments);
         }
         catch (Exception error) when (error is IOException or OperationCanceledException or TimeoutException
-            or InvalidOperationException or System.ComponentModel.Win32Exception or JsonException)
+            or InvalidOperationException or System.ComponentModel.Win32Exception or JsonException
+            or NotSupportedException or EntryPointNotFoundException or DllNotFoundException)
         {
             throw new ArgumentException($"Error: Native debugger '{path}' could not complete its DAP version probe: "
                 + error.Message, error);
@@ -529,7 +530,7 @@ internal static class NativeAdapterLocator
                 : RunUnix(executable, arguments);
         }
         catch (Exception error) when (error is System.ComponentModel.Win32Exception or IOException
-            or EntryPointNotFoundException or DllNotFoundException)
+            or NotSupportedException or EntryPointNotFoundException or DllNotFoundException)
         { throw new ArgumentException("Error: Cannot execute native debugger: " + error.Message, error); }
     }
 
@@ -975,7 +976,7 @@ internal static class NativeAdapterLocator
             if (OperatingSystem.IsMacOS())
                 spawnFlags |= 0x4000; // POSIX_SPAWN_CLOEXEC_DEFAULT
             else
-                CheckSpawn(posix_spawn_file_actions_addclosefrom_np(actions, 3));
+                AddLinuxCloseFromAction(actions);
             CheckSpawn(posix_spawnattr_setpgroup(attr, 0));
             CheckSpawn(posix_spawnattr_setflags(attr, spawnFlags));
 
@@ -1020,6 +1021,23 @@ internal static class NativeAdapterLocator
             if (error != 0)
                 throw new System.ComponentModel.Win32Exception(error);
         }
+    }
+
+    internal static void AddLinuxCloseFromAction(IntPtr actions, Func<IntPtr, int, int>? closeFrom = null)
+    {
+        int error;
+        try
+        {
+            error = (closeFrom ?? posix_spawn_file_actions_addclosefrom_np)(actions, 3);
+        }
+        catch (Exception missing) when (missing is EntryPointNotFoundException or DllNotFoundException)
+        {
+            throw new NotSupportedException(
+                "Linux native debugger discovery requires glibc 2.34+ (posix_spawn_file_actions_addclosefrom_np) for atomic child descriptor exclusion.",
+                missing);
+        }
+        if (error != 0)
+            throw new System.ComponentModel.Win32Exception(error);
     }
 
     internal enum UnixChildState

@@ -200,19 +200,22 @@ client's DAP initialize bytes. Its process wait and single-threaded stdout/stder
 collection share one five-second monotonic deadline and a 64 KiB per-stream
 capture cap, so a descendant that inherits or continuously floods the probe's
 pipes cannot hold discovery open after the probe exits or grow memory without
-bound. Each stream tracks its own EOF completion independently; only incomplete
-or overflowed streams strip trailing non-newline-terminated text, while a
-completed stream without a trailing newline remains intact. Version parsing
-validates complete version tokens (including LLVM `git`, Apple four-component,
-and SemVer prerelease/build suffixes) and rejects malformed prefixes or
-trailing garbage. Probe pipe handles are explicitly disposed when bounded
-collection finishes, keeping file descriptors and handles stable in a no-GC
-region across both success and failure paths. Both CLI `--version` and DAP
+bound. Each stream tracks its own EOF completion and is parsed independently, so
+opposite streams cannot splice into a manufactured version token or corrupt a
+completed no-newline version. Version parsing validates complete three- or
+four-component version tokens (including LLVM `git`, Apple four-component, and
+hyphenated SemVer prerelease/build suffixes) and rejects malformed prefixes or
+trailing garbage. Child handle inheritance is restricted to the probe's own
+stdio pipes (`STARTUPINFOEXW` `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` on Windows;
+`O_CLOEXEC` pipes plus `posix_spawn_file_actions_addclose` on open non-`CLOEXEC`
+descriptors on Unix), and probe pipe handles are explicitly disposed when bounded
+collection finishes. Both CLI `--version` and self-contained non-blocking DAP
 initialize/version fallback probes establish launch-scoped cleanup ownership
-(a new Unix process group via `posix_spawn`, or a Windows Job Object assigned
-while the process is created with `CREATE_SUSPENDED` before `ResumeThread`) and
-terminate any remaining descendants on every completion path. Candidates must
-actually execute; merely
+(a new Unix process group via `posix_spawn` signaled alongside the unreaped
+leader before bounded `WNOHANG` reaping, or a Windows Job Object assigned while
+the process is created with `CREATE_SUSPENDED` before `ResumeThread`) and
+terminate any remaining descendants on every completion path without relying on
+ThreadPool timers or auto-replies. Candidates must actually execute; merely
 finding an executable is not a usable-toolchain check.
 
 The Windows runner's public LLVM imports `python310.dll`. Its CI lane installs

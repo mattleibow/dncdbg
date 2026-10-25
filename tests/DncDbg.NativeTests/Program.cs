@@ -119,66 +119,129 @@ if (args.Length == 2 || args[2] == "version-probe-descriptors")
             }
         }
         catch (ArgumentException) { }
+        using (var canary = new System.IO.Pipes.AnonymousPipeServerStream(
+            System.IO.Pipes.PipeDirection.In, HandleInheritability.Inheritable))
+        {
+            string canaryHandle = canary.GetClientHandleAsString();
+            var canaryResolved = NativeAdapterLocator.Resolve("lldb", python, [fake, "--canary-fd=" + canaryHandle]);
+            canary.DisposeLocalCopyOfClientHandle();
+            using var canaryReader = new StreamReader(canary);
+            string leakedText = canaryReader.ReadToEnd();
+            if (canaryResolved.Version != "21.1.8" || leakedText.Length != 0)
+                throw new InvalidOperationException("Probe child inherited unrelated parent handle: " + leakedText);
+        }
         ThreadPool.GetMinThreads(out int minWorkers, out int minIo);
         ThreadPool.GetMaxThreads(out int maxWorkers, out int maxIo);
-        int blockerCount = Math.Max(minWorkers, Environment.ProcessorCount * 2) + 8;
-        using var startedBlockers = new CountdownEvent(Math.Min(minWorkers, blockerCount));
+        using var soleBlockerStarted = new ManualResetEventSlim(false);
         using var releaseBlockers = new ManualResetEventSlim(false);
-        var blockerTasks = new Task[blockerCount];
+        string silentGate = Path.Combine(directory, "silent-fallback.release");
         Exception? unhandledPoolException = null;
         void OnUnhandled(object sender, UnhandledExceptionEventArgs eventArgs) =>
             unhandledPoolException = eventArgs.ExceptionObject as Exception ?? new InvalidOperationException("Unhandled exception");
         AppDomain.CurrentDomain.UnhandledException += OnUnhandled;
         try
         {
-            _ = ThreadPool.SetMaxThreads(Math.Max(minWorkers, blockerCount), minIo);
-            for (int i = 0; i < blockerCount; i++)
+            _ = ThreadPool.SetMinThreads(1, 1);
+            _ = ThreadPool.SetMaxThreads(1, 1);
+            Task blockerTask = Task.Run(() =>
             {
-                int index = i;
-                blockerTasks[i] = Task.Run(() =>
-                {
-                    if (index < startedBlockers.InitialCount)
-                        startedBlockers.Signal();
-                    releaseBlockers.Wait(TimeSpan.FromSeconds(8));
-                });
-            }
-            startedBlockers.Wait(TimeSpan.FromSeconds(2));
-            var threadErrors = new Exception?[4];
-            var threads = new System.Threading.Thread[threadErrors.Length];
-            for (int i = 0; i < threads.Length; i++)
+                soleBlockerStarted.Set();
+                releaseBlockers.Wait(TimeSpan.FromSeconds(9));
+            });
+            soleBlockerStarted.Wait(TimeSpan.FromSeconds(2));
+            Exception? silentThreadFailure = null;
+            bool silentTimedOutProperly = false;
+            var silentThread = new System.Threading.Thread(() =>
             {
-                int slot = i;
-                threads[i] = new System.Threading.Thread(() =>
+                try
                 {
-                    try
-                    {
-                        var resolved = NativeAdapterLocator.Resolve("lldb", probePath, probeArguments);
-                        if (resolved.Version != "21.1.8")
-                            throw new InvalidOperationException("Unexpected version under thread-pool saturation: " + resolved.Version);
-                    }
-                    catch (Exception error)
-                    {
-                        threadErrors[slot] = error;
-                    }
-                }) { IsBackground = true };
-                threads[i].Start();
-            }
-            foreach (var thread in threads)
-                thread.Join();
+                    _ = NativeAdapterLocator.Resolve("lldb", python,
+                        [fake, "--mode=no-cli-version-silent", "--barrier=" + silentGate]);
+                }
+                catch (ArgumentException)
+                {
+                    silentTimedOutProperly = true;
+                }
+                catch (Exception error)
+                {
+                    silentThreadFailure = error;
+                }
+            }) { IsBackground = true };
+            silentThread.Start();
+            bool joinedUnderStarvation = silentThread.Join(TimeSpan.FromSeconds(7));
+            File.WriteAllText(silentGate, "release");
             releaseBlockers.Set();
-            Task.WaitAll(blockerTasks, TimeSpan.FromSeconds(5));
-            System.Threading.Thread.Sleep(100);
+            silentThread.Join(TimeSpan.FromSeconds(3));
+            blockerTask.Wait(TimeSpan.FromSeconds(3));
+            if (!joinedUnderStarvation || !silentTimedOutProperly || silentThreadFailure != null)
+                throw new InvalidOperationException(
+                    $"Silent DAP fallback probe blocked on ThreadPool timer under starvation (joined={joinedUnderStarvation}, timedOut={silentTimedOutProperly}).",
+                    silentThreadFailure);
             if (unhandledPoolException != null)
                 throw new InvalidOperationException("Thread-pool starvation triggered an unhandled callback exception.", unhandledPoolException);
-            if (threadErrors.FirstOrDefault(error => error != null) is { } firstError)
-                throw new InvalidOperationException("Concurrent version discovery failed under thread-pool saturation.", firstError);
         }
         finally
         {
+            File.WriteAllText(silentGate, "release");
             releaseBlockers.Set();
             AppDomain.CurrentDomain.UnhandledException -= OnUnhandled;
             _ = ThreadPool.SetMaxThreads(maxWorkers, maxIo);
+            _ = ThreadPool.SetMinThreads(minWorkers, minIo);
         }
+        string noNewlinePath;
+        string[] noNewlineArgs;
+        if (OperatingSystem.IsWindows())
+        {
+            noNewlinePath = probePath;
+            noNewlineArgs = ["/c", " <nul set /p =lldb version 21.1.8 & rem"];
+        }
+        else
+        {
+            noNewlinePath = Path.Combine(directory, "lldb-dap-nonewline");
+            File.WriteAllText(noNewlinePath, "#!/bin/sh\nprintf 'lldb version 21.1.8'\n");
+            File.SetUnixFileMode(noNewlinePath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            noNewlineArgs = [];
+        }
+        string concurrentGate = Path.Combine(directory, "concurrent-slow.release");
+        Exception? isolationError = null;
+        int stopSlow = 0;
+        var slowSpawners = Enumerable.Range(0, 2).Select(spawnerIndex => new System.Threading.Thread(() =>
+        {
+            while (Volatile.Read(ref stopSlow) == 0)
+            {
+                try { _ = NativeAdapterLocator.Resolve("lldb", python, [fake, "--mode=version-inherits-pipes", "--barrier=" + concurrentGate]); }
+                catch (Exception) { }
+            }
+        }) { IsBackground = true }).ToArray();
+        foreach (var spawner in slowSpawners)
+            spawner.Start();
+        try
+        {
+            for (int iter = 0; iter < 12; iter++)
+            {
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                var resolved = NativeAdapterLocator.Resolve("lldb", noNewlinePath, noNewlineArgs);
+                if (resolved.Version != "21.1.8" || sw.ElapsedMilliseconds >= 3500)
+                {
+                    isolationError = new InvalidOperationException(
+                        $"Concurrent probe inherited no-newline probe pipe (iter={iter}, version={resolved.Version}, elapsed={sw.ElapsedMilliseconds}ms).");
+                    break;
+                }
+            }
+        }
+        catch (Exception error)
+        {
+            isolationError = error;
+        }
+        finally
+        {
+            Volatile.Write(ref stopSlow, 1);
+            File.WriteAllText(concurrentGate, "release");
+            foreach (var spawner in slowSpawners)
+                spawner.Join(TimeSpan.FromSeconds(7));
+        }
+        if (isolationError != null)
+            throw new InvalidOperationException("Concurrent probe pipe isolation failed.", isolationError);
     }
     finally
     {
@@ -194,7 +257,10 @@ if (args.Length == 2 || args[2] == "version-probe-descriptors")
         "lldb-2103.0.1garbage",
         "lldb version 21.1.8-",
         "lldb version 21.1.8+",
+        "lldb version 21.1.8--rc",
+        "lldb version 21.1.8-rc-",
         "lldb version 1.2.3.4.5",
+        "lldb version 21.1",
         "x21.1.8",
     })
         if (NativeAdapterLocator.ParseVersion(invalidVersion) != null)
@@ -203,6 +269,8 @@ if (args.Length == 2 || args[2] == "version-probe-descriptors")
         || NativeAdapterLocator.ParseVersion("lldb version 21.0.0git (https://github.com/llvm/llvm-project.git)") != "21.0.0"
         || NativeAdapterLocator.ParseVersion("liblldb: lldb-2103.0.34.103") != "2103.0.34.103"
         || NativeAdapterLocator.ParseVersion("lldb version 21.1.8-rc.1+build.42") != "21.1.8"
+        || NativeAdapterLocator.ParseVersion("lldb version 21.1.8-rc-1") != "21.1.8"
+        || NativeAdapterLocator.ParseVersion("lldb version 21.1.8-rc.1+linux-x64") != "21.1.8"
         || NativeAdapterLocator.ParseVersion("21.1.8-alpha.1") != "21.1.8")
         throw new InvalidOperationException("Valid version format was rejected by ParseVersion.");
     Console.WriteLine("PASS 100 repeated version discoveries under low descriptor limit keep descriptor/handle count stable without GC");

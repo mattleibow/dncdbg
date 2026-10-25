@@ -18,8 +18,22 @@ parser.add_argument("--barrier", type=Path)
 parser.add_argument("--version", action="store_true")
 parser.add_argument("--target-gate", type=Path)
 parser.add_argument("--record-pid", action="store_true")
+parser.add_argument("--canary-fd", type=int)
 parser.add_argument("--arch", default="arm64")
 options = parser.parse_args()
+
+if options.canary_fd is not None:
+    payload = b"UNRELATED_HANDLE_INHERITED"
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+        written = wintypes.DWORD()
+        ctypes.windll.kernel32.WriteFile(wintypes.HANDLE(options.canary_fd), payload, len(payload), ctypes.byref(written), None)
+    else:
+        try:
+            os.write(options.canary_fd, payload)
+        except OSError:
+            pass
 
 if options.target_gate:
     if options.record_pid:
@@ -54,6 +68,39 @@ if options.target_gate:
 if options.version:
     if options.mode == "version-reads-stdin":
         sys.stdin.buffer.read(1)
+    if options.mode == "version-leader-changes-pgid" and hasattr(os, "setpgid"):
+        try:
+            os.setpgid(0, os.getpgid(os.getppid()))
+        except OSError:
+            pass
+        options.barrier.with_suffix(".pid").write_text(str(os.getpid()))
+        while not options.barrier.exists():
+            time.sleep(0.02)
+        sys.exit(0)
+    if options.mode == "version-splice-stdout-stderr":
+        sys.stdout.write("lldb version 21.1")
+        sys.stdout.flush()
+        sys.stderr.write(".8\n")
+        sys.stderr.flush()
+        sys.exit(0)
+    if options.mode == "version-splice-stderr-stdout":
+        sys.stderr.write("lldb version 21.1")
+        sys.stderr.flush()
+        sys.stdout.write(".8\n")
+        sys.stdout.flush()
+        sys.exit(0)
+    if options.mode == "version-stdout-no-newline-stderr-diagnostic":
+        sys.stdout.write("lldb version 21.1.8")
+        sys.stdout.flush()
+        sys.stderr.write("diagnostic\n")
+        sys.stderr.flush()
+        sys.exit(0)
+    if options.mode == "version-stderr-no-newline-stdout-diagnostic":
+        sys.stderr.write("lldb version 21.1.8")
+        sys.stderr.flush()
+        sys.stdout.write("diagnostic\n")
+        sys.stdout.flush()
+        sys.exit(0)
     if options.mode in ("version-inherits-pipes", "version-inherits-stdout", "version-inherits-stderr"):
         out_stream = sys.stdout.buffer if options.mode != "version-inherits-stderr" else subprocess.DEVNULL
         err_stream = sys.stderr.buffer if options.mode != "version-inherits-stdout" else subprocess.DEVNULL
@@ -92,11 +139,31 @@ if options.version:
                                   stdin=subprocess.DEVNULL, stdout=sys.stdout.buffer, stderr=sys.stderr.buffer)
         options.barrier.with_suffix(".pid").write_text(str(holder.pid))
         sys.exit(0)
-    if options.mode in ("no-cli-version", "no-cli-version-inherits-pipes", "no-cli-version-failure-inherits-pipes"):
+    if options.mode in ("no-cli-version", "no-cli-version-inherits-pipes", "no-cli-version-failure-inherits-pipes",
+                        "no-cli-version-malformed-flood", "no-cli-version-stderr-flood", "no-cli-version-silent"):
         sys.exit(1)
     if options.lldb:
         sys.exit(subprocess.run([options.lldb, "--version"]).returncode)
     print("lldb version 21.1.8", flush=True)
+    sys.exit(0)
+
+if options.mode in ("version-splice-stdout-stderr", "version-splice-stderr-stdout",
+                    "version-stdout-no-newline-stderr-diagnostic", "version-stderr-no-newline-stdout-diagnostic"):
+    sys.exit(1)
+
+if options.mode == "no-cli-version-silent":
+    while not options.barrier.exists():
+        time.sleep(0.02)
+    sys.exit(0)
+
+if options.mode == "no-cli-version-malformed-flood":
+    options.barrier.with_suffix(".pid").write_text(str(os.getpid()))
+    bad_frame = b'Content-Length: 31\r\n\r\n{"seq":1,"command":"malformed"['
+    while not options.barrier.exists():
+        try:
+            os.write(1, bad_frame * 64)
+        except OSError:
+            time.sleep(0.01)
     sys.exit(0)
 
 if options.mode in ("no-cli-version-inherits-pipes", "no-cli-version-failure-inherits-pipes"):
@@ -277,6 +344,9 @@ while True:
             while not options.barrier.exists():
                 time.sleep(0.02)
             sys.exit(0)
+        if options.mode == "no-cli-version-stderr-flood":
+            sys.stderr.buffer.write(b"e" * (256 * 1024) + b"\n")
+            sys.stderr.buffer.flush()
         response(request, dict(supportsConfigurationDoneRequest=options.mode != "startup-no-configuration", supportsReadMemoryRequest=options.mode != "no-memory",
                                supportsModulesRequest=True, supportsCancelRequest=True,
                                **{"$__lldb_version": "lldb version " + ("99.0.0" if options.mode == "version-mismatch" else "21.1.8")}))

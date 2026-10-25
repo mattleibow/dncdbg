@@ -36,7 +36,17 @@ Command B (complete no-newline stream paired with retained opposite stream):
   version-no-newline-stdout-inherits-stderr returncode: 1 stderr: Error: Native debugger discovery/version probe timed out
   version-no-newline-stderr-inherits-stdout returncode: 1 stderr: Error: Native debugger discovery/version probe timed out
 
-4. Post-fix GREEN:
+4. Pre-fix RED at 97c4149167106000e92e92f648c0228f855c9e13 (unbounded DAP fallback RejectMalformed auto-replies & ThreadPool CTS timer, Unix leader setpgid waitpid hang, unrelated inheritable canary pipe leak, >pipe-capacity DAP fallback stderr block, and cross-stream stdout/stderr splicing):
+Command A (canary pipe inheritance + cross-stream splicing + DAP fallback stderr flood + malformed flood + leader setpgid):
+  Unhandled exception. System.InvalidOperationException: Probe child inherited unrelated parent handle: UNRELATED_HANDLE_INHERITED
+  version-splice-stdout-stderr rc: 0 stdout: {"kind":"lldb",...,"version":"21.1.8",...}
+  version-splice-stderr-stdout rc: 0 stdout: {"kind":"lldb",...,"version":"21.1",...}
+  version-stdout-no-newline-stderr-diagnostic rc: 1 stderr: Error: Native debugger '...' could not complete its DAP version probe: The native debug adapter closed its DAP connection.
+  no-cli-version-stderr-flood rc: 1 stderr: Error: Native debugger '...' could not complete its DAP version probe: The operation was canceled.
+  no-cli-version-malformed-flood TIMED OUT (RED: hung past 7s)
+  version-leader-changes-pgid TIMED OUT (RED: hung past 7s)
+
+5. Post-fix GREEN:
 Command:
   dotnet run --project tests/DncDbg.NativeTests -c Release -- "$(command -v python3)" "$PWD/tests/DncDbg.MixedModeTests/fake_native_adapter.py" version-probe-descriptors
   python3 -c "import runpy; n=runpy.run_path('tests/DncDbg.MixedModeTests/proxy_contracts.py'); n['version_pipe_inheritance_contract']('bin/dncdbg-dap'); n['version_stdin_contract']('bin/dncdbg-dap')"
@@ -54,6 +64,14 @@ Output:
   PASS truncated cancelled version output is rejected and cleaned up: version-truncated-token
   PASS DAP fallback version probe cleans up delegated helper: no-cli-version-inherits-pipes
   PASS DAP fallback version probe cleans up delegated helper: no-cli-version-failure-inherits-pipes
+  PASS DAP fallback version probe cleans up delegated helper: no-cli-version-malformed-flood
+  PASS DAP fallback version probe drains large stderr output without blocking
+  PASS cross-stream version token splicing is rejected: version-splice-stdout-stderr
+  PASS cross-stream version token splicing is rejected: version-splice-stderr-stdout
+  PASS independent stream version is preserved alongside opposite stream output: version-stdout-no-newline-stderr-diagnostic
+  PASS independent stream version is preserved alongside opposite stream output: version-stderr-no-newline-stdout-diagnostic
+  PASS Unix version probe kills and reaps hung leader even after setpgid
   PASS version discovery cannot read the frontend's DAP stdin
+
 
 

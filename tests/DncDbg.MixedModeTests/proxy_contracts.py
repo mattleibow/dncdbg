@@ -426,7 +426,8 @@ def version_pipe_inheritance_contract(adapter):
             pid_file.unlink(missing_ok=True)
         print(f"PASS truncated cancelled version output is rejected and cleaned up: {mode}", flush=True)
 
-    for mode, expect_success in (("no-cli-version-inherits-pipes", True), ("no-cli-version-failure-inherits-pipes", False)):
+    for mode, expect_success in (("no-cli-version-inherits-pipes", True), ("no-cli-version-failure-inherits-pipes", False),
+                                 ("no-cli-version-malformed-flood", False)):
         gate = OUT / f"{mode}.release"
         pid_file = gate.with_suffix(".pid")
         gate.unlink(missing_ok=True)
@@ -463,6 +464,59 @@ def version_pipe_inheritance_contract(adapter):
             gate.unlink(missing_ok=True)
             pid_file.unlink(missing_ok=True)
         print(f"PASS DAP fallback version probe cleans up delegated helper: {mode}", flush=True)
+
+    stderr_flood = subprocess.run([adapter, *arguments("lldb", "no-cli-version-stderr-flood"), "--native-debugger-info"],
+                                  capture_output=True, text=True, timeout=8)
+    check(stderr_flood.returncode == 0 and json.loads(stderr_flood.stdout)["version"] == "21.1.8",
+          "DAP fallback version probe blocked on large stderr output: " + stderr_flood.stdout + stderr_flood.stderr)
+    print("PASS DAP fallback version probe drains large stderr output without blocking", flush=True)
+
+    for mode in ("version-splice-stdout-stderr", "version-splice-stderr-stdout"):
+        spliced = subprocess.run([adapter, *arguments("lldb", mode), "--native-debugger-info"],
+                                 capture_output=True, text=True, timeout=8)
+        check(spliced.returncode != 0,
+              f"Cross-stream stdout/stderr output ({mode}) manufactured a valid version: " + spliced.stdout + spliced.stderr)
+        print(f"PASS cross-stream version token splicing is rejected: {mode}", flush=True)
+
+    for mode in ("version-stdout-no-newline-stderr-diagnostic", "version-stderr-no-newline-stdout-diagnostic"):
+        separate = subprocess.run([adapter, *arguments("lldb", mode), "--native-debugger-info"],
+                                  capture_output=True, text=True, timeout=8)
+        check(separate.returncode == 0 and json.loads(separate.stdout)["version"] == "21.1.8",
+              f"Independent stream version ({mode}) was corrupted by opposite stream diagnostic: " + separate.stdout + separate.stderr)
+        print(f"PASS independent stream version is preserved alongside opposite stream output: {mode}", flush=True)
+
+    if hasattr(os, "setpgid"):
+        gate = OUT / "version-leader-changes-pgid.release"
+        pid_file = gate.with_suffix(".pid")
+        gate.unlink(missing_ok=True)
+        pid_file.unlink(missing_ok=True)
+        leader_pid = None
+        try:
+            started = time.monotonic()
+            probe = subprocess.run([adapter, *arguments("lldb", "version-leader-changes-pgid", barrier=gate),
+                                    "--native-debugger-info"], capture_output=True, text=True, timeout=8)
+            elapsed = time.monotonic() - started
+            check(pid_file.exists(), "version-leader-changes-pgid did not record leader PID")
+            leader_pid = int(pid_file.read_text().strip())
+            check(elapsed < 7 and probe.returncode != 0,
+                  f"version-leader-changes-pgid did not fail within deadline: {elapsed:.2f}s, rc={probe.returncode}")
+            deadline = time.monotonic() + 2
+            while integration["alive"](leader_pid):
+                check(time.monotonic() < deadline,
+                      f"Probe leader {leader_pid} that changed PGID survived cleanup")
+                time.sleep(0.01)
+            leader_pid = None
+        finally:
+            gate.write_text("release")
+            if leader_pid and integration["alive"](leader_pid):
+                try:
+                    os.kill(leader_pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+                except ProcessLookupError:
+                    pass
+                integration["exited"](leader_pid)
+            gate.unlink(missing_ok=True)
+            pid_file.unlink(missing_ok=True)
+        print("PASS Unix version probe kills and reaps hung leader even after setpgid", flush=True)
 
 
 def selected_frame_contract(adapter):

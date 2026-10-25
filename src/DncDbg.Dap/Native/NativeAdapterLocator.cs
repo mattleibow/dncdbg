@@ -30,7 +30,7 @@ internal static class NativeAdapterLocator
             if (xcrun != null)
             {
                 var result = Run(xcrun, ["--find", "lldb-dap"]);
-                if (result.Complete && result.ExitCode == 0 && result.Output.Trim() is { Length: > 0 } path)
+                if (result.Complete && result.ExitCode == 0 && result.Stdout.Trim() is { Length: > 0 } path)
                     candidates.Add((path, "Xcode toolchain (used in place)"));
             }
         }
@@ -115,8 +115,8 @@ internal static class NativeAdapterLocator
             if (name is "lldb" or "lldb-server" or "debugserver")
                 throw new ArgumentException("Error: Select lldb-dap (or lldb-vscode), not the LLDB CLI or target-side server.");
             var result = Run(path, [.. arguments, "--version"]);
-            version = ParseVersion(result.Output);
-            if (result.ExitCode != 0 || !result.Output.Contains("lldb", StringComparison.OrdinalIgnoreCase) || version == null)
+            version = result.ExitCode == 0 ? ParseStreamVersion(result.Stdout) ?? ParseStreamVersion(result.Stderr) : null;
+            if (version == null)
             {
                 if (!result.Complete)
                     throw new ArgumentException("Error: Native debugger discovery/version probe timed out: " + path);
@@ -128,8 +128,11 @@ internal static class NativeAdapterLocator
         return new NativeAdapterDescriptor(kind, path, arguments, source, version, RuntimeInformation.RuntimeIdentifier, warnings);
     }
 
+    private const string SemVerSegmentsPattern =
+        @"[0-9A-Za-z]+(?:-[0-9A-Za-z]+)*(?:\.[0-9A-Za-z]+(?:-[0-9A-Za-z]+)*)*";
     private const string VersionTokenPattern =
-        @"(\d+(?:\.\d+){1,3})(?:git|(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?(?:\+[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?)?(?=$|[\s),;])";
+        @"(\d+(?:\.\d+){2,3})(?:git|(?:-" + SemVerSegmentsPattern + @")?(?:\+" + SemVerSegmentsPattern + @")?)?(?=$|[\s),;])";
+    private static readonly object SpawnLock = new();
 
     internal static string? ParseVersion(string text)
     {
@@ -143,6 +146,9 @@ internal static class NativeAdapterLocator
         Match version = Regex.Match(text, @"(?<![\w.-])" + VersionTokenPattern, RegexOptions.CultureInvariant);
         return version.Success ? version.Groups[1].Value : null;
     }
+
+    private static string? ParseStreamVersion(string streamText) =>
+        streamText.Contains("lldb", StringComparison.OrdinalIgnoreCase) ? ParseVersion(streamText) : null;
 
     internal static string DapVersion(NativeAdapterSession session, JsonElement capabilities, CancellationToken cancellation) =>
         DapVersion((command, arguments, token) => session.Request(command, arguments, token), capabilities, cancellation);
@@ -172,160 +178,325 @@ internal static class NativeAdapterLocator
                 : ProbeDapVersionUnix(path, arguments);
         }
         catch (Exception error) when (error is IOException or OperationCanceledException or TimeoutException
-            or InvalidOperationException or System.ComponentModel.Win32Exception)
+            or InvalidOperationException or System.ComponentModel.Win32Exception or JsonException)
         {
             throw new ArgumentException($"Error: Native debugger '{path}' could not complete its DAP version probe: "
                 + error.Message, error);
         }
     }
 
-    private static string ExecuteDapVersionProbe(Stream input, Stream output, CancellationToken cancellation)
+    private delegate bool ProbePump(MemoryStream outBytes, MemoryStream errBytes, byte[] scratch,
+        ref bool outComplete, ref bool errComplete, ref bool outOverflow, ref bool errOverflow);
+
+    private static string ExecuteBoundedDapProbe(Stopwatch timer,
+        Action<byte[], MemoryStream, MemoryStream, byte[]> writeInput,
+        ProbePump pumpPipes, Func<bool> isOutComplete, Action<int> waitIdle)
     {
-        using var connection = new DapConnection(new CancellablePipeInput(input, cancellation), output);
-        DapMessage Request(string command, object? arguments, CancellationToken token)
+        using var outBytes = new MemoryStream();
+        using var errBytes = new MemoryStream();
+        var scratch = new byte[1024];
+        bool dummyOutComplete = false, dummyErrComplete = false, dummyErrOverflow = false;
+        int consumed = 0;
+        int nextSeq = 1;
+
+        DapMessage Request(string command, object? arguments)
         {
-            token.ThrowIfCancellationRequested();
-            int seq = connection.SendRequest(command, arguments);
-            while (true)
+            int seq = nextSeq++;
+            byte[] bodyBytes = JsonSerializer.SerializeToUtf8Bytes(new DapMessage
             {
-                DapMessage message = connection.Read()
-                    ?? throw new IOException("The native debug adapter closed its DAP connection.");
-                if (message.Type == "response" && message.RequestSeq == seq)
-                    return message;
+                Seq = seq,
+                Type = "request",
+                Command = command,
+                Arguments = arguments == null ? null : JsonSerializer.SerializeToElement(arguments, DapJson.Options),
+            }, DapJson.Options);
+            byte[] headerBytes = System.Text.Encoding.ASCII.GetBytes($"Content-Length: {bodyBytes.Length}\r\n\r\n");
+            writeInput([.. headerBytes, .. bodyBytes], outBytes, errBytes, scratch);
+            while (timer.ElapsedMilliseconds < 5000)
+            {
+                bool outOverflow = false;
+                bool progressed = pumpPipes(outBytes, errBytes, scratch, ref dummyOutComplete, ref dummyErrComplete, ref outOverflow, ref dummyErrOverflow);
+                if (outOverflow)
+                    throw new IOException("Native adapter DAP version probe exceeded output cap.");
+                while (TryExtractDapFrame(outBytes, ref consumed, out byte[]? payload))
+                {
+                    DapMessage message = JsonSerializer.Deserialize<DapMessage>(payload!, DapJson.Options)
+                        ?? throw new IOException("Malformed DAP message during version probe.");
+                    if (message.Type == "response" && message.RequestSeq == seq)
+                        return message;
+                }
+                if (isOutComplete())
+                    throw new IOException("The native debug adapter closed its DAP connection.");
+                if (!progressed)
+                    waitIdle(Math.Clamp(5000 - (int)timer.ElapsedMilliseconds, 1, 10));
             }
+            throw new TimeoutException("Native debugger DAP version probe timed out.");
         }
+
         DapMessage response = Request("initialize", new
         {
             adapterID = "dncdbg-version-probe", pathFormat = "path", linesStartAt1 = true,
             columnsStartAt1 = true,
-        }, cancellation);
+        });
         if (response.Success != true || response.Body is not JsonElement { ValueKind: JsonValueKind.Object } capabilities)
             throw new ArgumentException("Error: The native debugger rejected the DAP initialization probe.");
-        return DapVersion(Request, capabilities, cancellation);
+        return DapVersion((command, arguments, _) => Request(command, arguments), capabilities, CancellationToken.None);
+    }
+
+    private static bool TryExtractDapFrame(MemoryStream stream, ref int consumed, out byte[]? payload)
+    {
+        payload = null;
+        ReadOnlySpan<byte> span = stream.GetBuffer().AsSpan(consumed, (int)stream.Length - consumed);
+        int separator = span.IndexOf("\r\n\r\n"u8);
+        int separatorLength = 4;
+        if (separator < 0)
+        {
+            separator = span.IndexOf("\n\n"u8);
+            separatorLength = 2;
+        }
+        if (separator < 0)
+        {
+            if (span.Length > 8192)
+                throw new IOException("DAP version probe header exceeded maximum length.");
+            return false;
+        }
+        string headerBlock = System.Text.Encoding.ASCII.GetString(span[..separator]);
+        int contentLength = -1;
+        foreach (string rawLine in headerBlock.Split('\n'))
+        {
+            string line = rawLine.TrimEnd('\r');
+            if (line.Length == 0)
+                continue;
+            int colon = line.IndexOf(':');
+            if (colon > 0 && line.AsSpan(0, colon).Trim().Equals("Content-Length", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!int.TryParse(line.AsSpan(colon + 1).Trim(), System.Globalization.NumberStyles.None,
+                    System.Globalization.CultureInfo.InvariantCulture, out int parsed) || parsed < 0 || parsed > MaxProbeOutputBytes)
+                    throw new IOException("Invalid DAP Content-Length during version probe.");
+                contentLength = parsed;
+            }
+        }
+        if (contentLength < 0)
+            throw new IOException("Missing DAP Content-Length during version probe.");
+        int totalFrame = separator + separatorLength + contentLength;
+        if (span.Length < totalFrame)
+            return false;
+        payload = span.Slice(separator + separatorLength, contentLength).ToArray();
+        consumed += totalFrame;
+        if (consumed == stream.Length)
+        {
+            stream.SetLength(0);
+            consumed = 0;
+        }
+        return true;
     }
 
     private static string ProbeDapVersionWindows(string executable, string[] arguments)
     {
+        var timer = Stopwatch.StartNew();
         using SafeFileHandle job = CreateJobObjectW(IntPtr.Zero, null);
         if (job.IsInvalid)
             throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
-        var security = new SecurityAttributes
+        SafeFileHandle stdinWrite, stdoutRead, stderrRead;
+        SafeProcessHandle processHandle;
+        lock (SpawnLock)
         {
-            nLength = Marshal.SizeOf<SecurityAttributes>(),
-            lpSecurityDescriptor = IntPtr.Zero,
-            bInheritHandle = 1,
-        };
-        if (!CreatePipe(out SafeFileHandle stdinRead, out SafeFileHandle stdinWrite, ref security, 0))
-            throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
-        using (stdinRead)
-        using (stdinWrite)
-        {
-            if (!SetHandleInformation(stdinWrite, 1, 0))
-                throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
-            if (!CreatePipe(out SafeFileHandle stdoutRead, out SafeFileHandle stdoutWrite, ref security, 0))
-                throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
-            using (stdoutRead)
-            using (stdoutWrite)
+            var security = new SecurityAttributes
             {
-                if (!SetHandleInformation(stdoutRead, 1, 0))
+                nLength = Marshal.SizeOf<SecurityAttributes>(),
+                lpSecurityDescriptor = IntPtr.Zero,
+                bInheritHandle = 1,
+            };
+            if (!CreatePipe(out SafeFileHandle stdinRead, out stdinWrite, ref security, 65536))
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
+            try
+            {
+                if (!SetHandleInformation(stdinWrite, 1, 0))
                     throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
-                if (!CreatePipe(out SafeFileHandle stderrRead, out SafeFileHandle stderrWrite, ref security, 0))
+                if (!CreatePipe(out stdoutRead, out SafeFileHandle stdoutWrite, ref security, 65536))
                     throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
-                using (stderrRead)
-                using (stderrWrite)
+                try
                 {
-                    if (!SetHandleInformation(stderrRead, 1, 0))
+                    if (!SetHandleInformation(stdoutRead, 1, 0))
                         throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
-                    var startup = new StartupInfoW
-                    {
-                        cb = Marshal.SizeOf<StartupInfoW>(),
-                        dwFlags = 0x00000100,
-                        hStdInput = stdinRead.DangerousGetHandle(),
-                        hStdOutput = stdoutWrite.DangerousGetHandle(),
-                        hStdError = stderrWrite.DangerousGetHandle(),
-                    };
-                    var commandLine = BuildWindowsCommandLine(executable, arguments);
-                    if (!CreateProcessW(null, commandLine, IntPtr.Zero, IntPtr.Zero, true, 0x00000004,
-                        IntPtr.Zero, null, ref startup, out ProcessInformation processInfo))
+                    if (!CreatePipe(out stderrRead, out SafeFileHandle stderrWrite, ref security, 65536))
                         throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
-                    using var processHandle = new SafeProcessHandle(processInfo.hProcess, ownsHandle: true);
-                    using var threadHandle = new SafeFileHandle(processInfo.hThread, ownsHandle: true);
-                    stdinRead.Dispose();
-                    stdoutWrite.Dispose();
-                    stderrWrite.Dispose();
-                    if (!AssignProcessToJobObject(job, processHandle))
-                    {
-                        int assignError = Marshal.GetLastPInvokeError();
-                        _ = TerminateProcess(processHandle, 1);
-                        _ = WaitForSingleObject(processHandle, 1000);
-                        throw new System.ComponentModel.Win32Exception(assignError);
-                    }
-                    if (ResumeThread(threadHandle) == uint.MaxValue)
-                    {
-                        int resumeError = Marshal.GetLastPInvokeError();
-                        _ = TerminateJobObject(job, 1);
-                        _ = WaitForSingleObject(processHandle, 1000);
-                        throw new System.ComponentModel.Win32Exception(resumeError);
-                    }
-                    threadHandle.Dispose();
-                    using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-                    using var outStream = new FileStream(stdoutRead, FileAccess.Read, 4096, isAsync: false);
-                    using var inStream = new FileStream(stdinWrite, FileAccess.Write, 4096, isAsync: false);
                     try
                     {
-                        return ExecuteDapVersionProbe(outStream, inStream, deadline.Token);
+                        if (!SetHandleInformation(stderrRead, 1, 0))
+                            throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
+                        processHandle = StartWindowsProbeInJob(executable, arguments, job, stdinRead, stdoutWrite, stderrWrite);
                     }
-                    finally
+                    catch
                     {
-                        deadline.Cancel();
-                        _ = TerminateJobObject(job, 1);
-                        _ = WaitForSingleObject(processHandle, 1000);
-                        var cleanup = Stopwatch.StartNew();
-                        while (cleanup.ElapsedMilliseconds < 1000
-                            && QueryInformationJobObject(job, 1, out var accounting,
-                                Marshal.SizeOf<JobObjectBasicAccountingInformation>(), IntPtr.Zero)
-                            && accounting.ActiveProcesses != 0)
-                            System.Threading.Thread.Sleep(10);
+                        stderrRead.Dispose();
+                        throw;
                     }
+                    finally { stderrWrite.Dispose(); }
                 }
+                catch
+                {
+                    stdoutRead.Dispose();
+                    throw;
+                }
+                finally { stdoutWrite.Dispose(); }
+            }
+            catch
+            {
+                stdinWrite.Dispose();
+                throw;
+            }
+            finally { stdinRead.Dispose(); }
+        }
+        using (stdinWrite)
+        using (stdoutRead)
+        using (stderrRead)
+        using (processHandle)
+        {
+            uint pipeMode = 1; // PIPE_NOWAIT
+            _ = SetNamedPipeHandleState(stdinWrite, ref pipeMode, IntPtr.Zero, IntPtr.Zero);
+            try
+            {
+                bool outComplete = false, errComplete = false, errOverflow = false;
+                return ExecuteBoundedDapProbe(
+                    timer,
+                    (frame, outBytes, errBytes, scratch) =>
+                    {
+                        int offset = 0;
+                        while (offset < frame.Length && timer.ElapsedMilliseconds < 5000)
+                        {
+                            bool outOverflow = false;
+                            _ = DrainWindowsPipe(stdoutRead, outBytes, scratch, ref outComplete, ref outOverflow);
+                            _ = DrainWindowsPipe(stderrRead, errBytes, scratch, ref errComplete, ref errOverflow);
+                            if (outOverflow)
+                                throw new IOException("Native adapter DAP version probe exceeded output cap.");
+                            unsafe
+                            {
+                                fixed (byte* ptr = &frame[offset])
+                                {
+                                    if (WriteFile(stdinWrite, (IntPtr)ptr, (uint)(frame.Length - offset), out uint written, IntPtr.Zero) && written > 0)
+                                    {
+                                        offset += (int)written;
+                                        continue;
+                                    }
+                                }
+                            }
+                            int error = Marshal.GetLastPInvokeError();
+                            if (error is not (0 or 232)) // ERROR_NO_DATA = 232 when PIPE_NOWAIT buffer is full
+                                throw new IOException("Cannot write DAP version probe request.", new System.ComponentModel.Win32Exception(error));
+                            _ = WaitForSingleObject(processHandle, (uint)Math.Clamp(5000 - (int)timer.ElapsedMilliseconds, 1, 10));
+                        }
+                        if (offset < frame.Length)
+                            throw new TimeoutException("Native debugger DAP version probe timed out.");
+                    },
+                    (MemoryStream outBytes, MemoryStream errBytes, byte[] scratch, ref bool _, ref bool _, ref bool outOverflow, ref bool _) =>
+                        DrainWindowsPipe(stdoutRead, outBytes, scratch, ref outComplete, ref outOverflow)
+                        | DrainWindowsPipe(stderrRead, errBytes, scratch, ref errComplete, ref errOverflow),
+                    () => outComplete,
+                    waitMs => _ = WaitForSingleObject(processHandle, (uint)waitMs));
+            }
+            finally
+            {
+                _ = TerminateJobObject(job, 1);
+                _ = WaitForSingleObject(processHandle, 1000);
+                var cleanup = Stopwatch.StartNew();
+                while (cleanup.ElapsedMilliseconds < 1000
+                    && QueryInformationJobObject(job, 1, out var accounting,
+                        Marshal.SizeOf<JobObjectBasicAccountingInformation>(), IntPtr.Zero)
+                    && accounting.ActiveProcesses != 0)
+                    System.Threading.Thread.Sleep(10);
             }
         }
     }
 
     private static string ProbeDapVersionUnix(string executable, string[] arguments)
     {
-        using var stdin = new System.IO.Pipes.AnonymousPipeServerStream(
-            System.IO.Pipes.PipeDirection.Out, HandleInheritability.Inheritable);
-        using var stdout = new System.IO.Pipes.AnonymousPipeServerStream(
-            System.IO.Pipes.PipeDirection.In, HandleInheritability.Inheritable);
-        using var stderr = new System.IO.Pipes.AnonymousPipeServerStream(
-            System.IO.Pipes.PipeDirection.In, HandleInheritability.Inheritable);
-        int inFd = stdin.ClientSafePipeHandle.DangerousGetHandle().ToInt32();
-        int outFd = stdout.ClientSafePipeHandle.DangerousGetHandle().ToInt32();
-        int errFd = stderr.ClientSafePipeHandle.DangerousGetHandle().ToInt32();
-        int inWriteFd = stdin.SafePipeHandle.DangerousGetHandle().ToInt32();
-        int outReadFd = stdout.SafePipeHandle.DangerousGetHandle().ToInt32();
-        int errReadFd = stderr.SafePipeHandle.DangerousGetHandle().ToInt32();
-        int pid = SpawnUnixGroup(executable, arguments, inFd, outFd, errFd, inWriteFd, outReadFd, errReadFd);
-        stdin.DisposeLocalCopyOfClientHandle();
-        stdout.DisposeLocalCopyOfClientHandle();
-        stderr.DisposeLocalCopyOfClientHandle();
-        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        try
+        var timer = Stopwatch.StartNew();
+        System.IO.Pipes.AnonymousPipeServerStream stdin, stdout, stderr;
+        int pid;
+        lock (SpawnLock)
         {
-            return ExecuteDapVersionProbe(stdout, stdin, deadline.Token);
+            stdin = new System.IO.Pipes.AnonymousPipeServerStream(
+                System.IO.Pipes.PipeDirection.Out, HandleInheritability.None);
+            stdout = new System.IO.Pipes.AnonymousPipeServerStream(
+                System.IO.Pipes.PipeDirection.In, HandleInheritability.None);
+            stderr = new System.IO.Pipes.AnonymousPipeServerStream(
+                System.IO.Pipes.PipeDirection.In, HandleInheritability.None);
+            try
+            {
+                int inFd = stdin.ClientSafePipeHandle.DangerousGetHandle().ToInt32();
+                int outFd = stdout.ClientSafePipeHandle.DangerousGetHandle().ToInt32();
+                int errFd = stderr.ClientSafePipeHandle.DangerousGetHandle().ToInt32();
+                pid = SpawnUnixGroup(executable, arguments, inFd, outFd, errFd);
+                stdin.DisposeLocalCopyOfClientHandle();
+                stdout.DisposeLocalCopyOfClientHandle();
+                stderr.DisposeLocalCopyOfClientHandle();
+            }
+            catch
+            {
+                stdin.Dispose();
+                stdout.Dispose();
+                stderr.Dispose();
+                throw;
+            }
         }
-        finally
+        using (stdin)
+        using (stdout)
+        using (stderr)
         {
-            deadline.Cancel();
-            _ = kill(-pid, 9);
-            _ = ReapUnix(pid, out _);
-            var cleanup = Stopwatch.StartNew();
-            while (cleanup.ElapsedMilliseconds < 1000 && kill(-pid, 0) == 0)
-                System.Threading.Thread.Sleep(5);
-            stdin.Dispose();
-            stdout.Dispose();
-            stderr.Dispose();
+            int inWriteFd = stdin.SafePipeHandle.DangerousGetHandle().ToInt32();
+            int outPipeFd = stdout.SafePipeHandle.DangerousGetHandle().ToInt32();
+            int errPipeFd = stderr.SafePipeHandle.DangerousGetHandle().ToInt32();
+            int nonBlockFlag = OperatingSystem.IsMacOS() ? 0x0004 : 0x0800;
+            int statusFlags = fcntl(inWriteFd, 3, 0);
+            if (statusFlags >= 0)
+                _ = fcntl(inWriteFd, 4, statusFlags | nonBlockFlag);
+            bool reaped = false;
+            int status = 0;
+            try
+            {
+                bool outComplete = false, errComplete = false, errOverflow = false;
+                return ExecuteBoundedDapProbe(
+                    timer,
+                    (frame, outBytes, errBytes, scratch) =>
+                    {
+                        int offset = 0;
+                        while (offset < frame.Length && timer.ElapsedMilliseconds < 5000)
+                        {
+                            bool outOverflow = false;
+                            _ = DrainUnixPipe(stdout, outPipeFd, outBytes, scratch, ref outComplete, ref outOverflow);
+                            _ = DrainUnixPipe(stderr, errPipeFd, errBytes, scratch, ref errComplete, ref errOverflow);
+                            if (outOverflow)
+                                throw new IOException("Native adapter DAP version probe exceeded output cap.");
+                            nint written;
+                            unsafe
+                            {
+                                fixed (byte* ptr = &frame[offset])
+                                    written = write(inWriteFd, (IntPtr)ptr, (nuint)(frame.Length - offset));
+                            }
+                            if (written > 0)
+                            {
+                                offset += (int)written;
+                                continue;
+                            }
+                            int error = Marshal.GetLastPInvokeError();
+                            if (written < 0 && error is not (4 or 11 or 35)) // EINTR=4, EAGAIN=11 (Linux) / 35 (macOS)
+                                throw new IOException("The native debug adapter closed its DAP input pipe.", new System.ComponentModel.Win32Exception(error));
+                            var pollOut = new PollDescriptor { File = inWriteFd, Events = 4 };
+                            _ = Poll(ref pollOut, 1, Math.Clamp(5000 - (int)timer.ElapsedMilliseconds, 1, 10));
+                        }
+                        if (offset < frame.Length)
+                            throw new TimeoutException("Native debugger DAP version probe timed out.");
+                    },
+                    (MemoryStream outBytes, MemoryStream errBytes, byte[] scratch, ref bool _, ref bool _, ref bool outOverflow, ref bool _) =>
+                        DrainUnixPipe(stdout, outPipeFd, outBytes, scratch, ref outComplete, ref outOverflow)
+                        | DrainUnixPipe(stderr, errPipeFd, errBytes, scratch, ref errComplete, ref errOverflow),
+                    () => outComplete,
+                    waitMs => WaitUnixPipes(outPipeFd, outComplete, errPipeFd, errComplete, waitMs));
+            }
+            finally
+            {
+                CleanupUnixProbe(pid, ref reaped, ref status);
+            }
         }
     }
 
@@ -372,7 +543,7 @@ internal static class NativeAdapterLocator
         return null;
     }
 
-    private static (int ExitCode, string Output, bool Complete) Run(string executable, string[] arguments)
+    private static (int ExitCode, string Stdout, string Stderr, bool Complete) Run(string executable, string[] arguments)
     {
         try
         {
@@ -386,128 +557,182 @@ internal static class NativeAdapterLocator
 
     private const int MaxProbeOutputBytes = 64 * 1024;
 
-    private static (int ExitCode, string Output, bool Complete) RunWindows(string executable, string[] arguments)
+    private static SafeProcessHandle StartWindowsProbeInJob(string executable, string[] arguments, SafeFileHandle job,
+        SafeFileHandle stdinRead, SafeFileHandle stdoutWrite, SafeFileHandle stderrWrite)
+    {
+        nuint attributeSize = 0;
+        _ = InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref attributeSize);
+        IntPtr attributeList = Marshal.AllocHGlobal((int)attributeSize);
+        IntPtr handleList = Marshal.AllocHGlobal(3 * IntPtr.Size);
+        bool attributeInitialized = false;
+        ProcessInformation processInfo;
+        try
+        {
+            if (!InitializeProcThreadAttributeList(attributeList, 1, 0, ref attributeSize))
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
+            attributeInitialized = true;
+            Marshal.WriteIntPtr(handleList, 0, stdinRead.DangerousGetHandle());
+            Marshal.WriteIntPtr(handleList, IntPtr.Size, stdoutWrite.DangerousGetHandle());
+            Marshal.WriteIntPtr(handleList, 2 * IntPtr.Size, stderrWrite.DangerousGetHandle());
+            if (!UpdateProcThreadAttribute(attributeList, 0, (IntPtr)0x00020002, handleList,
+                (nuint)(3 * IntPtr.Size), IntPtr.Zero, IntPtr.Zero))
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
+            var startup = new StartupInfoExW
+            {
+                StartupInfo = new StartupInfoW
+                {
+                    cb = Marshal.SizeOf<StartupInfoExW>(),
+                    dwFlags = 0x00000100,
+                    hStdInput = stdinRead.DangerousGetHandle(),
+                    hStdOutput = stdoutWrite.DangerousGetHandle(),
+                    hStdError = stderrWrite.DangerousGetHandle(),
+                },
+                lpAttributeList = attributeList,
+            };
+            var commandLine = BuildWindowsCommandLine(executable, arguments);
+            if (!CreateProcessW(null, commandLine, IntPtr.Zero, IntPtr.Zero, true, 0x00000004 | 0x00080000,
+                IntPtr.Zero, null, ref startup, out processInfo))
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
+        }
+        finally
+        {
+            if (attributeInitialized)
+                DeleteProcThreadAttributeList(attributeList);
+            Marshal.FreeHGlobal(handleList);
+            Marshal.FreeHGlobal(attributeList);
+        }
+        var processHandle = new SafeProcessHandle(processInfo.hProcess, ownsHandle: true);
+        using var threadHandle = new SafeFileHandle(processInfo.hThread, ownsHandle: true);
+        if (!AssignProcessToJobObject(job, processHandle))
+        {
+            int assignError = Marshal.GetLastPInvokeError();
+            _ = TerminateProcess(processHandle, 1);
+            _ = WaitForSingleObject(processHandle, 1000);
+            processHandle.Dispose();
+            throw new System.ComponentModel.Win32Exception(assignError);
+        }
+        if (ResumeThread(threadHandle) == uint.MaxValue)
+        {
+            int resumeError = Marshal.GetLastPInvokeError();
+            _ = TerminateJobObject(job, 1);
+            _ = WaitForSingleObject(processHandle, 1000);
+            processHandle.Dispose();
+            throw new System.ComponentModel.Win32Exception(resumeError);
+        }
+        return processHandle;
+    }
+
+    private static (int ExitCode, string Stdout, string Stderr, bool Complete) RunWindows(string executable, string[] arguments)
     {
         var timer = Stopwatch.StartNew();
         using SafeFileHandle job = CreateJobObjectW(IntPtr.Zero, null);
         if (job.IsInvalid)
             throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
-        var security = new SecurityAttributes
+        SafeFileHandle stdoutRead, stderrRead;
+        SafeProcessHandle processHandle;
+        lock (SpawnLock)
         {
-            nLength = Marshal.SizeOf<SecurityAttributes>(),
-            lpSecurityDescriptor = IntPtr.Zero,
-            bInheritHandle = 1,
-        };
-        if (!CreatePipe(out SafeFileHandle stdinRead, out SafeFileHandle stdinWrite, ref security, 0))
-            throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
-        using (stdinRead)
-        using (stdinWrite)
-        {
-            if (!SetHandleInformation(stdinWrite, 1, 0))
-                throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
-            stdinWrite.Dispose();
-            if (!CreatePipe(out SafeFileHandle stdoutRead, out SafeFileHandle stdoutWrite, ref security, 0))
-                throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
-            using (stdoutRead)
-            using (stdoutWrite)
+            var security = new SecurityAttributes
             {
-                if (!SetHandleInformation(stdoutRead, 1, 0))
+                nLength = Marshal.SizeOf<SecurityAttributes>(),
+                lpSecurityDescriptor = IntPtr.Zero,
+                bInheritHandle = 1,
+            };
+            if (!CreatePipe(out SafeFileHandle stdinRead, out SafeFileHandle stdinWrite, ref security, 0))
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
+            try
+            {
+                if (!SetHandleInformation(stdinWrite, 1, 0))
                     throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
-                if (!CreatePipe(out SafeFileHandle stderrRead, out SafeFileHandle stderrWrite, ref security, 0))
+                stdinWrite.Dispose();
+                if (!CreatePipe(out stdoutRead, out SafeFileHandle stdoutWrite, ref security, 0))
                     throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
-                using (stderrRead)
-                using (stderrWrite)
+                try
                 {
-                    if (!SetHandleInformation(stderrRead, 1, 0))
+                    if (!SetHandleInformation(stdoutRead, 1, 0))
                         throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
-                    var startup = new StartupInfoW
-                    {
-                        cb = Marshal.SizeOf<StartupInfoW>(),
-                        dwFlags = 0x00000100, // STARTF_USESTDHANDLES
-                        hStdInput = stdinRead.DangerousGetHandle(),
-                        hStdOutput = stdoutWrite.DangerousGetHandle(),
-                        hStdError = stderrWrite.DangerousGetHandle(),
-                    };
-                    var commandLine = BuildWindowsCommandLine(executable, arguments);
-                    if (!CreateProcessW(null, commandLine, IntPtr.Zero, IntPtr.Zero, true, 0x00000004, // CREATE_SUSPENDED
-                        IntPtr.Zero, null, ref startup, out ProcessInformation processInfo))
+                    if (!CreatePipe(out stderrRead, out SafeFileHandle stderrWrite, ref security, 0))
                         throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
-                    using var processHandle = new SafeProcessHandle(processInfo.hProcess, ownsHandle: true);
-                    using var threadHandle = new SafeFileHandle(processInfo.hThread, ownsHandle: true);
-                    stdinRead.Dispose();
-                    stdoutWrite.Dispose();
-                    stderrWrite.Dispose();
-                    if (!AssignProcessToJobObject(job, processHandle))
-                    {
-                        int assignError = Marshal.GetLastPInvokeError();
-                        _ = TerminateProcess(processHandle, 1);
-                        _ = WaitForSingleObject(processHandle, 1000);
-                        throw new System.ComponentModel.Win32Exception(assignError);
-                    }
-                    if (ResumeThread(threadHandle) == uint.MaxValue)
-                    {
-                        int resumeError = Marshal.GetLastPInvokeError();
-                        _ = TerminateJobObject(job, 1);
-                        _ = WaitForSingleObject(processHandle, 1000);
-                        throw new System.ComponentModel.Win32Exception(resumeError);
-                    }
-                    threadHandle.Dispose();
-                    using var outBytes = new MemoryStream();
-                    using var errBytes = new MemoryStream();
-                    var buffer = new byte[1024];
-                    bool processExited = false, outComplete = false, errComplete = false, outOverflow = false, errOverflow = false;
                     try
                     {
-                        while (timer.ElapsedMilliseconds < 5000)
-                        {
-                            bool progressed = DrainWindowsPipe(stdoutRead, outBytes, buffer, ref outComplete, ref outOverflow)
-                                | DrainWindowsPipe(stderrRead, errBytes, buffer, ref errComplete, ref errOverflow);
-                            if (!processExited && WaitForSingleObject(processHandle, 0) == 0)
-                            {
-                                processExited = true;
-                                continue;
-                            }
-                            if (processExited && outComplete && errComplete)
-                                break;
-                            if (!progressed)
-                            {
-                                uint waitMs = (uint)Math.Clamp(5000 - (int)timer.ElapsedMilliseconds, 1, 10);
-                                if (!processExited)
-                                    processExited = WaitForSingleObject(processHandle, waitMs) == 0;
-                                else
-                                    System.Threading.Thread.Sleep((int)waitMs);
-                            }
-                        }
-                        if (!processExited && WaitForSingleObject(processHandle, 0) != 0)
-                            throw new ArgumentException("Error: Native debugger discovery/version probe timed out: " + executable);
-                        while (timer.ElapsedMilliseconds < 5000 && (!outComplete || !errComplete))
-                        {
-                            if (!DrainWindowsPipe(stdoutRead, outBytes, buffer, ref outComplete, ref outOverflow)
-                                & !DrainWindowsPipe(stderrRead, errBytes, buffer, ref errComplete, ref errOverflow))
-                                break;
-                        }
-                        if (!GetExitCodeProcess(processHandle, out uint rawExitCode))
+                        if (!SetHandleInformation(stderrRead, 1, 0))
                             throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
-                        bool outValid = outComplete && !outOverflow;
-                        bool errValid = errComplete && !errOverflow;
-                        string outText = CompleteLines(
-                            System.Text.Encoding.UTF8.GetString(outBytes.GetBuffer(), 0, (int)outBytes.Length), outValid);
-                        string errText = CompleteLines(
-                            System.Text.Encoding.UTF8.GetString(errBytes.GetBuffer(), 0, (int)errBytes.Length), errValid);
-                        return (unchecked((int)rawExitCode), outText + errText, outValid && errValid);
+                        processHandle = StartWindowsProbeInJob(executable, arguments, job, stdinRead, stdoutWrite, stderrWrite);
                     }
-                    finally
+                    catch
                     {
-                        _ = TerminateJobObject(job, 1);
-                        _ = WaitForSingleObject(processHandle, 1000);
-                        var cleanup = Stopwatch.StartNew();
-                        while (cleanup.ElapsedMilliseconds < 1000
-                            && QueryInformationJobObject(job, 1, out var accounting,
-                                Marshal.SizeOf<JobObjectBasicAccountingInformation>(), IntPtr.Zero)
-                            && accounting.ActiveProcesses != 0)
-                            System.Threading.Thread.Sleep(10);
+                        stderrRead.Dispose();
+                        throw;
+                    }
+                    finally { stderrWrite.Dispose(); }
+                }
+                catch
+                {
+                    stdoutRead.Dispose();
+                    throw;
+                }
+                finally { stdoutWrite.Dispose(); }
+            }
+            finally { stdinRead.Dispose(); }
+        }
+        using (stdoutRead)
+        using (stderrRead)
+        using (processHandle)
+        {
+            using var outBytes = new MemoryStream();
+            using var errBytes = new MemoryStream();
+            var buffer = new byte[1024];
+            bool processExited = false, outComplete = false, errComplete = false, outOverflow = false, errOverflow = false;
+            try
+            {
+                while (timer.ElapsedMilliseconds < 5000)
+                {
+                    bool progressed = DrainWindowsPipe(stdoutRead, outBytes, buffer, ref outComplete, ref outOverflow)
+                        | DrainWindowsPipe(stderrRead, errBytes, buffer, ref errComplete, ref errOverflow);
+                    if (!processExited && WaitForSingleObject(processHandle, 0) == 0)
+                    {
+                        processExited = true;
+                        continue;
+                    }
+                    if (processExited && outComplete && errComplete)
+                        break;
+                    if (!progressed)
+                    {
+                        uint waitMs = (uint)Math.Clamp(5000 - (int)timer.ElapsedMilliseconds, 1, 10);
+                        if (!processExited)
+                            processExited = WaitForSingleObject(processHandle, waitMs) == 0;
+                        else
+                            System.Threading.Thread.Sleep((int)waitMs);
                     }
                 }
+                if (!processExited && WaitForSingleObject(processHandle, 0) != 0)
+                    throw new ArgumentException("Error: Native debugger discovery/version probe timed out: " + executable);
+                while (timer.ElapsedMilliseconds < 5000 && (!outComplete || !errComplete))
+                {
+                    if (!DrainWindowsPipe(stdoutRead, outBytes, buffer, ref outComplete, ref outOverflow)
+                        & !DrainWindowsPipe(stderrRead, errBytes, buffer, ref errComplete, ref errOverflow))
+                        break;
+                }
+                if (!GetExitCodeProcess(processHandle, out uint rawExitCode))
+                    throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
+                bool outValid = outComplete && !outOverflow;
+                bool errValid = errComplete && !errOverflow;
+                string outText = CompleteLines(
+                    System.Text.Encoding.UTF8.GetString(outBytes.GetBuffer(), 0, (int)outBytes.Length), outValid);
+                string errText = CompleteLines(
+                    System.Text.Encoding.UTF8.GetString(errBytes.GetBuffer(), 0, (int)errBytes.Length), errValid);
+                return (unchecked((int)rawExitCode), outText, errText, outValid && errValid);
+            }
+            finally
+            {
+                _ = TerminateJobObject(job, 1);
+                _ = WaitForSingleObject(processHandle, 1000);
+                var cleanup = Stopwatch.StartNew();
+                while (cleanup.ElapsedMilliseconds < 1000
+                    && QueryInformationJobObject(job, 1, out var accounting,
+                        Marshal.SizeOf<JobObjectBasicAccountingInformation>(), IntPtr.Zero)
+                    && accounting.ActiveProcesses != 0)
+                    System.Threading.Thread.Sleep(10);
             }
         }
     }
@@ -601,83 +826,88 @@ internal static class NativeAdapterLocator
         builder.Append('"');
     }
 
-    private static (int ExitCode, string Output, bool Complete) RunUnix(string executable, string[] arguments)
+    private static (int ExitCode, string Stdout, string Stderr, bool Complete) RunUnix(string executable, string[] arguments)
     {
-        using var stdout = new System.IO.Pipes.AnonymousPipeServerStream(
-            System.IO.Pipes.PipeDirection.In, HandleInheritability.Inheritable);
-        using var stderr = new System.IO.Pipes.AnonymousPipeServerStream(
-            System.IO.Pipes.PipeDirection.In, HandleInheritability.Inheritable);
+        System.IO.Pipes.AnonymousPipeServerStream stdout, stderr;
         int pid;
-        using (SafeFileHandle devNull = File.OpenHandle("/dev/null", FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+        lock (SpawnLock)
         {
-            int inFd = devNull.DangerousGetHandle().ToInt32();
-            int outFd = stdout.ClientSafePipeHandle.DangerousGetHandle().ToInt32();
-            int errFd = stderr.ClientSafePipeHandle.DangerousGetHandle().ToInt32();
-            int outReadFd = stdout.SafePipeHandle.DangerousGetHandle().ToInt32();
-            int errReadFd = stderr.SafePipeHandle.DangerousGetHandle().ToInt32();
-            pid = SpawnUnixGroup(executable, arguments, inFd, outFd, errFd, outReadFd, errReadFd);
+            stdout = new System.IO.Pipes.AnonymousPipeServerStream(
+                System.IO.Pipes.PipeDirection.In, HandleInheritability.None);
+            stderr = new System.IO.Pipes.AnonymousPipeServerStream(
+                System.IO.Pipes.PipeDirection.In, HandleInheritability.None);
+            try
+            {
+                using SafeFileHandle devNull = File.OpenHandle("/dev/null", FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                int inFd = devNull.DangerousGetHandle().ToInt32();
+                int outFd = stdout.ClientSafePipeHandle.DangerousGetHandle().ToInt32();
+                int errFd = stderr.ClientSafePipeHandle.DangerousGetHandle().ToInt32();
+                pid = SpawnUnixGroup(executable, arguments, inFd, outFd, errFd);
+                stdout.DisposeLocalCopyOfClientHandle();
+                stderr.DisposeLocalCopyOfClientHandle();
+            }
+            catch
+            {
+                stdout.Dispose();
+                stderr.Dispose();
+                throw;
+            }
         }
-        stdout.DisposeLocalCopyOfClientHandle();
-        stderr.DisposeLocalCopyOfClientHandle();
-        int outPipeFd = stdout.SafePipeHandle.DangerousGetHandle().ToInt32();
-        int errPipeFd = stderr.SafePipeHandle.DangerousGetHandle().ToInt32();
-        var timer = Stopwatch.StartNew();
-        using var outBytes = new MemoryStream();
-        using var errBytes = new MemoryStream();
-        var buffer = new byte[1024];
-        bool processExited = false, outComplete = false, errComplete = false, outOverflow = false, errOverflow = false;
-        int status = 0;
-        bool reaped = false;
-        try
+        using (stdout)
+        using (stderr)
         {
-            while (timer.ElapsedMilliseconds < 5000)
+            int outPipeFd = stdout.SafePipeHandle.DangerousGetHandle().ToInt32();
+            int errPipeFd = stderr.SafePipeHandle.DangerousGetHandle().ToInt32();
+            var timer = Stopwatch.StartNew();
+            using var outBytes = new MemoryStream();
+            using var errBytes = new MemoryStream();
+            var buffer = new byte[1024];
+            bool processExited = false, outComplete = false, errComplete = false, outOverflow = false, errOverflow = false;
+            int status = 0;
+            bool reaped = false;
+            try
             {
-                bool progressed = DrainUnixPipe(stdout, outPipeFd, outBytes, buffer, ref outComplete, ref outOverflow)
-                    | DrainUnixPipe(stderr, errPipeFd, errBytes, buffer, ref errComplete, ref errOverflow);
-                if (!processExited && PollUnixExitedWithoutReap(pid))
+                while (timer.ElapsedMilliseconds < 5000)
                 {
-                    processExited = true;
-                    continue;
+                    bool progressed = DrainUnixPipe(stdout, outPipeFd, outBytes, buffer, ref outComplete, ref outOverflow)
+                        | DrainUnixPipe(stderr, errPipeFd, errBytes, buffer, ref errComplete, ref errOverflow);
+                    if (!processExited && PollUnixExitedWithoutReap(pid))
+                    {
+                        processExited = true;
+                        continue;
+                    }
+                    if (processExited && outComplete && errComplete)
+                        break;
+                    if (!progressed)
+                    {
+                        int waitMs = Math.Clamp(5000 - (int)timer.ElapsedMilliseconds, 1, 10);
+                        WaitUnixPipes(outPipeFd, outComplete, errPipeFd, errComplete, waitMs);
+                    }
                 }
-                if (processExited && outComplete && errComplete)
-                    break;
-                if (!progressed)
+                if (!processExited && !PollUnixExitedWithoutReap(pid))
+                    throw new ArgumentException("Error: Native debugger discovery/version probe timed out: " + executable);
+                while (timer.ElapsedMilliseconds < 5000 && (!outComplete || !errComplete))
                 {
-                    int waitMs = Math.Clamp(5000 - (int)timer.ElapsedMilliseconds, 1, 10);
-                    WaitUnixPipes(outPipeFd, outComplete, errPipeFd, errComplete, waitMs);
+                    if (!DrainUnixPipe(stdout, outPipeFd, outBytes, buffer, ref outComplete, ref outOverflow)
+                        & !DrainUnixPipe(stderr, errPipeFd, errBytes, buffer, ref errComplete, ref errOverflow))
+                        break;
                 }
+                CleanupUnixProbe(pid, ref reaped, ref status);
+                bool outValid = outComplete && !outOverflow;
+                bool errValid = errComplete && !errOverflow;
+                string outText = CompleteLines(
+                    System.Text.Encoding.UTF8.GetString(outBytes.GetBuffer(), 0, (int)outBytes.Length), outValid);
+                string errText = CompleteLines(
+                    System.Text.Encoding.UTF8.GetString(errBytes.GetBuffer(), 0, (int)errBytes.Length), errValid);
+                int exitCode = reaped && (status & 0x7f) == 0 ? (status >> 8) & 0xff : -1;
+                return (exitCode, outText, errText, outValid && errValid);
             }
-            if (!processExited && !PollUnixExitedWithoutReap(pid))
-                throw new ArgumentException("Error: Native debugger discovery/version probe timed out: " + executable);
-            while (timer.ElapsedMilliseconds < 5000 && (!outComplete || !errComplete))
+            finally
             {
-                if (!DrainUnixPipe(stdout, outPipeFd, outBytes, buffer, ref outComplete, ref outOverflow)
-                    & !DrainUnixPipe(stderr, errPipeFd, errBytes, buffer, ref errComplete, ref errOverflow))
-                    break;
+                CleanupUnixProbe(pid, ref reaped, ref status);
+                stdout.Dispose();
+                stderr.Dispose();
             }
-            _ = kill(-pid, 9);
-            reaped = ReapUnix(pid, out status);
-            bool outValid = outComplete && !outOverflow;
-            bool errValid = errComplete && !errOverflow;
-            string outText = CompleteLines(
-                System.Text.Encoding.UTF8.GetString(outBytes.GetBuffer(), 0, (int)outBytes.Length), outValid);
-            string errText = CompleteLines(
-                System.Text.Encoding.UTF8.GetString(errBytes.GetBuffer(), 0, (int)errBytes.Length), errValid);
-            int exitCode = reaped && (status & 0x7f) == 0 ? (status >> 8) & 0xff : -1;
-            return (exitCode, outText + errText, outValid && errValid);
-        }
-        finally
-        {
-            if (!reaped)
-            {
-                _ = kill(-pid, 9);
-                reaped = ReapUnix(pid, out status);
-            }
-            var cleanup = Stopwatch.StartNew();
-            while (cleanup.ElapsedMilliseconds < 1000 && kill(-pid, 0) == 0)
-                System.Threading.Thread.Sleep(5);
-            stdout.Dispose();
-            stderr.Dispose();
         }
     }
 
@@ -727,8 +957,7 @@ internal static class NativeAdapterLocator
             System.Threading.Thread.Sleep(timeoutMs);
     }
 
-    private static unsafe int SpawnUnixGroup(string executable, string[] arguments,
-        int inFd, int outFd, int errFd, params int[] extraCloseFds)
+    private static unsafe int SpawnUnixGroup(string executable, string[] arguments, int inFd, int outFd, int errFd)
     {
         IntPtr actions = Marshal.AllocHGlobal(1024);
         IntPtr attr = Marshal.AllocHGlobal(1024);
@@ -745,9 +974,23 @@ internal static class NativeAdapterLocator
             CheckSpawn(posix_spawn_file_actions_adddup2(actions, inFd, 0));
             CheckSpawn(posix_spawn_file_actions_adddup2(actions, outFd, 1));
             CheckSpawn(posix_spawn_file_actions_adddup2(actions, errFd, 2));
-            foreach (int fd in ((int[])[inFd, outFd, errFd, .. extraCloseFds]).Distinct())
-                if (fd > 2)
+            var closeFds = new HashSet<int> { inFd, outFd, errFd };
+            string fdDirectory = OperatingSystem.IsLinux() ? "/proc/self/fd" : "/dev/fd";
+            if (Directory.Exists(fdDirectory))
+            {
+                foreach (string entry in Directory.GetFileSystemEntries(fdDirectory))
+                    if (int.TryParse(System.IO.Path.GetFileName(entry), System.Globalization.NumberStyles.None,
+                        System.Globalization.CultureInfo.InvariantCulture, out int parsedFd) && parsedFd > 2)
+                        closeFds.Add(parsedFd);
+            }
+            foreach (int fd in closeFds)
+            {
+                if (fd <= 2)
+                    continue;
+                int fdFlags = fcntl(fd, 1, 0); // F_GETFD = 1
+                if (fdFlags >= 0 && ((fdFlags & 1) == 0 || fd == inFd || fd == outFd || fd == errFd))
                     CheckSpawn(posix_spawn_file_actions_addclose(actions, fd));
+            }
             CheckSpawn(posix_spawnattr_setpgroup(attr, 0));
             CheckSpawn(posix_spawnattr_setflags(attr, 2));
 
@@ -806,16 +1049,33 @@ internal static class NativeAdapterLocator
         return result < 0 && Marshal.GetLastPInvokeError() != 4;
     }
 
+    private static void CleanupUnixProbe(int pid, ref bool reaped, ref int status)
+    {
+        if (!reaped)
+        {
+            _ = kill(-pid, 9);
+            _ = kill(pid, 9);
+            reaped = ReapUnix(pid, out status);
+        }
+        var cleanup = Stopwatch.StartNew();
+        while (cleanup.ElapsedMilliseconds < 1000 && kill(-pid, 0) == 0)
+            System.Threading.Thread.Sleep(5);
+    }
+
     private static bool ReapUnix(int pid, out int status)
     {
-        while (true)
+        var timer = Stopwatch.StartNew();
+        while (timer.ElapsedMilliseconds < 1000)
         {
-            int result = waitpid(pid, out status, 0);
+            int result = waitpid(pid, out status, 1); // WNOHANG = 1
             if (result == pid)
                 return true;
-            if (result >= 0 || Marshal.GetLastPInvokeError() != 4)
+            if (result < 0 && Marshal.GetLastPInvokeError() != 4)
                 return false;
+            System.Threading.Thread.Sleep(5);
         }
+        status = 0;
+        return false;
     }
 
     private static string CompleteLines(string text, bool complete)
@@ -855,6 +1115,13 @@ internal static class NativeAdapterLocator
         public IntPtr hStdInput;
         public IntPtr hStdOutput;
         public IntPtr hStdError;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct StartupInfoExW
+    {
+        public StartupInfoW StartupInfo;
+        public IntPtr lpAttributeList;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -899,11 +1166,24 @@ internal static class NativeAdapterLocator
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetHandleInformation(SafeFileHandle objectHandle, uint mask, uint flags);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool InitializeProcThreadAttributeList(IntPtr lpAttributeList, int dwAttributeCount,
+        int dwFlags, ref nuint lpSize);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool UpdateProcThreadAttribute(IntPtr lpAttributeList, uint dwFlags,
+        IntPtr attribute, IntPtr lpValue, nuint cbSize, IntPtr lpPreviousValue, IntPtr lpReturnSize);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern void DeleteProcThreadAttributeList(IntPtr lpAttributeList);
+
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool CreateProcessW(string? applicationName, System.Text.StringBuilder commandLine,
         IntPtr processAttributes, IntPtr threadAttributes, [MarshalAs(UnmanagedType.Bool)] bool inheritHandles,
-        uint creationFlags, IntPtr environment, string? currentDirectory, ref StartupInfoW startupInfo,
+        uint creationFlags, IntPtr environment, string? currentDirectory, ref StartupInfoExW startupInfo,
         out ProcessInformation processInformation);
 
     [DllImport("kernel32.dll", SetLastError = true)]
@@ -917,6 +1197,16 @@ internal static class NativeAdapterLocator
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool ReadFile(SafeFileHandle file, byte[] buffer, uint bytesToRead,
         out uint bytesRead, IntPtr overlapped);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool WriteFile(SafeFileHandle file, IntPtr buffer, uint bytesToWrite,
+        out uint bytesWritten, IntPtr overlapped);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetNamedPipeHandleState(SafeFileHandle namedPipe, ref uint mode,
+        IntPtr maxCollectionCount, IntPtr collectDataTimeout);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -945,6 +1235,12 @@ internal static class NativeAdapterLocator
 
     [DllImport("libc", EntryPoint = "poll", SetLastError = true)]
     private static extern int Poll(ref PollDescriptor descriptor, nuint count, int timeout);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int fcntl(int fd, int cmd, int arg);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern nint write(int fd, IntPtr buf, nuint count);
 
     [DllImport("libc", SetLastError = true)]
     private static extern int posix_spawnattr_init(IntPtr attr);

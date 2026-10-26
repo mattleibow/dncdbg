@@ -76,7 +76,9 @@ These tests preserve observable native behavior, not assumptions about DAP synta
 
 | Test | Exact contract |
 | --- | --- |
-| `TestHitConditionSyntax` | Across seven visits to each source breakpoint, `5` stops on visits 6 and 7. `==5`, `>=5`, and `%5` each stop on visits 1 through 7 and emit exactly one stderr diagnostic identifying the hit condition and saying it will be removed. All four stop sequences and diagnostic counts are collected before comparison. Native evaluates `hitCount > <hitCondition>`; this does not establish support for equality, greater-or-equal, or modulo syntax. |
+| `TestHitConditionSyntax` | Across seven visits, `5` and `>=5` stop on visits 5, 6 and 7; `==5` and `%5` stop only on 5, with no removal diagnostics. All sequences are collected before comparison. Forty-four valid source/function requests and 56 invalid ones prove unsigned bounds, zero/modulo-zero, ASCII-space-only normalization, exact error messages, and rejection of expressions, signs, overflow, tabs/newlines, suffixes and NUL characters. |
+| `TestBreakpointHitCondition` | Exact upstream source/function fixture covers all seven forms (`N`, `<N`, `<=N`, `==N`, `>N`, `>=N`, `%N`) and every expected source/frame stop over seven visits, plus process exit. |
+| `TestHitConditionLifecycle` | IDs and counts survive unchanged/equivalent/changed thresholds for source and function breakpoints; false expression conditions do not count; logpoint output is gated after counting. Invalid replacement requests preserve existing breakpoints; removal/re-addition resets the count. Exact stop sequences and expected output are required. |
 | `TestContinueResponse` | The continue response body contains a Boolean `allThreadsContinued`: `true` for explicit `singleThread:false` and for an omitted `singleThread`, and `false` for `singleThread:true`. This tests the response, not multi-thread scheduling. All threads are resumed before process shutdown. |
 | `TestUnhandledExceptionCondition` | With `!System.InvalidOperationException` on `all` and `user-unhandled`, a caught exception does not stop execution. An uncaught exception of the same type still stops at the throw line, with `exceptionInfo.breakMode == "unhandled"`, `exceptionId == "CLR/System.InvalidOperationException"`, and the matching full type name. These two filters do not suppress the final unhandled stop. |
 | `TestExceptionConditionMatching` | Thirty-seven cases cover per-token negation, negative-only conditions, positive/negative order, exclusion priority, ignored lone `!`, empty conditions, additive unconditional entries, duplicate filter options, comma/ASCII-whitespace separators, and wildcard prefixes. Wildcard cases include `*`, `!*`, positive/negative prefix conflicts across entries, ordinal case sensitivity, duplicate prefixes, zero-length suffixes, and literal internal/repeated asterisks and `?`. Every stop and its exact exception details/source line is collected before comparing the complete matrix. |
@@ -85,10 +87,12 @@ These tests preserve observable native behavior, not assumptions about DAP synta
 | `TestInnerExceptionLimit` | Preserve the upstream 65-node fixture's default first/last inner messages (`level 62`/`level 31`) and assert every node's type/message plus the exact 32-inner cutoff. Twenty additional launch/attach sessions prove zero, small and unsigned-maximum limits, invalid/overflow fallback, native numeric-prefix parsing, request overrides and reset to the default. These include the upstream 50-inner cutoff (`level 62`/`level 13`) and limit 100 exposing the complete finite chain (`level 62`/`innermost`). Fully populated terminal nodes are required without empty placeholders. |
 
 These are bounded scenarios, not full coverage of hit conditions or exception handling.
-The exception-condition matrices and updated upstream exception/stack-trace
-fixtures are proven against the native reference built from `3276ed04`, whose
-production/build inputs are unchanged through upstream `bd26edcf`. This is not
-a rebuilt `bd26edcf` binary. The historical native
+The hit-count fixtures and updated upstream breakpoint/logpoint fixtures are
+proven against the exact upstream `2feb374c` native reference. They intentionally
+replace the old evaluator-based hit-condition contract with parsed counts;
+retired expression scenarios are covered by request-time rejection assertions,
+not weakened or accepted as expressions. Other existing acceptance assertions
+remain unchanged. The historical native
 checkpoint predates per-type negation, wildcard prefixes, and the configurable
 `unhandled` filter. See [exception conditions](../docs/exception_conditions.md)
 for the supported syntax.

@@ -146,7 +146,8 @@ partial class Context
             "%1", "%4294967295", "  > =  2 ", "= = 2", "1 0", "0002", " % 2 " };
         string[] invalid = { "%0", "4294967296", "-1", "+1", "=1", "!=1", "===1",
             "1+3", "0+1+1", "ret_hit_cond()", "abc()", "1x", "1.0", "0x10", "<", ">=",
-            "==", "%", "\t", "\t2", "2\n", "2\r", "2\f", "2\v", "\u00a02", "9223372036854775807" };
+            "==", "%", "\t", "\t2", "2\n", "2\r", "2\f", "2\v", "\u00a02", "9223372036854775807",
+            "2\0", "2\0x" };
         foreach (string condition in valid)
         {
             Assert.True(DAPDebugger.Request(SourceRequest(condition)).Success, caller_trace + ": " + condition);

@@ -51,6 +51,7 @@ class Program
                 Context Context = (Context)context;
                 Context.Continue(@"__FILE__:__LINE__");
                 Context.WasExit(@"__FILE__:__LINE__");
+                Context.CheckHitLifecycleRestart(@"__FILE__:__LINE__");
                 Context.DebuggerExit(@"__FILE__:__LINE__");
             });
     }
@@ -63,6 +64,18 @@ partial class Context
 {
     int sourceHitId;
     int functionHitId;
+
+    public void CheckHitLifecycleRestart(string trace)
+    {
+        ConfigureHitLifecycle(trace, "2", true);
+        Restart(trace);
+        sourceHitId = functionHitId = 0;
+        WasEntryPointHit(trace);
+        Continue(trace);
+        CheckHitLifecycle(trace);
+        Continue(trace);
+        WasExit(trace);
+    }
 
     public void ConfigureHitLifecycle(string trace, string hit, bool enabled)
     {

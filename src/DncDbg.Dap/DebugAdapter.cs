@@ -356,11 +356,12 @@ internal sealed class DebugAdapter : IDisposable
                     .Select(b => new BreakpointRequest(LineFromClient(b.Line), b.Column is { } c ? ColumnFromClient(c) : null,
                         b.Condition, b.HitCondition, b.LogMessage))
                     .ToArray();
-                _breakpointRequests[path] = requests;
-                return new SetBreakpointsResponseBody
+                var response = new SetBreakpointsResponseBody
                 {
                     Breakpoints = _engine.SetBreakpoints(path, requests).Select(ToBreakpoint).ToArray(),
                 };
+                _breakpointRequests[path] = requests;
+                return response;
             }
 
             case "setFunctionBreakpoints":
@@ -368,11 +369,12 @@ internal sealed class DebugAdapter : IDisposable
                 var args = request.GetArguments<SetFunctionBreakpointsArguments>()!;
                 FunctionBreakpointRequest[] requests = args.Breakpoints
                     .Select(b => new FunctionBreakpointRequest(b.Name, b.Condition, b.HitCondition)).ToArray();
-                _functionBreakpointRequests = requests;
-                return new SetBreakpointsResponseBody
+                var response = new SetBreakpointsResponseBody
                 {
                     Breakpoints = _engine.SetFunctionBreakpoints(requests).Select(ToBreakpoint).ToArray(),
                 };
+                _functionBreakpointRequests = requests;
+                return response;
             }
 
             case "setExceptionBreakpoints":

@@ -10,6 +10,22 @@ public sealed record FunctionBreakpointRequest(string Name, string? Condition = 
 
 public sealed partial class DebugEngine
 {
+    private enum HitConditionKind { None, Less, LessOrEqual, Equal, Greater, GreaterOrEqual, Every }
+
+    private readonly record struct HitCondition(HitConditionKind Kind, uint Count)
+    {
+        public bool Matches(uint hits) => Kind switch
+        {
+            HitConditionKind.Less => hits < Count,
+            HitConditionKind.LessOrEqual => hits <= Count,
+            HitConditionKind.Equal => hits == Count,
+            HitConditionKind.Greater => hits > Count,
+            HitConditionKind.GreaterOrEqual => hits >= Count,
+            HitConditionKind.Every => hits % Count == 0,
+            _ => true,
+        };
+    }
+
     private readonly record struct CodeLocation(ModuleKey Module, uint Token, int Offset);
 
     /// <summary>
@@ -35,16 +51,16 @@ public sealed partial class DebugEngine
         public string? FunctionName { get; init; }
 
         public string? Condition { get; set; }
-        public string? HitCondition { get; set; }
+        public HitCondition HitCondition { get; init; }
         public string? LogMessage { get; init; }
-        public int HitCount { get; set; }
+        public uint HitCount { get; set; }
 
         public (int Line, int Column, int EndLine, int EndColumn)? Resolved { get; set; }
 
         /// <summary>Set when the file the user is looking at is not the one the module was compiled from.</summary>
         public string? Warning { get; set; }
 
-        /// <summary>Why the request makes no sense (line 0, a hit condition that is not one): such a breakpoint is never bound.</summary>
+        /// <summary>An invalid source line is never bound; invalid hit conditions reject the entire request.</summary>
         public string? Invalid { get; init; }
         public List<CodeLocation> Bound { get; } = [];
 
@@ -52,7 +68,7 @@ public sealed partial class DebugEngine
         public HashSet<string> ExternalModules { get; } = [];
 
         public bool Verified => Bound.Count > 0;
-        public bool NeedsEvaluation => Condition != null || HitCondition != null || LogMessage != null;
+        public bool NeedsEvaluation => Condition != null || LogMessage != null;
 
         public BreakpointInfo ToInfo() => new(Id, Path, Verified, Resolved?.Line ?? RequestedLine,
             Resolved?.Column ?? RequestedColumn, Resolved?.EndLine, Resolved?.EndColumn,
@@ -83,18 +99,20 @@ public sealed partial class DebugEngine
     {
         lock (_lock)
         {
+            var parsed = requests.Select(r => (Request: r, Hit: ParseHitCondition(r.HitCondition))).ToArray();
             return WhileSynchronized(() =>
             {
                 if (_breakpoints.Remove(sourcePath, out List<UserBreakpoint>? old))
                     old.ForEach(Unbind);
 
-                var created = requests.Select(r =>
+                var created = parsed.Select(item =>
                 {
+                    BreakpointRequest r = item.Request;
                     UserBreakpoint? previous = old?.FirstOrDefault(b => b.RequestedLine == r.Line && b.RequestedColumn == r.Column);
                     return new UserBreakpoint
                     {
                         Id = previous?.Id ?? ++_nextBreakpointId, Path = sourcePath, RequestedLine = r.Line, RequestedColumn = r.Column,
-                        Condition = NullIfBlank(r.Condition), HitCondition = NullIfBlank(r.HitCondition), LogMessage = NullIfBlank(r.LogMessage),
+                        Condition = NullIfBlank(r.Condition), HitCondition = item.Hit, LogMessage = NullIfBlank(r.LogMessage),
                         HitCount = previous?.HitCount ?? 0,
                         Invalid = r.Line <= 0 ? "Not a valid line number: lines start at 1." : null,
                     };
@@ -109,14 +127,23 @@ public sealed partial class DebugEngine
     {
         lock (_lock)
         {
+            var parsed = requests.Select(r => (Request: r, Hit: ParseHitCondition(r.HitCondition))).ToArray();
             return WhileSynchronized(() =>
             {
+                UserBreakpoint[] old = _functionBreakpoints.ToArray();
                 _functionBreakpoints.ForEach(Unbind);
                 _functionBreakpoints.Clear();
-                var created = requests.Select(r => new UserBreakpoint
+                var created = parsed.Select(item =>
                 {
-                    Id = ++_nextBreakpointId, FunctionName = r.Name.Trim(),
-                    Condition = NullIfBlank(r.Condition), HitCondition = NullIfBlank(r.HitCondition),
+                    FunctionBreakpointRequest r = item.Request;
+                    string name = r.Name.Trim();
+                    UserBreakpoint? previous = old.FirstOrDefault(b => b.FunctionName == name);
+                    return new UserBreakpoint
+                    {
+                        Id = previous?.Id ?? ++_nextBreakpointId, FunctionName = name,
+                        Condition = NullIfBlank(r.Condition), HitCondition = item.Hit,
+                        HitCount = previous?.HitCount ?? 0,
+                    };
                 }).ToList();
                 return Install(created, _functionBreakpoints.AddRange);
             });
@@ -127,9 +154,10 @@ public sealed partial class DebugEngine
 
     private List<BreakpointInfo> Install(List<UserBreakpoint> created, Action<List<UserBreakpoint>> store)
     {
-        foreach (UserBreakpoint bp in created)
-            foreach (LoadedModule module in _modules.Values)
-                TryBind(bp, module);
+        if (!_processExited)
+            foreach (UserBreakpoint bp in created)
+                foreach (LoadedModule module in _modules.Values)
+                    TryBind(bp, module);
         if (created.Count > 0)
             store(created);
         return created.Select(b => b.ToInfo()).ToList();
@@ -139,7 +167,7 @@ public sealed partial class DebugEngine
     private T WhileSynchronized<T>(Func<T> action)
     {
         bool stoppedHere = false;
-        if (_process != null && !_stopped)
+        if (_process != null && !_processExited && !_stopped)
         {
             Synchronize(_process);
             stoppedHere = true;
@@ -334,7 +362,7 @@ public sealed partial class DebugEngine
             return EventAction.InternalStop;
         }
 
-        List<UserBreakpoint> stopping = matches.Where(b => PassesHitCondition(b, ++b.HitCount)).ToList();
+        List<UserBreakpoint> stopping = matches.Where(b => b.HitCondition.Matches(++b.HitCount)).ToList();
         if (stopping.Count == 0)
             return EventAction.Continue;
         ModuleMetadata? metadata = GetMetadata(function.Module);
@@ -387,23 +415,8 @@ public sealed partial class DebugEngine
                         }
                     }
 
-                    ++bp.HitCount;
-                    if (bp.HitCondition != null)
-                    {
-                        try
-                        {
-                            if (evaluator.EvaluateToHost($"{bp.HitCount}>({bp.HitCondition})") is not true)
-                                continue;
-                        }
-                        catch (DebuggerException e)
-                        {
-                            string hitCondition = bp.HitCondition;
-                            string error = BreakpointExpressionError(bp, "hitCondition", hitCondition, e.Message);
-                            events.Add(() => Output?.Invoke("stderr", error));
-                            events.Add(() => BreakpointChanged?.Invoke(bp.ToInfo() with { Message = error }));
-                            bp.HitCondition = null;
-                        }
-                    }
+                    if (!bp.HitCondition.Matches(++bp.HitCount))
+                        continue;
 
                     if (bp.LogMessage != null)
                     {
@@ -455,33 +468,31 @@ public sealed partial class DebugEngine
             + $"The {kind} was '{expression}'. The error returned was '{error}'. - {location}\n";
     }
 
-    // "5" / "==5": exactly the fifth hit;  ">=5", ">5", "<5", "<=5";  "%5": every fifth hit
-    private static bool TryParseHitCondition(string hitCondition, out string op, out int n)
+    private static HitCondition ParseHitCondition(string? condition)
     {
-        string text = hitCondition.Replace(" ", "");
-        op = new string(text.TakeWhile(c => !char.IsDigit(c)).ToArray());
-        return int.TryParse(text[op.Length..], System.Globalization.NumberStyles.None, null, out n) && n > 0
-            && op is "" or "=" or "==" or ">=" or ">" or "<=" or "<" or "%";
-    }
-
-    private static string? ValidateHitCondition(string? hitCondition) =>
-        string.IsNullOrWhiteSpace(hitCondition) || TryParseHitCondition(hitCondition, out _, out _)
-            ? null
-            : $"Invalid hit condition '{hitCondition}': expected a positive number, optionally preceded by ==, >=, >, <=, < or %.";
-
-    private static bool PassesHitCondition(UserBreakpoint bp, int hitCount)
-    {
-        if (bp.HitCondition == null || !TryParseHitCondition(bp.HitCondition, out string op, out int n))
-            return true;
-        return op switch
+        string text = (condition ?? "").Replace(" ", "");
+        if (text.Length == 0)
+            return default;
+        int length = text.StartsWith("<=", StringComparison.Ordinal)
+            || text.StartsWith("==", StringComparison.Ordinal)
+            || text.StartsWith(">=", StringComparison.Ordinal) ? 2
+            : text[0] is '<' or '>' or '%' ? 1 : 0;
+        HitConditionKind kind = text[..length] switch
         {
-            ">=" => hitCount >= n,
-            ">" => hitCount > n,
-            "<=" => hitCount <= n,
-            "<" => hitCount < n,
-            "%" => hitCount % n == 0,
-            _ => hitCount == n,
+            "<" => HitConditionKind.Less,
+            "<=" => HitConditionKind.LessOrEqual,
+            "==" => HitConditionKind.Equal,
+            ">" => HitConditionKind.Greater,
+            "%" => HitConditionKind.Every,
+            _ => HitConditionKind.GreaterOrEqual,
         };
+        ReadOnlySpan<char> number = text.AsSpan(length);
+        if (number.ContainsAnyExceptInRange('0', '9') || !uint.TryParse(number, System.Globalization.NumberStyles.None,
+            System.Globalization.CultureInfo.InvariantCulture, out uint count))
+            throw new DebuggerException("Invalid hit condition. Supported hit conditions: <N, <=N, ==N, >N, N or >=N, and %N, where N is an integer within the range 0 - 4294967295");
+        if (kind == HitConditionKind.Every && count == 0)
+            throw new DebuggerException("Invalid hit condition: N must be greater than 0 for %N");
+        return new HitCondition(kind, count);
     }
 
     // "{expression}" is replaced by its value; "{{" and "}}" are literal braces

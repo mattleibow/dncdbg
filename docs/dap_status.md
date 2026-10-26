@@ -710,7 +710,7 @@ for examples and VsDbg mappings.
 ```
 Hit conditions support `<N`, `<=N`, `==N`, `>N`, `N`/`>=N`, and `%N` for unsigned
 32-bit N (zero is invalid only for `%N`). Invalid strings reject the whole
-request. See [hit count breakpoints](hit_conditions.md) for parsing and counter
+request. See [hit count breakpoints](hit_count_breakpoints.md) for parsing and counter
 semantics.
 
 #### FunctionBreakpoint
@@ -719,7 +719,7 @@ semantics.
 ✅  condition?: string;
 ✅  hitCondition?: string;
 ```
-The same [hit count syntax](hit_conditions.md) applies to function breakpoints.
+The same [hit count syntax](hit_count_breakpoints.md) applies to function breakpoints.
 
 #### Breakpoint
 ```text

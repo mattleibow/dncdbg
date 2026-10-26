@@ -121,7 +121,7 @@ releasing the process.
 - [Pseudo-variables](docs/pseudo_variables.md) - inspect the current exception, process and thread IDs.
 - [Evaluation format specifiers](docs/evaluation_format_specifiers.md) - control expression display and evaluation.
 - [Exception conditions](docs/exception_conditions.md) - select exception types and prefixes.
-- [Hit count breakpoints](docs/hit_conditions.md) - stop or log after selected counts.
+- [Hit count breakpoints](docs/hit_count_breakpoints.md) - stop or log after selected counts.
 - [Inputting text into the target](docs/inputting_text.md) - send standard input to a launched target.
 
 ## History and contributing

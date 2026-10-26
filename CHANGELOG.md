@@ -13,6 +13,7 @@ Upcoming changes compared to the previous version.
 - Added `supportsReadMemoryRequest` and `supportsWriteMemoryRequest` support in Capabilities.
 
 #### Added
+- Mirrored upstream hit-count restart coverage and request-linked documentation; retained prior strict parser and lifecycle tests.
 - Added upstream `TestBreakpointHitCondition` and native-proven strict hit-condition parsing/lifecycle coverage; obsolete evaluated hit-condition expressions are now rejected at request time.
 - Added the upstream `TestExceptionWildcardCondition` project, 50/100 inner-limit assertions, and `WithConditions` test-helper naming. Existing broader parity matrices are retained.
 - Added native-proven `TestInnerExceptionLimit` coverage and strengthened unhandled-exception exit assertions. Acceptance projects remain automatically discovered, including Windows Forms-only detection.

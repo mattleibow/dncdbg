@@ -7,7 +7,7 @@ See the [current architecture and build instructions](../README.md).
 Current managed [exception conditions](exception_conditions.md) support trailing
 wildcard prefixes; that post-migration feature is not added to this historical
 comparison or used to make new claims about other debuggers.
-Current [hit count breakpoints](hit_conditions.md) are also documented
+Current [hit count breakpoints](hit_count_breakpoints.md) are also documented
 separately rather than adding a post-migration feature to this historical table.
 
 <details open>

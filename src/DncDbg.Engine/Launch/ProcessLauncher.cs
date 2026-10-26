@@ -318,6 +318,7 @@ internal static class ProcessLauncher
         string script = Path.Combine(directory, "launch.sh"), control = Path.Combine(directory, "ctl"), go = Path.Combine(directory, "go");
         string alive = Path.Combine(directory, "alive"), input = Path.Combine(directory, "input");
         FileStream? controlStream = null, goStream = null, aliveStream = null, inputStream = null;
+        System.Diagnostics.Process? managedShell = null;
         stdin = Stream.Null;
         byte[] envBlock = Encoding.UTF8.GetBytes(string.Concat(BuildEnvironment(env).Select(e => e + "\0")) + "\0");
         GCHandle envHandle = GCHandle.Alloc(envBlock, GCHandleType.Pinned);
@@ -335,7 +336,6 @@ internal static class ProcessLauncher
 
             string commandLine = string.Join(' ', new[] { "/bin/sh", script, control, go, alive, input }.Concat(argv).Select(QuoteArgument));
             CreateProcessForLaunchResult result = default;
-            int managedShell = 0;
             lock (s_stdioSwapLock)
             {
                 int saved0 = dup(0), saved1 = dup(1), saved2 = dup(2);
@@ -356,8 +356,7 @@ internal static class ProcessLauncher
                         foreach (var entry in env ?? new Dictionary<string, string?>())
                             if (entry.Value == null) start.Environment.Remove(entry.Key);
                             else start.Environment[entry.Key] = entry.Value;
-                        using var process = System.Diagnostics.Process.Start(start)!;
-                        managedShell = process.Id;
+                        managedShell = System.Diagnostics.Process.Start(start)!;
                     }
                     else
                         result = dbgShim.CreateProcessForLaunch(commandLine, true, envHandle.AddrOfPinnedObject(),
@@ -385,7 +384,8 @@ internal static class ProcessLauncher
             stdin = inputStream;
             var detached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             int abandoned = 0;
-            int shell = noDebug ? managedShell : result.ProcessId;
+            System.Diagnostics.Process? managedShellOwned = managedShell;
+            int shell = result.ProcessId;
             Task<int?> exitCode = Task.Run<int?>(() =>
             {
                 try
@@ -405,13 +405,21 @@ internal static class ProcessLauncher
                 }
                 finally
                 {
-                    waitpid(shell, out _, 0); // no zombie; whoever else reaps it is welcome
+                    if (managedShellOwned != null)
+                    {
+                        // Process keeps its own reaping reference even after Dispose; raw waitpid can steal it.
+                        managedShellOwned.WaitForExit();
+                        managedShellOwned.Dispose();
+                    }
+                    else
+                        waitpid(shell, out _, 0);
                     controlOwned.Dispose();
                     goOwned.Dispose();
                     aliveOwned.Dispose();
                     TryDelete(directory);
                 }
             });
+            managedShell = null;
             controlStream = goStream = aliveStream = inputStream = null;
             return (pid, () =>
             {
@@ -441,6 +449,7 @@ internal static class ProcessLauncher
             goStream?.Dispose();
             aliveStream?.Dispose();
             inputStream?.Dispose();
+            managedShell?.Dispose();
             TryDelete(directory);
             throw;
         }

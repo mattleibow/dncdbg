@@ -35,6 +35,7 @@ Upcoming changes compared to the previous version.
 - Added an `E_POINTER` check to `QueryInterface()` and reused `Threads::GetId()` in `LogMessage()` instead of a direct `ICorDebugThread::GetID()` call.
 
 #### Fixed
+- Fixed Unix noDebug helper reaping: retain the `Process.Start` child until `Process.WaitForExit` completes rather than racing the runtime with raw `waitpid`, which can fail fast with `ECHILD` when managed and native helpers are interleaved.
 - Fixed startup failure on systems with no locales generated at all (e.g. a minimal Ubuntu chroot): fall back to the "C.UTF-8" or "C" locale when the environment locale is unavailable instead of exiting.
 - Fixed incorrect uppercase conversion of non-ASCII input when the environment locale is not UTF-8 capable (e.g. a Docker container with `LANG` unset): verify the applied locale and fall back to the "C.UTF-8" or "C" locale otherwise.
 - Fixed a resume handle leak when `ResumeProcess()` fails during the debuggee launch (the handle ownership is transferred to the caller by `CreateProcessForLaunch()`, so it is closed even if the resume fails).

@@ -60,7 +60,7 @@ public sealed partial class DebugEngine
         /// <summary>Set when the file the user is looking at is not the one the module was compiled from.</summary>
         public string? Warning { get; set; }
 
-        /// <summary>Why the request makes no sense (line 0, a hit condition that is not one): such a breakpoint is never bound.</summary>
+        /// <summary>An invalid source line is never bound; invalid hit conditions reject the entire request.</summary>
         public string? Invalid { get; init; }
         public List<CodeLocation> Bound { get; } = [];
 
@@ -154,9 +154,10 @@ public sealed partial class DebugEngine
 
     private List<BreakpointInfo> Install(List<UserBreakpoint> created, Action<List<UserBreakpoint>> store)
     {
-        foreach (UserBreakpoint bp in created)
-            foreach (LoadedModule module in _modules.Values)
-                TryBind(bp, module);
+        if (!_processExited)
+            foreach (UserBreakpoint bp in created)
+                foreach (LoadedModule module in _modules.Values)
+                    TryBind(bp, module);
         if (created.Count > 0)
             store(created);
         return created.Select(b => b.ToInfo()).ToList();
@@ -166,7 +167,7 @@ public sealed partial class DebugEngine
     private T WhileSynchronized<T>(Func<T> action)
     {
         bool stoppedHere = false;
-        if (_process != null && !_stopped)
+        if (_process != null && !_processExited && !_stopped)
         {
             Synchronize(_process);
             stoppedHere = true;

@@ -34,6 +34,9 @@ Resending or changing a breakpoint at the same source path/line/column, or
 the same function request name, preserves its ID and count. Changing the
 numeric threshold does not reset it. Removing the breakpoint and adding it
 again starts a new count. Counts use unsigned 32-bit arithmetic.
+Breakpoint requests can also be changed after target exit for the next restart;
+they do not synchronize or bind against the dead process. A rejected request
+does not replace the configuration saved for restart.
 
 This replaces the historical native `hitCount > expression` behavior. Bare
 `5` now stops on hit 5 and subsequent hits, not only hits after 5. Conditions

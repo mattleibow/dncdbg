@@ -569,21 +569,34 @@ skipped frames, and the engine log records their thread and depth so a partial
 stack is not silently presented as complete. This is a mixed-stack and
 managed-inspection proof at a native stop.
 
-The same proof captures the callback method's CLR native-code start separately
-from its current safe-point IP, installs an LLDB hardware breakpoint at that JIT
-address, and invokes the button a second time. LLDB then stops in the managed
-callback before the nested native checkpoint, and DNCDbg maps the stop back to
-the managed source frame. The experimental `dncdbgCodeStartReference` property
-is stop-snapshot-scoped and is emitted consistently by hybrid `stackTrace` and
-`dotnet/managedStackTrace`. The proof disables ReadyToRun and tiering; the
-address is not valid across JIT code-version changes. Both DevFlow invocations
-must complete, and the second updates the status to `126:2`.
+The same proof sets a standard DAP source breakpoint on
+`MixedModeScenario.cs:MAUI_MANAGED_CALLBACK`. DNCDbg resolves the portable-PDB
+sequence point to a method token and IL offset, asks the stopped CoreCLR view
+for current native code versions and IL-to-native maps, and installs the
+resulting address breakpoint through the sole LLDB execution owner. The
+breakpoint response includes its resolved source span and
+`instructionReference`; LLDB's backend breakpoint ID is translated back to the
+stable managed DAP breakpoint ID when it stops.
 
-This proves an LLDB-owned managed **address** breakpoint on macOS AppKit. It is
-not yet a managed source-breakpoint binder, automatic JIT/tiering rebind, or
-cross-transition StepIn implementation. Mac Catalyst currently validates the
-shared UI and native callback application but is not part of the CoreCLR managed
-inspection proof.
+The proof invokes the button a second time. LLDB stops on the requested managed
+source line before the nested native checkpoint, DNCDbg maps the top frame back
+to `ManagedCallback`, and the current instruction pointer equals the breakpoint
+response's `instructionReference`. The experimental
+`dncdbgCodeStartReference` remains a separate method-code identity used for
+diagnostics and code-version work; hybrid `stackTrace` and
+`dotnet/managedStackTrace` emit the same spelling. Both DevFlow invocations must
+complete, and the second updates the status to `126:2`.
+
+This proves an LLDB-owned managed **source** breakpoint on macOS AppKit without
+making ICorDebug a second execution controller. Breakpoint changes for an
+active mixed session currently require an all-threads stop. Requests remain
+pending when the module or JIT code version is unavailable and are retried at
+later stops. ReadyToRun and tiering remain disabled in the proof; automatic JIT,
+tiering, ReadyToRun and ReJIT generation notifications/rebinding are not yet
+complete. Conditions, hit conditions, logpoints and cross-transition StepIn are
+also not implemented for managed source breakpoints. Mac Catalyst currently
+validates the shared UI and native callback application but is not part of the
+CoreCLR managed inspection proof.
 
 `LldbProof` is the independent raw public-API baseline. Before proxy
 implementation, the CLI test failed with `Unknown option --native-debugger=lldb`

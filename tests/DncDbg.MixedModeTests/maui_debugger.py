@@ -5,7 +5,6 @@ import argparse
 import atexit
 import json
 from pathlib import Path
-import re
 import runpy
 import subprocess
 import time
@@ -123,15 +122,14 @@ def main(adapter, lldb):
         check(strict_callback["dncdbgCodeStartReference"].lower() == callback_address.lower(),
               str(strict_callback))
 
-        hardware = session.request("evaluate", dict(
-            expression=f"`breakpoint set --hardware -a {callback_address}",
-            context="repl",
-        ))
-        check("Breakpoint" in hardware["result"] and "address" in hardware["result"],
-              str(hardware))
-        hardware_match = re.search(r"Breakpoint (\d+):", hardware["result"])
-        check(hardware_match is not None, str(hardware))
-        hardware_id = int(hardware_match.group(1))
+        managed_breakpoints = session.request("setBreakpoints", dict(
+            source=dict(path=str(PROJECT.parent / "MixedModeScenario.cs")),
+            breakpoints=[dict(line=line(PROJECT.parent / "MixedModeScenario.cs", "MAUI_MANAGED_CALLBACK"))],
+        ))["breakpoints"]
+        check(len(managed_breakpoints) == 1 and managed_breakpoints[0]["verified"],
+              str(managed_breakpoints))
+        managed_breakpoint_id = managed_breakpoints[0]["id"]
+        managed_breakpoint_address = managed_breakpoints[0]["instructionReference"]
         session.request("setBreakpoints", dict(
             source=dict(path=str(FIXTURE / "native.c")),
             breakpoints=[],
@@ -140,13 +138,14 @@ def main(adapter, lldb):
         session.request("continue", dict(threadId=stop["threadId"]))
         managed_stop = session.event("stopped")
         check(managed_stop["reason"] == "breakpoint"
-              and hardware_id in managed_stop.get("hitBreakpointIds", []),
+              and managed_breakpoint_id in managed_stop.get("hitBreakpointIds", []),
               str(managed_stop))
         managed_stack = session.request("stackTrace", dict(threadId=managed_stop["threadId"]))
         managed_callback = managed_stack["stackFrames"][0]
         check("[Managed]" in managed_callback["name"] and "ManagedCallback" in managed_callback["name"],
-              "Hardware breakpoint top frame is not the callback: " + str(managed_stack))
-        check(managed_callback["instructionPointerReference"].lower() == callback_address.lower()
+              "Managed source breakpoint top frame is not the callback: " + str(managed_stack))
+        check(managed_callback["line"] == line(PROJECT.parent / "MixedModeScenario.cs", "MAUI_MANAGED_CALLBACK")
+              and managed_callback["instructionPointerReference"].lower() == managed_breakpoint_address.lower()
               and managed_callback["dncdbgCodeStartReference"].lower() == callback_address.lower(),
               str(managed_callback))
 
@@ -167,7 +166,7 @@ def main(adapter, lldb):
         atexit.unregister(terminate)
 
         session.request("disconnect", dict(terminateDebuggee=True))
-        print("PASS MAUI AppKit mixed stack and LLDB managed-address callback breakpoint", flush=True)
+        print("PASS MAUI AppKit mixed stack and managed source callback breakpoint", flush=True)
 
 
 if __name__ == "__main__":

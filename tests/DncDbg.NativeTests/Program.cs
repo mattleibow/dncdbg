@@ -1,10 +1,13 @@
 using System.Runtime.InteropServices;
 using ClrDebug;
 using DncDbg.Dap.Native;
+using DncDbg.Engine;
 
 if (args.Length is < 2 or > 3)
     throw new ArgumentException("Supply the public Python executable and fake_native_adapter.py test peer.");
 string python = args[0], fake = args[1];
+
+AssertManagedIlMapping();
 
 if (args.Length == 2 || args[2] == "version-probe-descriptors")
 {
@@ -1351,6 +1354,28 @@ using (var backend = Session("register-optional-mxcsr"))
     }
     finally { Marshal.FreeHGlobal(buffer); }
     Console.WriteLine("PASS absent optional MXCSR preserves integer/control context without fabricating FP state");
+}
+
+static void AssertManagedIlMapping()
+{
+    var map = new[]
+    {
+        new COR_DEBUG_IL_TO_NATIVE_MAP { ilOffset = -2, nativeStartOffset = 0, nativeEndOffset = 3 },
+        new COR_DEBUG_IL_TO_NATIVE_MAP { ilOffset = 0, nativeStartOffset = 4, nativeEndOffset = 11 },
+        new COR_DEBUG_IL_TO_NATIVE_MAP { ilOffset = 7, nativeStartOffset = 12, nativeEndOffset = 19 },
+        new COR_DEBUG_IL_TO_NATIVE_MAP { ilOffset = 15, nativeStartOffset = 20, nativeEndOffset = 27 },
+        new COR_DEBUG_IL_TO_NATIVE_MAP { ilOffset = -3, nativeStartOffset = 28, nativeEndOffset = 31 },
+    };
+
+    if (CoreClrInspection.ResolveNativeAddress(0x1000, map, 7) != 0x100c
+        || CoreClrInspection.ResolveNativeAddress(0x1000, map, 10) != 0x100c
+        || CoreClrInspection.ResolveNativeAddress(0x1000, map, 1) != 0x1004
+        || CoreClrInspection.ResolveNativeAddress(0x1000, map, 30) != 0x1014
+        || CoreClrInspection.ResolveNativeAddress(0x1000, map, -1) != null
+        || CoreClrInspection.ResolveNativeAddress(ulong.MaxValue - 2, map, 7) != null)
+        throw new InvalidOperationException("Managed IL-to-native breakpoint mapping did not preserve sequence-point ownership.");
+
+    Console.WriteLine("PASS managed source breakpoint IL offsets map to stable native sequence ranges");
 }
 
 NativeAdapterSession Session(string mode)

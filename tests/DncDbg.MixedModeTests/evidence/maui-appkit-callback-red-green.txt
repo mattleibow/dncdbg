@@ -76,3 +76,35 @@ Managed-address breakpoint GREEN:
   python3 tests/DncDbg.MixedModeTests/maui_debugger.py
 
   PASS MAUI AppKit mixed stack and LLDB managed-address callback breakpoint
+
+Managed source breakpoint RED 1:
+  Replacing the manual address command with a standard DAP setBreakpoints
+  request for MixedModeScenario.cs reached a runtime module whose on-disk image
+  had metadata, but ICorDebugModule.GetMetaDataInterface returned
+  CORDBG_E_MISSING_METADATA. One unrelated runtime module aborted resolution of
+  the user module.
+
+Managed source breakpoint RED 2:
+  After unusable modules were skipped individually, the portable PDB sequence
+  point resolved but CorDebugFunction.EnumerateNativeCode returned no current
+  code in the virtual process view. The active callback frame already carried
+  the exact CorDebugNativeFrame.Code object, so reporting the breakpoint as
+  permanently unsupported was incorrect.
+
+Managed source breakpoint GREEN:
+  CoreClrInspection now:
+    - skips only individual loaded modules without usable metadata;
+    - resolves the requested source line to method token and IL offset;
+    - considers EnumerateNativeCode, GetNativeCode, and already inspected active
+      managed frames as public current-code sources;
+    - maps the IL offset through COR_DEBUG_IL_TO_NATIVE_MAP while rejecting
+      prolog/epilog/no-mapping sentinels and arithmetic overflow.
+
+  NativeDebugProxy owns stable managed DAP breakpoint IDs, installs/removes LLDB
+  address breakpoints only while all threads are stopped, translates LLDB hit
+  IDs back to the managed ID, and returns the resolved source span plus exact
+  instructionReference.
+
+  python3 tests/DncDbg.MixedModeTests/maui_debugger.py
+
+  PASS MAUI AppKit mixed stack and managed source callback breakpoint

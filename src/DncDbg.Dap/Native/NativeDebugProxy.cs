@@ -24,11 +24,25 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
     {
         public CancellationToken ReverseCancellation { get; init; }
     }
+    private sealed class ManagedBreakpointState
+    {
+        public required int Id { get; init; }
+        public required string Path { get; init; }
+        public required int RequestedLine { get; init; }
+        public int? RequestedColumn { get; init; }
+        public string? Unsupported { get; init; }
+        public ManagedSourceBreakpoint? Resolved { get; set; }
+        public Dictionary<int, ulong> BackendIds { get; } = [];
+        public bool Verified => BackendIds.Count > 0;
+    }
     private readonly BlockingCollection<Work> _requests = [];
     private readonly BlockingCollection<BackendMessage> _events = [];
     private readonly List<Task> _starts = [];
     private readonly NativeReferences _references = new();
     private readonly object _state = new();
+    private readonly object _managedBreakpointLock = new();
+    private readonly Dictionary<string, List<ManagedBreakpointState>> _managedBreakpoints = new(StringComparer.Ordinal);
+    private readonly Dictionary<int, int> _managedBackendBreakpointIds = [];
     private readonly CancellationTokenSource _lifetime = new();
     private readonly List<CancellationTokenSource> _retiredTokens = [];
     private CancellationTokenSource _snapshotCancellation = new();
@@ -56,6 +70,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
     private Thread? _worker, _eventWorker;
     private volatile bool _stopping, _disconnecting;
     private bool _disposed;
+    private int _nextManagedBreakpointId = 1_000_000;
     private long _eventProgress, _terminalDrainUntil;
 
     public void Run()
@@ -185,7 +200,10 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         }
         if (command == "setBreakpoints" && arguments["source"]?["path"]?.GetValue<string>() is { } path
             && path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
-            throw new DebuggerException("Managed source breakpoints are not supported by read-only CoreCLR inspection. Use the normal managed adapter for managed execution control.");
+        {
+            SetManagedBreakpoints(request, path, arguments, native);
+            return;
+        }
         if (command == "dotnet/setNativeBreakpoint")
             throw new DebuggerException("The direct native controller is retired. Use standard setBreakpoints with this native backend.");
         if (command == "dotnet/managedStackTrace")
@@ -341,6 +359,11 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         _ownsTarget = true;
         _targetPid = null;
         _selectedNativeFrame = null;
+        lock (_managedBreakpointLock)
+        {
+            _managedBreakpoints.Clear();
+            _managedBackendBreakpointIds.Clear();
+        }
         Interlocked.Exchange(ref _terminalDrainUntil, 0);
         _targetEnded = false;
         _backendFailure = null;
@@ -368,7 +391,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
             capabilities["dncdbg"] = JsonSerializer.SerializeToNode(new
             {
                 ExecutionOwner = "native-adapter", ManagedInspection = "optional-read-only-coreclr",
-                ManagedExecutionControl = false, SupportsManagedSourceBreakpoints = false,
+                ManagedExecutionControl = false, SupportsManagedSourceBreakpoints = true,
             }, DapJson.Options);
             response.Body = capabilities;
             _initialized = true;
@@ -459,6 +482,205 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         });
         lock (_starts)
             _starts.Add(completion);
+    }
+
+    private void SetManagedBreakpoints(DapMessage request, string path, JsonObject arguments, NativeAdapterSession native)
+    {
+        bool active, stopped;
+        lock (_state)
+        {
+            active = _started && !_targetEnded;
+            stopped = _stopped && _allStopped;
+        }
+        if (active && !stopped)
+            throw new DebuggerException("Managed source breakpoints can only be changed while the LLDB-owned target is stopped.");
+
+        JsonArray requested = arguments["breakpoints"] as JsonArray ?? [];
+        List<ManagedBreakpointState> created;
+        lock (_managedBreakpointLock)
+        {
+            _managedBreakpoints.TryGetValue(path, out List<ManagedBreakpointState>? previous);
+            if (stopped && previous != null)
+                DeleteManagedBackendBreakpoints(native, previous, strict: true);
+
+            created = requested.Select(item =>
+            {
+                JsonObject source = item as JsonObject ?? throw new DebuggerException("Invalid managed source breakpoint.");
+                int line = source["line"]?.GetValue<int>() ?? throw new DebuggerException("Managed source breakpoint line is required.");
+                int? column = source["column"]?.GetValue<int>();
+                int normalizedLine = _linesStartAt1 ? line : line + 1;
+                int? normalizedColumn = column is null or 0 ? column : _columnsStartAt1 ? column : column + 1;
+                ManagedBreakpointState? old = previous?.FirstOrDefault(b =>
+                    b.RequestedLine == normalizedLine && b.RequestedColumn == normalizedColumn);
+                string? unsupported = source["condition"] != null || source["hitCondition"] != null || source["logMessage"] != null
+                    ? "Conditions, hit conditions, and logpoints are not yet supported for LLDB-owned managed source breakpoints."
+                    : normalizedLine <= 0 ? "Source lines start at 1." : null;
+                return new ManagedBreakpointState
+                {
+                    Id = old?.Id ?? ++_nextManagedBreakpointId,
+                    Path = path,
+                    RequestedLine = normalizedLine,
+                    RequestedColumn = normalizedColumn,
+                    Unsupported = unsupported,
+                };
+            }).ToList();
+            if (created.Count == 0)
+                _managedBreakpoints.Remove(path);
+            else
+                _managedBreakpoints[path] = created;
+
+            if (stopped && _managed)
+                RefreshManagedBreakpointsLocked(native, strict: true, publishChanges: false);
+        }
+        SendClientResponse(request, new SetBreakpointsResponseBody
+        {
+            Breakpoints = created.Select(ToBreakpoint).ToArray(),
+        });
+    }
+
+    private void RefreshManagedBreakpoints()
+    {
+        NativeAdapterSession? native;
+        bool canBind;
+        lock (_state)
+        {
+            native = _native;
+            canBind = _managed && _stopped && _allStopped && !_targetEnded;
+        }
+        if (!canBind || native == null)
+            return;
+        lock (_managedBreakpointLock)
+        {
+            try { RefreshManagedBreakpointsLocked(native, strict: false, publishChanges: true); }
+            catch (Exception error) when (error is DebuggerException or IOException or TimeoutException
+                or JsonException or OperationCanceledException)
+            {
+                log("Managed source breakpoint refresh failed: " + error.Message);
+                SendClientEvent("output", new OutputEventBody { Category = "stderr",
+                    Output = "Managed source breakpoint refresh failed: " + error.Message + Environment.NewLine });
+            }
+        }
+    }
+
+    private void RefreshManagedBreakpointsLocked(NativeAdapterSession native, bool strict, bool publishChanges)
+    {
+        CoreClrInspection view = Inspection();
+        foreach (ManagedBreakpointState breakpoint in _managedBreakpoints.Values.SelectMany(b => b))
+        {
+            bool wasVerified = breakpoint.Verified;
+            ManagedSourceBreakpoint? wasResolved = breakpoint.Resolved;
+            if (breakpoint.Unsupported != null)
+                continue;
+
+            IReadOnlyList<ManagedSourceBreakpoint> resolved;
+            try { resolved = view.ResolveSourceBreakpoint(breakpoint.Path, breakpoint.RequestedLine, breakpoint.RequestedColumn); }
+            catch (Exception error) when (!strict && error is DebugException or DebuggerException or IOException)
+            {
+                log($"Managed breakpoint {breakpoint.Path}:{breakpoint.RequestedLine} resolution failed: {error.Message}");
+                continue;
+            }
+            breakpoint.Resolved = resolved.FirstOrDefault();
+            var desired = resolved.Where(r => r.Address != null).Select(r => r.Address!.Value).ToHashSet();
+
+            foreach ((int backendId, ulong address) in breakpoint.BackendIds.ToArray())
+            {
+                if (desired.Contains(address))
+                    continue;
+                DeleteManagedBackendBreakpoint(native, backendId, strict);
+                breakpoint.BackendIds.Remove(backendId);
+                _managedBackendBreakpointIds.Remove(backendId);
+            }
+            foreach (ulong address in desired.Except(breakpoint.BackendIds.Values).Order())
+            {
+                int backendId = InstallManagedBackendBreakpoint(native, address);
+                breakpoint.BackendIds.Add(backendId, address);
+                _managedBackendBreakpointIds[backendId] = breakpoint.Id;
+            }
+
+            if (publishChanges && (wasVerified != breakpoint.Verified || wasResolved != breakpoint.Resolved))
+                SendClientEvent("breakpoint", new BreakpointEventBody { Breakpoint = ToBreakpoint(breakpoint) });
+        }
+    }
+
+    private static int InstallManagedBackendBreakpoint(NativeAdapterSession native, ulong address)
+    {
+        JsonElement body = LldbSnapshotTarget.Body(native.Request("evaluate", new
+        {
+            expression = $"`breakpoint set -a 0x{address:x}",
+            context = "repl",
+        }, CancellationToken.None));
+        string result = body.TryGetProperty("result", out JsonElement value) ? value.GetString() ?? "" : "";
+        Match match = Regex.Match(result, @"\bBreakpoint (?<id>[1-9][0-9]*):", RegexOptions.CultureInvariant);
+        if (!match.Success || !int.TryParse(match.Groups["id"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out int id))
+            throw new DebuggerException($"LLDB did not return a breakpoint ID for managed address 0x{address:x}: {result}");
+        return id;
+    }
+
+    private void DeleteManagedBackendBreakpoints(NativeAdapterSession native, IEnumerable<ManagedBreakpointState> breakpoints, bool strict)
+    {
+        foreach (ManagedBreakpointState breakpoint in breakpoints)
+            foreach (int backendId in breakpoint.BackendIds.Keys.ToArray())
+            {
+                DeleteManagedBackendBreakpoint(native, backendId, strict);
+                _managedBackendBreakpointIds.Remove(backendId);
+            }
+    }
+
+    private static void DeleteManagedBackendBreakpoint(NativeAdapterSession native, int backendId, bool strict)
+    {
+        try
+        {
+            _ = LldbSnapshotTarget.Body(native.Request("evaluate", new
+            {
+                expression = $"`breakpoint delete {backendId}",
+                context = "repl",
+            }, CancellationToken.None));
+        }
+        catch when (!strict) { }
+    }
+
+    private void MapManagedBreakpointHits(JsonObject body)
+    {
+        if (body["hitBreakpointIds"] is not JsonArray hits)
+            return;
+        lock (_managedBreakpointLock)
+        {
+            var mapped = new JsonArray();
+            var seen = new HashSet<int>();
+            foreach (JsonNode? item in hits)
+            {
+                if (item == null)
+                    continue;
+                int id = item.GetValue<int>();
+                int clientId = _managedBackendBreakpointIds.GetValueOrDefault(id, id);
+                if (seen.Add(clientId))
+                    mapped.Add(clientId);
+            }
+            body["hitBreakpointIds"] = mapped;
+        }
+    }
+
+    private Breakpoint ToBreakpoint(ManagedBreakpointState breakpoint)
+    {
+        ManagedSourceBreakpoint? resolved = breakpoint.Resolved;
+        string? message = breakpoint.Unsupported ?? (breakpoint.Verified ? null
+            : resolved != null ? "The managed method is loaded but has no current JIT code version; binding will be retried at each stop."
+            : "No loaded managed module with symbols contains code for this location; binding will be retried at each stop.");
+        int line = resolved?.Line ?? breakpoint.RequestedLine;
+        int column = resolved?.Column ?? breakpoint.RequestedColumn ?? 0;
+        return new Breakpoint
+        {
+            Id = breakpoint.Id,
+            Verified = breakpoint.Verified,
+            Message = message,
+            Source = new Source { Path = breakpoint.Path, Name = Path.GetFileName(breakpoint.Path) },
+            Line = line > 0 && !_linesStartAt1 ? line - 1 : line,
+            Column = column > 0 && !_columnsStartAt1 ? column - 1 : column > 0 ? column : null,
+            EndLine = resolved?.EndLine is > 0 and var endLine ? (!_linesStartAt1 ? endLine - 1 : endLine) : null,
+            EndColumn = resolved?.EndColumn is > 0 and var endColumn ? (!_columnsStartAt1 ? endColumn - 1 : endColumn) : null,
+            InstructionReference = breakpoint.BackendIds.Values.Order().FirstOrDefault() is > 0 and var address
+                ? $"0x{address:x}" : null,
+        };
     }
 
     private long? MapStack(JsonObject body, long thread, bool enrich, Work work)
@@ -677,6 +899,11 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
                 {
                     capabilities["supportsCancelRequest"] = false;
                     capabilities["supportsRestartRequest"] = false;
+                }
+                else if (message.Event == "stopped")
+                {
+                    MapManagedBreakpointHits(body);
+                    RefreshManagedBreakpoints();
                 }
                 Transform(body, "variablesReference", id => _references.Variable(id, false, envelope.Stop, 0));
                 Transform(body, "sourceReference", id => _references.Source(id, envelope.Session));

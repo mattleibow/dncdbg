@@ -10,6 +10,17 @@ namespace DncDbg.Engine;
 
 public sealed record ManagedInspectionFrame(FrameInfo Frame, ulong InstructionPointer, ulong CodeStart);
 
+public sealed record ManagedSourceBreakpoint(
+    string ModulePath,
+    int MethodToken,
+    int ILOffset,
+    int Line,
+    int Column,
+    int EndLine,
+    int EndColumn,
+    ulong? Address,
+    int CodeVersion);
+
 /// <summary>
 /// A read-only view of an externally stopped CoreCLR process. The caller owns execution and must discard
 /// the view before any resume or memory mutation. No managed debugger is attached to the target.
@@ -97,6 +108,104 @@ public sealed class CoreClrInspection : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         _ = GetStackTrace(osThreadId);
         return _skippedFrames.GetValueOrDefault(osThreadId);
+    }
+
+    public IReadOnlyList<ManagedSourceBreakpoint> ResolveSourceBreakpoint(string sourcePath, int line, int? column = null)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (line <= 0)
+            throw new ArgumentOutOfRangeException(nameof(line), "Source lines start at 1.");
+
+        var result = new List<ManagedSourceBreakpoint>();
+        var seen = new HashSet<(string ModulePath, int MethodToken, int ILOffset, ulong? Address, int CodeVersion)>();
+        foreach (CorDebugModule module in EnumerateModules())
+        {
+            ModuleMetadata? metadata;
+            try { metadata = GetMetadata(module); }
+            catch (DebugException error)
+            {
+                _log?.Invoke($"Managed breakpoint skipped module '{module.Name}' without usable metadata: {ErrorText.Describe(error)}");
+                continue;
+            }
+            if (metadata?.HasSymbols != true)
+                continue;
+            foreach (ResolvedBreakpoint resolved in metadata.ResolveBreakpoints(sourcePath, line, column))
+            {
+                CorDebugFunction function;
+                try { function = module.GetFunctionFromToken(new mdMethodDef(resolved.MethodToken)); }
+                catch (DebugException error)
+                {
+                    _log?.Invoke($"Managed breakpoint metadata lookup failed in '{module.Name}': {ErrorText.Describe(error)}");
+                    continue;
+                }
+
+                bool emitted = false;
+                var codes = new List<CorDebugCode>();
+                try
+                {
+                    if (function.TryEnumerateNativeCode(out CorDebugCodeEnum nativeCodes) == HRESULT.S_OK)
+                        codes.AddRange(nativeCodes);
+                    if (codes.Count == 0 && function.TryGetNativeCode(out CorDebugCode nativeCode) == HRESULT.S_OK)
+                        codes.Add(nativeCode);
+                }
+                catch (DebugException error)
+                {
+                    _log?.Invoke($"Managed breakpoint native-code lookup failed in '{module.Name}': {ErrorText.Describe(error)}");
+                }
+                foreach (CorDebugILFrame frame in _frames.Values)
+                    if (frame.Function.Token.Value == resolved.MethodToken && frame.Function.Module.Name == module.Name)
+                        try { codes.Add(new CorDebugNativeFrame((ICorDebugNativeFrame)frame.Raw).Code); }
+                        catch (DebugException) { }
+                foreach (CorDebugCode code in codes.GroupBy(c => (c.Address.Value, c.VersionNumber)).Select(group => group.First()))
+                {
+                    if (code.TryGetILToNativeMapping(out COR_DEBUG_IL_TO_NATIVE_MAP[] map) != HRESULT.S_OK)
+                        continue;
+                    ulong? address = ResolveNativeAddress(code.Address.Value, map, resolved.ILOffset);
+                    if (address == null)
+                        continue;
+                    int version = code.VersionNumber;
+                    if (!seen.Add((module.Name, resolved.MethodToken, resolved.ILOffset, address, version)))
+                        continue;
+                    result.Add(new ManagedSourceBreakpoint(module.Name, resolved.MethodToken, resolved.ILOffset,
+                        resolved.Line, resolved.Column, resolved.EndLine, resolved.EndColumn, address, version));
+                    emitted = true;
+                }
+
+                if (!emitted && seen.Add((module.Name, resolved.MethodToken, resolved.ILOffset, null, 0)))
+                    result.Add(new ManagedSourceBreakpoint(module.Name, resolved.MethodToken, resolved.ILOffset,
+                        resolved.Line, resolved.Column, resolved.EndLine, resolved.EndColumn, null, 0));
+            }
+        }
+        return result;
+    }
+
+    internal static ulong? ResolveNativeAddress(ulong codeStart, IReadOnlyList<COR_DEBUG_IL_TO_NATIVE_MAP> map, int ilOffset)
+    {
+        if (ilOffset < 0)
+            return null;
+        COR_DEBUG_IL_TO_NATIVE_MAP? selected = null;
+        foreach (COR_DEBUG_IL_TO_NATIVE_MAP candidate in map)
+        {
+            if (candidate.ilOffset < 0 || candidate.nativeStartOffset < 0
+                || candidate.nativeEndOffset <= candidate.nativeStartOffset || candidate.ilOffset > ilOffset)
+                continue;
+            if (selected == null || candidate.ilOffset > selected.Value.ilOffset)
+                selected = candidate;
+        }
+        if (selected == null)
+            return null;
+        try { return checked(codeStart + (ulong)selected.Value.nativeStartOffset); }
+        catch (OverflowException) { return null; }
+    }
+
+    private IEnumerable<CorDebugModule> EnumerateModules()
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (CorDebugAppDomain domain in _process.AppDomains)
+            foreach (CorDebugAssembly assembly in domain.Assemblies)
+                foreach (CorDebugModule module in assembly.Modules)
+                    if (seen.Add(module.Name))
+                        yield return module;
     }
 
     public IReadOnlyList<VariableInfo> GetVariables(int frameId)

@@ -297,6 +297,7 @@ public sealed class Breakpoint
     public int? Column { get; set; }
     public int? EndLine { get; set; }
     public int? EndColumn { get; set; }
+    public string? InstructionReference { get; set; }
 }
 
 public sealed class FunctionBreakpoint

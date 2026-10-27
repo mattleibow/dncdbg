@@ -203,6 +203,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
                     Line = f.Frame.Line > 0 && !_linesStartAt1 ? f.Frame.Line - 1 : f.Frame.Line,
                     Column = f.Frame.Column > 0 && !_columnsStartAt1 ? f.Frame.Column - 1 : f.Frame.Column,
                     InstructionPointerReference = $"0x{f.InstructionPointer:x}",
+                    DncDbgCodeStartReference = $"0x{f.CodeStart:x}",
                 }).ToArray(),
                 ReadOnly = true,
             } }, inspection);
@@ -520,6 +521,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
                 frame["column"] = _columnsStartAt1 ? source.Column : Math.Max(0, source.Column - 1);
                 frame["endLine"] = source.EndLine > 0 ? (_linesStartAt1 ? source.EndLine : source.EndLine - 1) : null;
                 frame["endColumn"] = source.EndColumn > 0 ? (_columnsStartAt1 ? source.EndColumn : source.EndColumn - 1) : null;
+                frame["dncdbgCodeStartReference"] = $"0x{match.CodeStart:x}";
             }
             frame["id"] = _references.Frame(nativeId, match?.Frame.Id, stop, inspection);
         }

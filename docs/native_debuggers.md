@@ -565,8 +565,15 @@ caller, and `[Managed] MixedModeScenario.ManagedCallback`; managed scopes expose
 the callback argument `value=42`. Runtime/interop frames that report
 `CORDBG_E_MISSING_METADATA` are skipped individually rather than making the
 entire managed stack unavailable. This is a mixed-stack and managed-inspection
-proof at a native stop, not yet a managed source breakpoint or cross-transition
-stepper.
+proof at a native stop.
+
+The same proof captures the callback method's CLR native-code start separately
+from its current safe-point IP, installs an LLDB hardware breakpoint at that JIT
+address, and invokes the button a second time. LLDB then stops in the managed
+callback before the nested native checkpoint, and DNCDbg maps the stop back to
+the managed source frame. This proves an LLDB-owned managed **address**
+breakpoint on macOS AppKit. It is not yet a managed source-breakpoint binder,
+automatic JIT/tiering rebind, or cross-transition StepIn implementation.
 
 `LldbProof` is the independent raw public-API baseline. Before proxy
 implementation, the CLI test failed with `Unknown option --native-debugger=lldb`

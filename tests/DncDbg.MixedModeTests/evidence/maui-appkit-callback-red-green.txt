@@ -40,3 +40,31 @@ Assertions:
   - managed callback source is MixedModeScenario.cs.
   - managed callback argument value is 42.
   - after continue, DevFlow observes MixedModeStatus.Text == 126.
+
+Managed-address breakpoint RED:
+  Reusing the managed frame's current safe-point InstructionPointerReference as
+  either a standard setInstructionBreakpoints address or an LLDB hardware
+  breakpoint did not stop the next callback invocation. The safe-point IP is not
+  a stable method-entry breakpoint identity.
+
+Managed-address breakpoint GREEN:
+  ManagedInspectionFrame now preserves both:
+    - InstructionPointer: current frame/safe-point PC used for native/managed
+      frame correlation.
+    - CodeStart: CorDebugNativeFrame.Code.Address used as the current native
+      method entry.
+
+  DNCDbg exposes CodeStart as dncdbgCodeStartReference on a managed hybrid frame.
+  The proof installs:
+
+    breakpoint set --hardware -a <dncdbgCodeStartReference>
+
+  It clears the original native checkpoint breakpoint, continues, and invokes
+  the same MAUI button again through the same DevFlow batch session. LLDB stops
+  at the managed callback code start, DNCDbg maps the stop to
+  [Managed] MixedModeScenario.ManagedCallback, and the final DevFlow assertion
+  remains MixedModeStatus.Text == 126.
+
+  python3 tests/DncDbg.MixedModeTests/maui_debugger.py
+
+  PASS MAUI AppKit mixed stack and LLDB managed-address callback breakpoint

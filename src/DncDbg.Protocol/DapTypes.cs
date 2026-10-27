@@ -386,6 +386,7 @@ public sealed class StackFrame
     public int? EndColumn { get; set; }
     public string? PresentationHint { get; set; }
     public string? InstructionPointerReference { get; set; }
+    public string? DncDbgCodeStartReference { get; set; }
 }
 
 public sealed class StackTraceResponseBody

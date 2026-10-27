@@ -48,6 +48,10 @@ def main(adapter, lldb):
         launch = session.send("launch", dict(
             program=str(PROGRAM),
             cwd=str(APP.parent),
+            env=[
+                "DOTNET_ReadyToRun=0",
+                "DOTNET_TieredCompilation=0",
+            ],
             managedInspection=True,
         ))
         session.event("initialized")
@@ -69,9 +73,14 @@ def main(adapter, lldb):
             "--timeout", "30",
             "--json",
         ], check=True, capture_output=True, text=True)
-        tap = subprocess.Popen([
-            "maui", "devflow", "ui", "tap", "--automationId", "RunMixedMode", "--json",
-        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        batch = subprocess.Popen([
+            "maui", "devflow", "batch",
+        ], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        batch.stdin.write(
+            "ui tap RunMixedMode; "
+            "ui tap RunMixedMode; "
+            "ui assert --automationId MixedModeStatus Text 126\n")
+        batch.stdin.close()
 
         stop = session.event("stopped")
         stack_result = session.request("stackTrace", dict(threadId=stop["threadId"]))
@@ -89,26 +98,50 @@ def main(adapter, lldb):
         values = {variable["name"]: variable["value"] for variable in variables}
         check(values.get("value") == "42", "Managed callback argument unavailable: " + str(values))
         check(any("native_callback_roundtrip" in frame["name"] for frame in frames), str(frames))
+        callback_address = callback["dncdbgCodeStartReference"]
+
+        hardware = session.request("evaluate", dict(
+            expression=f"`breakpoint set --hardware -a {callback_address}",
+            context="repl",
+        ))
+        check("Breakpoint" in hardware["result"] and "address" in hardware["result"],
+              str(hardware))
+        session.request("setBreakpoints", dict(
+            source=dict(path=str(FIXTURE / "native.c")),
+            breakpoints=[],
+        ))
 
         session.request("continue", dict(threadId=stop["threadId"]))
-        tap_output, tap_error = tap.communicate(timeout=10)
-        check(tap.returncode == 0, tap_output + tap_error)
-        deadline = time.monotonic() + 20
-        while time.monotonic() < deadline:
-            status = subprocess.run([
-                "maui", "devflow", "ui", "query",
-                "--automationId", "MixedModeStatus",
-                "--fields", "text",
-                "--json",
-            ], capture_output=True, text=True)
-            if status.returncode == 0 and json.loads(status.stdout)[0]["text"] == "126":
-                break
-            time.sleep(0.2)
-        else:
-            raise AssertionError("MAUI mixed-mode callback did not complete with 126")
+        managed_stop = session.event("stopped")
+        managed_stack = session.request("stackTrace", dict(threadId=managed_stop["threadId"]))
+        managed_callback = next((frame for frame in managed_stack["stackFrames"]
+                                 if "[Managed]" in frame["name"] and "ManagedCallback" in frame["name"]), None)
+        check(managed_callback is not None,
+              "LLDB managed-address breakpoint did not map to the callback: " + str(managed_stack))
+        check("native_checkpoint" not in managed_stack["stackFrames"][0]["name"],
+              "Managed hardware breakpoint was missed; callback code start remained "
+              + managed_callback["dncdbgCodeStartReference"])
+        check(managed_callback["instructionPointerReference"].lower() == callback_address.lower(),
+              str(managed_callback))
+
+        session.request("continue", dict(threadId=managed_stop["threadId"]))
+        try:
+            batch.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            batch.terminate()
+            batch.wait(timeout=5)
+        batch_output = batch.stdout.read()
+        batch_error = batch.stderr.read()
+        batch_results = [json.loads(result) for result in batch_output.splitlines() if result]
+        check(len(batch_results) == 3
+              and all(result["exit_code"] == 0 for result in (batch_results[0], batch_results[2]))
+              and batch_results[0]["command"] == "ui tap RunMixedMode"
+              and batch_results[1]["command"] == "ui tap RunMixedMode"
+              and batch_results[2]["command"].startswith("ui assert"),
+              batch_output + batch_error)
 
         session.request("disconnect", dict(terminateDebuggee=True))
-        print("PASS MAUI AppKit LLDB-owned mixed stack includes active C# callback", flush=True)
+        print("PASS MAUI AppKit mixed stack and LLDB managed-address callback breakpoint", flush=True)
 
 
 if __name__ == "__main__":

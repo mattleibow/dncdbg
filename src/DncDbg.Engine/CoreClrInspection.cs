@@ -8,7 +8,7 @@ using DncDbg.Engine.Values;
 
 namespace DncDbg.Engine;
 
-public sealed record ManagedInspectionFrame(FrameInfo Frame, ulong InstructionPointer);
+public sealed record ManagedInspectionFrame(FrameInfo Frame, ulong InstructionPointer, ulong CodeStart);
 
 /// <summary>
 /// A read-only view of an externally stopped CoreCLR process. The caller owns execution and must discard
@@ -64,12 +64,13 @@ public sealed class CoreClrInspection : IDisposable
                 SourceLocation? source = metadata?.GetSourceLocation(token, il.IP.pnOffset, out _);
                 string name = metadata?.GetMethodName(token) ?? $"<managed method 0x{token:x8}>";
                 var native = new CorDebugNativeFrame((ICorDebugNativeFrame)il.Raw);
-                ulong address = checked(native.Code.Address.Value + (ulong)native.IP);
+                ulong codeStart = native.Code.Address.Value;
+                ulong address = checked(codeStart + (ulong)native.IP);
                 int id = ++_nextFrame;
                 _frames.Add(id, il);
                 var info = new FrameInfo(id, "[Managed] " + name, source?.Path, source?.Line ?? 0,
                     source?.Column ?? 0, source?.EndLine ?? 0, source?.EndColumn ?? 0);
-                result.Add(new ManagedInspectionFrame(info, address));
+                result.Add(new ManagedInspectionFrame(info, address, codeStart));
             }
             else if (frameResult is not (HRESULT.S_OK or HRESULT.S_FALSE or HRESULT.CORDBG_E_MISSING_METADATA))
                 frameResult.ThrowOnNotOK();

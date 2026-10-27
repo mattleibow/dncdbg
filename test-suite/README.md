@@ -65,6 +65,20 @@ dotnet run --project tests/DncDbg.SmokeTests -- --safety bin/dncdbg-dap
 The self-hosted safety fixtures are separate from the unchanged acceptance
 suite. A surviving detached fixture is explicitly cleaned up by the smoke runner.
 
+## Docker integration
+
+The separate Docker test preserves the existing acceptance runner and fixtures:
+
+```sh
+dotnet run --project tests/DncDbg.DockerTests -- --require-docker
+```
+
+It publishes daemon-native Linux artifacts and checks launch, source breakpoints,
+container-local source mapping/retrieval, locals/evaluation and clean exit over
+`docker exec -i` stdio. CI requires Docker; omitting `--require-docker` allows a
+local availability skip. See [Docker and WSL debugging](../docs/docker_wsl.md)
+for prerequisites, deadlines, isolated cleanup and coverage limitations.
+
 ## Focused native migration contracts
 
 Run the same tests against either adapter without changing the debuggee or assertions:

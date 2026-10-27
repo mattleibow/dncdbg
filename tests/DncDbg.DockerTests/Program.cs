@@ -46,6 +46,7 @@ try
     await Publish(Path.Combine(root, "src", "DncDbg.Dap"), "adapter");
     await Publish(Path.Combine(fixture, "DockerTarget.csproj"), "app",
         "-p:PathMap=" + fixture + "=/_/dncdbg-docker");
+    Directory.Delete(Path.Combine(context, "artifacts"), recursive: true);
     File.Copy(Path.Combine(root, "tests", "DncDbg.DockerTests", "Dockerfile"), Path.Combine(context, "Dockerfile"));
     File.Copy(Path.Combine(fixture, "Program.cs"), Path.Combine(context, "Program.cs"));
 
@@ -57,11 +58,10 @@ try
     Require(running.Trim() == "true", "The test container must be running.");
 
     await DebugContainer(container, fixture);
-    Console.WriteLine("PASS: Docker stdio launch, mapped breakpoint/source, locals, evaluation, continue and exit.");
 
     async Task Publish(string project, string output, params string[] properties)
     {
-        await Commands.Run("dotnet", ["publish", project, "--configuration", "Debug", "--runtime", rid,
+        await Commands.Run("dotnet", ["publish", project, "--configuration", "Release", "--runtime", rid,
             "--self-contained", "false", "--nologo", "--output", Path.Combine(context, output),
             "--artifacts-path", Path.Combine(context, "artifacts"), .. properties], 300);
     }
@@ -104,6 +104,8 @@ finally
 
 foreach (Exception error in failures)
     Console.Error.WriteLine(error);
+if (failures.Count == 0)
+    Console.WriteLine("PASS: Docker stdio launch, mapped breakpoint/source, locals, evaluation, continue, exit and cleanup.");
 return failures.Count == 0 ? 0 : 1;
 
 static void Require(bool condition, string message)
@@ -138,11 +140,21 @@ static async Task DebugContainer(string container, string fixture)
             breakpoints = new[] { new { line } },
         });
         Require(breakpoints.GetProperty("breakpoints").GetArrayLength() == 1, "Expected one source breakpoint.");
+        JsonElement breakpoint = breakpoints.GetProperty("breakpoints")[0];
+        int breakpointId = breakpoint.GetProperty("id").GetInt32();
         await dap.Request("configurationDone", new { });
         await dap.Response(launch);
+        if (!breakpoint.GetProperty("verified").GetBoolean())
+            breakpoint = (await dap.Event("breakpoint")).GetProperty("breakpoint");
+        Require(breakpoint.GetProperty("id").GetInt32() == breakpointId
+            && breakpoint.GetProperty("verified").GetBoolean()
+            && breakpoint.GetProperty("line").GetInt32() == line,
+            "The requested source breakpoint must bind to the exact fixture line.");
 
         JsonElement stopped = await dap.Event("stopped");
         Require(stopped.GetProperty("reason").GetString() == "breakpoint", "Expected a source-breakpoint stop, not entry/exception.");
+        Require(stopped.GetProperty("hitBreakpointIds").EnumerateArray().Any(id => id.GetInt32() == breakpointId),
+            "The stop must identify the requested source breakpoint.");
         int threadId = stopped.GetProperty("threadId").GetInt32();
         JsonElement stack = await dap.Request("stackTrace", new { threadId, startFrame = 0, levels = 1 });
         JsonElement frame = stack.GetProperty("stackFrames")[0];
@@ -167,7 +179,9 @@ static async Task DebugContainer(string container, string fixture)
         Require(evaluation.GetProperty("result").GetString() == "43", "Expression evaluation failed inside Docker.");
         JsonElement continued = await dap.Request("continue", new { threadId });
         Require(continued.GetProperty("allThreadsContinued").GetBoolean(), "Continue must resume the target.");
-        await dap.Event("continued");
+        JsonElement continuedEvent = await dap.Event("continued");
+        Require(continuedEvent.GetProperty("threadId").GetInt32() == threadId
+            && continuedEvent.GetProperty("allThreadsContinued").GetBoolean(), "Continued event must match the resumed thread.");
         JsonElement exited = await dap.Event("exited");
         Require(exited.GetProperty("exitCode").GetInt32() == 0, "Container target exited unsuccessfully.");
         await dap.Event("terminated");
@@ -269,8 +283,11 @@ internal sealed class DapClient : IAsyncDisposable
     }
 
     internal async Task<JsonElement> Event(string name)
-        => (await Receive(message => message.GetProperty("type").GetString() == "event"
-            && message.GetProperty("event").GetString() == name)).GetProperty("body");
+    {
+        JsonElement message = await Receive(message => message.GetProperty("type").GetString() == "event"
+            && message.GetProperty("event").GetString() == name);
+        return message.TryGetProperty("body", out JsonElement body) ? body : default;
+    }
 
     private async Task<JsonElement> Receive(Func<JsonElement, bool> predicate)
     {

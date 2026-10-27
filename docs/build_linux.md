@@ -26,3 +26,8 @@ Attaching to an existing process is subject to the OS ptrace/security policy.
 The test suite defaults to `net10.0`; `DNCDBG_TARGET_FRAMEWORK` overrides the
 fixture target when the corresponding SDK/runtime is installed.
 See [local testing](../test-suite/README.md) for focused test selection.
+
+For Linux containers or WSL, run the Linux adapter beside the target, not a
+Windows/macOS adapter across the OS boundary. See [Docker and WSL
+debugging](docker_wsl.md) for architecture-correct publishing, stdio transport
+and the Docker integration test.

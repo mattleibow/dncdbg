@@ -40,8 +40,8 @@
   </ItemGroup>
 
   <ItemGroup Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'macos'">
-    <PackageReference Include="Microsoft.Maui.Platforms.MacOS" Version="0.1.0-preview.13.26527.1" />
-    <PackageReference Include="Microsoft.Maui.Platforms.MacOS.Essentials" Version="0.1.0-preview.13.26527.1" />
+    <PackageReference Include="Microsoft.Maui.Platforms.MacOS" Version="0.1.0-preview.13.26526.5" />
+    <PackageReference Include="Microsoft.Maui.Platforms.MacOS.Essentials" Version="0.1.0-preview.13.26526.5" />
   </ItemGroup>
 
   <ItemGroup>

@@ -2,12 +2,23 @@
 Upcoming changes compared to the previous version.
 
 #### DAP
+- Report the actual `allThreadsContinued` outcome in continue responses and continued events, including successful steps. Redundant already-running continues return `true` without an extra event; failed state inspection logs and falls back to the requested mode.
+- Ported parsed unsigned hit conditions for source/function breakpoints: `<N`, `<=N`, `==N`, `>N`, `N`/`>=N`, and `%N` (`%0` rejected). Validate complete requests before mutation; count without function evaluation and preserve function IDs/counts across replacements.
+- Added `DNCDBG_INNER_EXCEPTION_WALK_LIMIT` with native-compatible process/session configuration, a default of 32 inner exceptions, and fully populated terminal details. Exception traversal and DAP conversion are iterative; outgoing chains may exceed the incoming message depth limit.
+- Matched upstream trailing-`*` prefix exception conditions, including negated prefixes and `!*`. Internal/repeated asterisks are literal rather than general glob patterns.
+- Ported upstream per-type exception-condition negation and deterministic exclusion priority across additive filter entries. A lone `!` is ignored.
+- Unhandled exceptions stop by default unless a matching negated condition on the `unhandled` filter excludes the type; positive conditions do not narrow this default.
 - Added `linesStartAt1`, `columnsStartAt1` and `supportsMemoryReferences` support in Initialize Request.
 - Added ReadMemory Request and Response.
 - Added WriteMemory Request and Response.
 - Added `supportsReadMemoryRequest` and `supportsWriteMemoryRequest` support in Capabilities.
 
 #### Added
+- Mirrored upstream hit-count restart coverage and request-linked documentation; retained prior strict parser and lifecycle tests.
+- Added upstream `TestBreakpointHitCondition` and native-proven strict hit-condition parsing/lifecycle coverage; obsolete evaluated hit-condition expressions are now rejected at request time.
+- Added the upstream `TestExceptionWildcardCondition` project, 50/100 inner-limit assertions, and `WithConditions` test-helper naming. Existing broader parity matrices are retained.
+- Added native-proven `TestInnerExceptionLimit` coverage and strengthened unhandled-exception exit assertions. Acceptance projects remain automatically discovered, including Windows Forms-only detection.
+- Added native-proven `TestExceptionConditionMatching` and `TestUnhandledExceptionFilter` acceptance coverage.
 - Added debugger configuration environment variable `DNCDBG_PDB_MMAP_POLICY`.
 - Added support for custom modifiers (`CustomMod*`) in literal field and local constant signatures.
 - Added stripped-down [base64](https://github.com/tobiaslocker/base64) sources (commit 8d96a2a).
@@ -25,6 +36,7 @@ Upcoming changes compared to the previous version.
 - Added an `E_POINTER` check to `QueryInterface()` and reused `Threads::GetId()` in `LogMessage()` instead of a direct `ICorDebugThread::GetID()` call.
 
 #### Fixed
+- Fixed Unix noDebug helper reaping: retain the `Process.Start` child until `Process.WaitForExit` completes rather than racing the runtime with raw `waitpid`, which can fail fast with `ECHILD` when managed and native helpers are interleaved.
 - Fixed startup failure on systems with no locales generated at all (e.g. a minimal Ubuntu chroot): fall back to the "C.UTF-8" or "C" locale when the environment locale is unavailable instead of exiting.
 - Fixed incorrect uppercase conversion of non-ASCII input when the environment locale is not UTF-8 capable (e.g. a Docker container with `LANG` unset): verify the applied locale and fall back to the "C.UTF-8" or "C" locale otherwise.
 - Fixed a resume handle leak when `ResumeProcess()` fails during the debuggee launch (the handle ownership is transferred to the caller by `CreateProcessForLaunch()`, so it is closed even if the resume fails).

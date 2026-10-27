@@ -6,6 +6,33 @@ namespace DncDbg.Engine;
 
 public sealed partial class DebugEngine
 {
+    private const string InnerExceptionWalkLimitVariable = "DNCDBG_INNER_EXCEPTION_WALK_LIMIT";
+    private const uint DefaultInnerExceptionWalkLimit = 32;
+    private uint? _initialInnerExceptionWalkLimit;
+    private uint _innerExceptionWalkLimit = DefaultInnerExceptionWalkLimit;
+
+    private void ConfigureExceptionDetails(IReadOnlyDictionary<string, string?>? environment)
+    {
+        _initialInnerExceptionWalkLimit ??= ParseInnerExceptionWalkLimit(Environment.GetEnvironmentVariable(InnerExceptionWalkLimitVariable));
+        _innerExceptionWalkLimit = environment?.TryGetValue(InnerExceptionWalkLimitVariable, out string? value) == true
+            ? ParseInnerExceptionWalkLimit(value)
+            : _initialInnerExceptionWalkLimit.Value;
+    }
+
+    private uint ParseInnerExceptionWalkLimit(string? value)
+    {
+        if (value == null)
+            return DefaultInnerExceptionWalkLimit;
+        int digits = 0;
+        while (digits < value.Length && value[digits] is >= '0' and <= '9')
+            digits++;
+        if (digits > 0 && uint.TryParse(value.AsSpan(0, digits), System.Globalization.NumberStyles.None,
+            System.Globalization.CultureInfo.InvariantCulture, out uint limit))
+            return limit;
+        Log?.Invoke($"Failed to parse {InnerExceptionWalkLimitVariable} as a number, using the default value {DefaultInnerExceptionWalkLimit}.");
+        return DefaultInnerExceptionWalkLimit;
+    }
+
     public const string FilterAll = "all";
     public const string FilterUnhandled = "unhandled";
     public const string FilterUserUnhandled = "user-unhandled";
@@ -20,13 +47,7 @@ public sealed partial class DebugEngine
     private bool _diedOfUnhandledException;
 
     public void SetExceptionFilters(IReadOnlyCollection<string> filters)
-    {
-        lock (_lock)
-        {
-            _breakOnThrown = filters.Contains(FilterAll);
-            _breakOnUserUnhandled = filters.Contains(FilterUserUnhandled);
-        }
-    }
+        => SetExceptionFilters(filters.Select(filter => new ExceptionFilterRequest(filter)).ToArray());
 
     private EventAction OnException(Exception2CorDebugManagedCallbackEventArgs e)
     {
@@ -69,9 +90,7 @@ public sealed partial class DebugEngine
                 _firstChanceReported.Remove(threadId);
                 _passedUserCode.Remove(threadId);
                 _diedOfUnhandledException = true;
-                // Whatever the filters say: the process is about to die, and showing why is what a debugger is for.
-                // The "unhandled" filter only carries the type condition (a client that does not know the filter
-                // sends none, and gets every stop).
+                // Unhandled exceptions stop by default; only a matching negated unhandled condition suppresses them.
                 return MatchesExceptionCondition(FilterUnhandled, thread)
                     ? StopAtException(thread, "unhandled")
                     : EventAction.Continue;
@@ -97,7 +116,7 @@ public sealed partial class DebugEngine
     {
         int threadId = thread.Id;
         _exceptionStops[threadId] = breakMode;
-        ExceptionData? details = ReadException(() => thread.CurrentException, breakMode, 0, null);
+        ExceptionData? details = ReadException(() => thread.CurrentException, breakMode, null);
         string kind = breakMode switch { "unhandled" => "unhandled", "userUnhandled" => "user-unhandled", _ => "thrown" };
         string description = details == null ? "Exception" : $"Exception {kind}: {details.TypeName}";
         Post(() => Stopped?.Invoke(new StopInfo("exception", threadId, description, details?.Message)));
@@ -105,31 +124,36 @@ public sealed partial class DebugEngine
     }
 
     /// <param name="evalThreadId">Thread to run the StackTrace getter on; null to read fields only.</param>
-    private ExceptionData? ReadException(Func<CorDebugValue?> getter, string breakMode, int depth, int? evalThreadId)
+    private ExceptionData? ReadException(Func<CorDebugValue?> getter, string breakMode, int? evalThreadId)
     {
+        var details = new List<(string TypeName, string? Message, string? StackTrace)>();
         try
         {
-            CorDebugValue? exception = getter();
-            if (exception == null || ValueInspector.Unwrap(exception, out bool isNull) == null || isNull)
-                return null;
-
-            Func<CorDebugValue?> stable = Stabilize(getter);
-            string typeName = _values.GetTypeName(exception);
-            string? message = _values.ReadString(_values.GetFieldByName(exception, "_message"));
-            ExceptionData? inner = depth < 8
-                ? ReadException(() => _values.GetFieldByName(stable()!, "_innerException"), breakMode, depth + 1, evalThreadId)
-                : null;
-
-            string? stackTrace = _values.ReadString(_values.GetFieldByName(stable()!, "_stackTraceString"));
-            if (stackTrace == null && evalThreadId is { } threadId)
-                stackTrace = ReadStackTraceProperty(stable, threadId);
-            return new ExceptionData(typeName, message, breakMode, stackTrace, inner);
+            for (uint depth = 0; ; depth++)
+            {
+                CorDebugValue? exception = getter();
+                if (exception == null || ValueInspector.Unwrap(exception, out bool isNull) == null || isNull)
+                    break;
+                Func<CorDebugValue?> stable = Stabilize(getter);
+                string typeName = _values.GetTypeName(exception);
+                string? message = _values.ReadString(_values.GetFieldByName(exception, "_message"));
+                string? stackTrace = _values.ReadString(_values.GetFieldByName(stable()!, "_stackTraceString"));
+                if (stackTrace == null && evalThreadId is { } threadId)
+                    stackTrace = ReadStackTraceProperty(stable, threadId);
+                details.Add((typeName, message, stackTrace));
+                if (depth == _innerExceptionWalkLimit)
+                    break;
+                getter = () => _values.GetFieldByName(stable()!, "_innerException");
+            }
         }
         catch (Exception e)
         {
             Log?.Invoke("Failed to read the current exception: " + e.Message);
-            return null;
         }
+        ExceptionData? result = null;
+        for (int i = details.Count - 1; i >= 0; i--)
+            result = new ExceptionData(details[i].TypeName, details[i].Message, breakMode, details[i].StackTrace, result);
+        return result;
     }
 
     private string? ReadStackTraceProperty(Func<CorDebugValue?> exception, int threadId)
@@ -163,7 +187,7 @@ public sealed partial class DebugEngine
             RequireStopped();
             RequireThread(threadId); // ReadException swallows what goes wrong, an unknown thread included
             string breakMode = _exceptionStops.GetValueOrDefault(threadId, "always");
-            return ReadException(() => RequireThread(threadId).CurrentException, breakMode, 0, threadId);
+            return ReadException(() => RequireThread(threadId).CurrentException, breakMode, threadId);
         }
     }
 }

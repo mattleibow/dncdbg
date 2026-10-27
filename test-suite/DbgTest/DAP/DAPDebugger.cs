@@ -30,9 +30,16 @@ public class DAPResult : Tuple<bool, string>
 
 public class DAPDebugger
 {
+    const int MaxJsonDepth = 512;
+
+    static JsonTextReader CreateJsonReader(string stringJSON)
+    {
+        return new JsonTextReader(new StringReader(stringJSON)) { MaxDepth = MaxJsonDepth };
+    }
+
     public bool IsResponseContainProperty(string stringJSON, string testField, string testValue)
     {
-        JsonTextReader reader = new JsonTextReader(new StringReader(stringJSON));
+        JsonTextReader reader = CreateJsonReader(stringJSON);
         while (reader.Read())
         {
             if (reader.Value != null && reader.TokenType.ToString() == "PropertyName" &&
@@ -48,7 +55,7 @@ public class DAPDebugger
 
     public object? GetResponsePropertyValue(string stringJSON, string testField)
     {
-        JsonTextReader reader = new JsonTextReader(new StringReader(stringJSON));
+        JsonTextReader reader = CreateJsonReader(stringJSON);
         while (reader.Read())
         {
             if (reader.Value != null && reader.TokenType.ToString() == "PropertyName" &&

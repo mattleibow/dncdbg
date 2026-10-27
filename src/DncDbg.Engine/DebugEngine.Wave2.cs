@@ -1,4 +1,3 @@
-using System.Text.RegularExpressions;
 using ClrDebug;
 using DncDbg.Engine.Symbols;
 using DncDbg.Engine.Values;
@@ -7,7 +6,7 @@ namespace DncDbg.Engine;
 
 public sealed record GotoTargetInfo(int Id, string Label, int Line, int Column, int EndLine, int EndColumn);
 
-/// <param name="Condition">Comma separated exception type names; "!" excludes, "*" is a wildcard; base types match too.</param>
+/// <param name="Condition">Comma/whitespace-separated exception type names; "!" excludes a token and a trailing "*" matches a prefix.</param>
 public sealed record ExceptionFilterRequest(string Filter, string? Condition = null);
 
 public sealed partial class DebugEngine
@@ -189,22 +188,37 @@ public sealed partial class DebugEngine
 
     // ---------------------------------------------------------------- exception filter conditions
 
-    private readonly Dictionary<string, List<(bool Exclude, Regex Pattern)>> _exceptionConditions = [];
+    private readonly Dictionary<string, List<(bool Exclude, bool Prefix, string Name)>> _exceptionConditions = [];
+    private readonly HashSet<string> _unconditionalExceptionFilters = [];
 
     public void SetExceptionFilters(IReadOnlyCollection<ExceptionFilterRequest> filters)
     {
         lock (_lock)
         {
-            SetExceptionFilters(filters.Select(f => f.Filter).ToList());
+            _breakOnThrown = filters.Any(f => f.Filter == FilterAll);
+            _breakOnUserUnhandled = filters.Any(f => f.Filter == FilterUserUnhandled);
             _exceptionConditions.Clear();
-            foreach (ExceptionFilterRequest filter in filters.Where(f => !string.IsNullOrWhiteSpace(f.Condition)))
+            _unconditionalExceptionFilters.Clear();
+            foreach (ExceptionFilterRequest filter in filters)
             {
-                bool excludeList = filter.Condition!.TrimStart().StartsWith('!');
-                _exceptionConditions[filter.Filter] = filter.Condition!
-                    .Split([' ', '\t', '\r', '\n', ','], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                    .Select(item => (Exclude: excludeList || item.StartsWith('!'), Name: item.TrimStart('!').Trim()))
-                    .Select(item => (item.Exclude, new Regex("^" + Regex.Escape(item.Name).Replace("\\*", ".*") + "$", RegexOptions.CultureInvariant)))
-                    .ToList();
+                string[] tokens = (filter.Condition ?? "")
+                    .Split([' ', '\t', '\r', '\n', '\f', '\v', ','], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                    .Where(item => item != "!")
+                    .ToArray();
+                if (tokens.Length == 0)
+                {
+                    _unconditionalExceptionFilters.Add(filter.Filter);
+                    continue;
+                }
+                if (!_exceptionConditions.TryGetValue(filter.Filter, out var conditions))
+                    _exceptionConditions.Add(filter.Filter, conditions = []);
+                foreach (string token in tokens)
+                {
+                    bool exclude = token.StartsWith('!');
+                    string name = exclude ? token[1..] : token;
+                    bool prefix = name.EndsWith('*');
+                    conditions.Add((exclude, prefix, prefix ? name[..^1] : name));
+                }
             }
         }
     }
@@ -220,13 +234,18 @@ public sealed partial class DebugEngine
             CorDebugValue? unwrapped = exception == null ? null : ValueInspector.Unwrap(exception, out _);
             if (unwrapped == null)
                 return true;
-            List<string> names = [_values.GetTypeName(unwrapped)];
-            if (condition.Any(c => c.Exclude && names.Any(c.Pattern.IsMatch)))
+            string name = _values.GetTypeName(unwrapped);
+            bool Matches((bool Exclude, bool Prefix, string Name) c) => c.Prefix
+                ? name.StartsWith(c.Name, StringComparison.Ordinal)
+                : name.Equals(c.Name, StringComparison.Ordinal);
+            if (condition.Any(c => c.Exclude && Matches(c)))
                 return false;
-            return condition.All(c => c.Exclude) || condition.Any(c => !c.Exclude && names.Any(c.Pattern.IsMatch));
+            return filter == FilterUnhandled || _unconditionalExceptionFilters.Contains(filter)
+                || condition.Any(c => !c.Exclude && Matches(c));
         }
-        catch (Exception)
+        catch (Exception e)
         {
+            Log?.Invoke("Failed to match the current exception condition: " + e.Message);
             return true;
         }
     }
@@ -323,11 +342,25 @@ public sealed partial class DebugEngine
     private readonly HashSet<int> _frozenThreads = [];
     private int? _executionThread;
 
-    private void SetExecutionThread(CorDebugProcess process, int? threadId, bool singleThread)
+    private bool SetExecutionThread(CorDebugProcess process, int? threadId, bool singleThread)
     {
         _executionThread = singleThread ? threadId ?? throw new DebuggerException("A thread is required for single-thread execution.") : null;
         process.SetAllThreadsDebugState(CorDebugThreadState.THREAD_RUN, null!);
         RestoreFrozenThreads(process);
+        return AllThreadsContinued(process, fallback: !singleThread);
+    }
+
+    private bool AllThreadsContinued(CorDebugProcess process, bool fallback)
+    {
+        try
+        {
+            return process.Threads.All(thread => thread.DebugState != CorDebugThreadState.THREAD_SUSPEND);
+        }
+        catch (Exception e)
+        {
+            Log?.Invoke("Cannot determine resumed thread states: " + e.Message);
+            return fallback;
+        }
     }
 
     /// <summary>A frozen thread stays suspended while the rest of the process runs.</summary>

@@ -21,7 +21,7 @@ class Program
                 Context.ConfigurationDone(@"__FILE__:__LINE__");
                 Context.Launch(@"__FILE__:__LINE__");
                 Context.WasEntryPointHit(@"__FILE__:__LINE__");
-                Context.Continue(@"__FILE__:__LINE__", SingleThread: false, ExpectedAllThreadsContinued: true);
+                Context.Continue(@"__FILE__:__LINE__", SingleThread: false, ExpectedAllThreadsContinued: true, CheckContinuedEvent: true);
             });
 
         GC.KeepAlive(args);                                               Label.Breakpoint("first");
@@ -31,7 +31,7 @@ class Program
             {
                 Context Context = (Context)context;
                 Context.WasBreakpointHit(@"__FILE__:__LINE__", "first");
-                Context.Continue(@"__FILE__:__LINE__", ExpectedAllThreadsContinued: true);
+                Context.Continue(@"__FILE__:__LINE__", ExpectedAllThreadsContinued: true, CheckContinuedEvent: true);
             });
 
         GC.KeepAlive(args);                                               Label.Breakpoint("second");
@@ -41,17 +41,29 @@ class Program
             {
                 Context Context = (Context)context;
                 Context.WasBreakpointHit(@"__FILE__:__LINE__", "second");
-                Context.Continue(@"__FILE__:__LINE__", SingleThread: true, ExpectedAllThreadsContinued: false);
+                Context.Continue(@"__FILE__:__LINE__", SingleThread: true, ExpectedAllThreadsContinued: false, CheckContinuedEvent: true);
             });
 
         GC.KeepAlive(args);                                               Label.Breakpoint("third");
 
-        Label.Checkpoint("resume_all", "finish",
+        Label.Checkpoint("resume_all", "running",
             (Object context) =>
             {
                 Context Context = (Context)context;
                 Context.WasBreakpointHit(@"__FILE__:__LINE__", "third");
-                Context.Continue(@"__FILE__:__LINE__");
+                Context.Continue(@"__FILE__:__LINE__", ExpectedAllThreadsContinued: true, CheckContinuedEvent: true);
+            });
+
+        string? input = Console.ReadLine();
+        Console.WriteLine("released:" + input);
+
+        Label.Checkpoint("running", "finish",
+            (Object context) =>
+            {
+                Context Context = (Context)context;
+                Context.Continue(@"__FILE__:__LINE__", SingleThread: true, ExpectedAllThreadsContinued: true);
+                Context.CheckNoContinued(@"__FILE__:__LINE__");
+                Context.CalcExpressionWithStatusOnlyCheck(@"__FILE__:__LINE__", 0, "go", true);
             });
 
         Label.Checkpoint("finish", "",

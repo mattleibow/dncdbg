@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using ClrDebug;
 using DncDbg.Engine;
+using DncDbg.Engine.Launch;
 
 internal static class SafetyChecks
 {
@@ -15,6 +16,29 @@ internal static class SafetyChecks
             if (!condition)
                 throw new InvalidOperationException("Safety check failed: " + name);
             checks++;
+        }
+
+        if (!OperatingSystem.IsWindows())
+        {
+            DbgShim shim = DebugEngine.LoadDbgShim();
+            var exitCodes = new List<int?>();
+            for (int attempt = 0; attempt < 3; attempt++)
+                foreach (bool noDebug in new[] { true, false })
+                {
+                    LaunchedProcess launched = ProcessLauncher.Launch(shim, "/bin/sh", ["-c", "exit 0"], null, null, noDebug: noDebug);
+                    try
+                    {
+                        launched.Resume();
+                        exitCodes.Add(await launched.ExitCode!.WaitAsync(TimeSpan.FromSeconds(5)));
+                    }
+                    finally
+                    {
+                        launched.StdIn.Dispose();
+                        launched.StdOut.Dispose();
+                        launched.StdErr.Dispose();
+                    }
+                }
+            Check(exitCodes.All(code => code == 0), "managed and native Unix launcher children retain one reaping owner");
         }
 
         var gate = new object();

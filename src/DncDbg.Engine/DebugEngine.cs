@@ -90,6 +90,9 @@ public sealed partial class DebugEngine : IDisposable
     /// The one way there: an evaluation after which the runtime could not be stopped anymore.
     /// </summary>
     public event Action<int>? Continued;
+
+    /// <summary>A successful continue, step, or unsolicited resume, with the observed thread-state result.</summary>
+    public event Action<int, bool>? ExecutionContinued;
     public event Action<string, string>? Output;
     public event Action<int, bool>? ThreadChanged;
     public event Action<ModuleLoadInfo>? ModuleLoaded;
@@ -128,6 +131,7 @@ public sealed partial class DebugEngine : IDisposable
         {
             if (options.NativeDebugging)
                 throw new DebuggerException("Direct native debugging is retired. Start dncdbg-dap with --native-debugger=lldb instead.");
+            ConfigureExceptionDetails(options.Environment);
             NoDebug = options.NoDebug;
             if (_processId != 0 || _launching)
                 throw new DebuggerException("A debuggee is already running.");
@@ -236,12 +240,14 @@ public sealed partial class DebugEngine : IDisposable
     /// <summary>.NET Framework launch: the console is switched to UTF-8 when the process exists, before managed code runs.</summary>
     private bool _switchConsoleOnStart;
 
-    public void Attach(int processId, bool justMyCode = true, IReadOnlyDictionary<string, string>? sourceFileMap = null, bool stopAtEntry = false)
+    public void Attach(int processId, bool justMyCode = true, IReadOnlyDictionary<string, string>? sourceFileMap = null, bool stopAtEntry = false,
+        IReadOnlyDictionary<string, string?>? environment = null)
     {
         using var operation = _lifetime.Enter();
         TaskCompletionSource<Exception?> outcome;
         lock (_lock)
         {
+            ConfigureExceptionDetails(environment);
             if (_processId != 0)
                 throw new DebuggerException("A debuggee is already running.");
             ProcessBitness.VerifyProcess(processId);
@@ -1311,16 +1317,18 @@ public sealed partial class DebugEngine : IDisposable
         process.Continue(false);
     }
 
-    public void Continue(int? threadId = null, bool singleThread = false)
+    public bool Continue(int? threadId = null, bool singleThread = false)
     {
         lock (_lock)
         {
             if (_process == null || !_stopped)
-                return;
-            SetExecutionThread(_process, threadId, singleThread);
+                return true;
+            bool allThreadsContinued = SetExecutionThread(_process, threadId, singleThread);
             ClearAsyncStep();
             ClearStepInTarget();
             ResumeProcess(_process);
+            ExecutionContinued?.Invoke(threadId ?? _lastStoppedThreadId, allThreadsContinued);
+            return allThreadsContinued;
         }
     }
 

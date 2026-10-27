@@ -28,6 +28,7 @@ partial class Context
         ExceptionFilterUserUnhandled = false;
         ExceptionFilterAllOptions = null;
         ExceptionFilterUserUnhandledOptions = null;
+        ExceptionFilterUnhandledOptions = null;
 
         CurrentBpId = 0;
         SrcBreakpoints.Clear();
@@ -136,6 +137,8 @@ partial class Context
         attachRequest.arguments.processId = testProcess.Id;
 
         attachRequest.arguments.stopAtEntry = StopAtEntry;
+        if (env.Count != 0)
+            attachRequest.arguments.env = env;
 
         if (sourceFileMap.Count != 0)
         {
@@ -700,7 +703,8 @@ partial class Context
         Assert.Equal(ControlInfo.SourceFilesPath, stackTraceResponse.body.stackFrames[0].source!.path, @"__FILE__:__LINE__" + "\n" + caller_trace);
     }
 
-    public void Continue(string caller_trace, bool? SingleThread = null, bool? ExpectedAllThreadsContinued = null)
+    public void Continue(string caller_trace, bool? SingleThread = null, bool? ExpectedAllThreadsContinued = null,
+                         bool CheckContinuedEvent = false)
     {
         ContinueRequest continueRequest = new ContinueRequest();
         continueRequest.arguments.threadId = threadId;
@@ -719,7 +723,29 @@ partial class Context
                          @"__FILE__:__LINE__" + "\n" + caller_trace);
             Assert.Equal(ExpectedAllThreadsContinued.Value, allThreadsContinued.ToObject<bool>(),
                          @"__FILE__:__LINE__" + "\n" + caller_trace);
+            if (CheckContinuedEvent)
+                CheckContinued(caller_trace, ExpectedAllThreadsContinued.Value);
         }
+    }
+
+    public void CheckContinued(string caller_trace, bool expected)
+    {
+        Assert.True(DAPDebugger.IsNotStopEventReceived(json =>
+        {
+            if (!DAPDebugger.IsResponseContainProperty(json, "event", "continued"))
+                return false;
+            var body = Newtonsoft.Json.Linq.JObject.Parse(json)["body"]!;
+            Assert.Equal(Newtonsoft.Json.Linq.JTokenType.Boolean, body["allThreadsContinued"]!.Type, caller_trace);
+            Assert.Equal(expected, body["allThreadsContinued"]!.ToObject<bool>(), caller_trace);
+            Assert.Equal(threadId, body["threadId"]!.ToObject<int>(), caller_trace);
+            return true;
+        }, GetNewEvents: true), caller_trace);
+    }
+
+    public void CheckNoContinued(string caller_trace)
+    {
+        Assert.False(DAPDebugger.IsNotStopEventReceived(json =>
+            DAPDebugger.IsResponseContainProperty(json, "event", "continued"), GetNewEvents: true), caller_trace);
     }
 
     public void Pause(string caller_trace)
@@ -1172,11 +1198,11 @@ partial class Context
         ExceptionFilterAll = true;
     }
 
-    public void AddExceptionBreakpointFilterAllWithOptions(string options)
+    public void AddExceptionBreakpointFilterAllWithConditions(string conditions)
     {
         ExceptionFilterAllOptions = new ExceptionFilterOptions();
         ExceptionFilterAllOptions.filterId = "all";
-        ExceptionFilterAllOptions.condition = options;
+        ExceptionFilterAllOptions.condition = conditions;
     }
 
     public void AddExceptionBreakpointFilterUserUnhandled()
@@ -1184,11 +1210,18 @@ partial class Context
         ExceptionFilterUserUnhandled = true;
     }
 
-    public void AddExceptionBreakpointFilterUserUnhandledWithOptions(string options)
+    public void AddExceptionBreakpointFilterUserUnhandledWithConditions(string conditions)
     {
         ExceptionFilterUserUnhandledOptions = new ExceptionFilterOptions();
         ExceptionFilterUserUnhandledOptions.filterId = "user-unhandled";
-        ExceptionFilterUserUnhandledOptions.condition = options;
+        ExceptionFilterUserUnhandledOptions.condition = conditions;
+    }
+
+    public void AddExceptionBreakpointFilterUnhandledWithConditions(string conditions)
+    {
+        ExceptionFilterUnhandledOptions = new ExceptionFilterOptions();
+        ExceptionFilterUnhandledOptions.filterId = "unhandled";
+        ExceptionFilterUnhandledOptions.condition = conditions;
     }
 
     public void ResetExceptionBreakpoints()
@@ -1197,6 +1230,7 @@ partial class Context
         ExceptionFilterUserUnhandled = false;
         ExceptionFilterAllOptions = null;
         ExceptionFilterUserUnhandledOptions = null;
+        ExceptionFilterUnhandledOptions = null;
     }
 
     public void SetExceptionBreakpoints(string caller_trace)
@@ -1207,16 +1241,20 @@ partial class Context
         if (ExceptionFilterUserUnhandled)
             setExceptionBreakpointsRequest.arguments.filters.Add("user-unhandled");
 
-        if (ExceptionFilterAllOptions != null || ExceptionFilterUserUnhandledOptions != null)
+        if (ExceptionFilterAllOptions != null || ExceptionFilterUserUnhandledOptions != null || ExceptionFilterUnhandledOptions != null)
             setExceptionBreakpointsRequest.arguments.filterOptions = new List<ExceptionFilterOptions>();
         if (ExceptionFilterAllOptions != null)
             setExceptionBreakpointsRequest.arguments.filterOptions.Add(ExceptionFilterAllOptions);
         if (ExceptionFilterUserUnhandledOptions != null)
             setExceptionBreakpointsRequest.arguments.filterOptions.Add(ExceptionFilterUserUnhandledOptions);
+        if (ExceptionFilterUnhandledOptions != null)
+            setExceptionBreakpointsRequest.arguments.filterOptions.Add(ExceptionFilterUnhandledOptions);
 
         Assert.True(DAPDebugger.Request(setExceptionBreakpointsRequest).Success,
                     @"__FILE__:__LINE__" + "\n" + caller_trace);
     }
+
+    static readonly JsonSerializerSettings ExceptionInfoJsonSettings = new JsonSerializerSettings { MaxDepth = 512 };
 
     public void TestExceptionInfo(string caller_trace, string excCategory, string excMode, string excName)
     {
@@ -1226,7 +1264,7 @@ partial class Context
         Assert.True(ret.Success, @"__FILE__:__LINE__" + "\n" + caller_trace);
 
         ExceptionInfoResponse exceptionInfoResponse =
-            JsonConvert.DeserializeObject<ExceptionInfoResponse>(ret.ResponseStr)!;
+            JsonConvert.DeserializeObject<ExceptionInfoResponse>(ret.ResponseStr, ExceptionInfoJsonSettings)!;
 
         Assert.Equal(excMode, exceptionInfoResponse.body.breakMode, @"__FILE__:__LINE__" + "\n" + caller_trace);
         Assert.Equal(excCategory + "/" + excName, exceptionInfoResponse.body.exceptionId, @"__FILE__:__LINE__" + "\n" + caller_trace);
@@ -1241,7 +1279,7 @@ partial class Context
         Assert.True(ret.Success, @"__FILE__:__LINE__" + "\n" + caller_trace);
 
         ExceptionInfoResponse exceptionInfoResponse =
-            JsonConvert.DeserializeObject<ExceptionInfoResponse>(ret.ResponseStr)!;
+            JsonConvert.DeserializeObject<ExceptionInfoResponse>(ret.ResponseStr, ExceptionInfoJsonSettings)!;
 
         ExceptionDetails exceptionDetails = exceptionInfoResponse.body.details!.innerException![0]!;
         for (int i = 0; i < innerLevel; ++i)
@@ -1249,6 +1287,22 @@ partial class Context
 
         Assert.Equal(excName, exceptionDetails.fullTypeName, @"__FILE__:__LINE__" + "\n" + caller_trace);
         Assert.Equal(excMessage, exceptionDetails.message, @"__FILE__:__LINE__" + "\n" + caller_trace);
+    }
+
+    public void TestInnerExceptionMessages(string caller_trace, string ExpectedFirst, string ExpectedLast)
+    {
+        ExceptionInfoRequest request = new ExceptionInfoRequest();
+        request.arguments.threadId = threadId;
+        var ret = DAPDebugger.Request(request);
+        Assert.True(ret.Success, caller_trace);
+        var response = JsonConvert.DeserializeObject<ExceptionInfoResponse>(ret.ResponseStr, ExceptionInfoJsonSettings)!;
+        var inner = response.body.details!.innerException!;
+        Assert.True(inner.Count > 0, caller_trace);
+        Assert.Equal(ExpectedFirst, inner[0].message, caller_trace);
+        ExceptionDetails last = inner[0];
+        while (last.innerException is { Count: > 0 })
+            last = last.innerException[0];
+        Assert.Equal(ExpectedLast, last.message, caller_trace);
     }
 
     public void TestStackTrace(string caller_trace, string[] FrameNames, string[] FrameLocations)
@@ -1683,6 +1737,7 @@ partial class Context
     bool ExceptionFilterUserUnhandled = false;
     ExceptionFilterOptions? ExceptionFilterAllOptions = null;
     ExceptionFilterOptions? ExceptionFilterUserUnhandledOptions = null;
+    ExceptionFilterOptions? ExceptionFilterUnhandledOptions = null;
 
     public int CurrentBpId = 0;
     // Note: SrcBreakpoints and SrcBreakpointIds must have the same order of elements, since we use indexes for mapping.

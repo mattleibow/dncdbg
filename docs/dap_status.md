@@ -300,6 +300,12 @@ How to read the blocks below:
 ✅  threadId: number;
 ✅  allThreadsContinued?: boolean;
 ```
+Successful continue and step requests emit this event with the observed resumed
+thread states, not simply the inverse of `singleThread`. If state inspection
+fails, the debugger logs the failure and falls back to the requested execution
+mode. A redundant continue while already running succeeds without another
+continued event.
+
 #### ExitedEvent
 ```text
 ✅  exitCode: number;
@@ -481,6 +487,28 @@ How to read the blocks below:
 ✅  filterOptions?: ExceptionFilterOptions[];
 ❌  exceptionOptions?: ExceptionOptions[];
 ```
+Supported filter IDs in both `filters` and `filterOptions`:
+
+| Filter | When it stops |
+| --- | --- |
+| `all` | When an exception is thrown. |
+| `user-unhandled` | With Just My Code enabled, when an exception that passed through user code is caught by non-user code. |
+| `unhandled` | When no handler handles the exception; all types are covered by default. |
+
+The `all`, `user-unhandled`, and `unhandled` filters accept comma/whitespace-separated
+exception type conditions. Each `!TypeName` excludes only that type; it does not
+enable other types. Matching exclusions override positive or unconditional
+entries across both `filters` and `filterOptions`, regardless of their order.
+A lone `!` token is ignored. Entries without any remaining condition cover all
+types. Unhandled exceptions stop by default even when the filter is omitted or
+has only nonmatching positive conditions; only a matching exclusion on the
+`unhandled` filter suppresses that stop. Exclusions on `all` or `user-unhandled`
+do not suppress the final unhandled stop.
+Trailing `*` matches an exception type-name prefix, including in negated tokens;
+`*` matches every type and `!*` excludes every type. Earlier asterisks are
+literal, not arbitrary-position globs. See [exception conditions](exception_conditions.md)
+for examples and VsDbg mappings.
+
 #### SetExceptionBreakpointsResponse
 ```text
 ✅  breakpoints?: Breakpoint[];
@@ -499,6 +527,11 @@ How to read the blocks below:
 ✅  allThreadsContinued?: boolean;
 🧩  threadId: number;
 ```
+`allThreadsContinued` comes from the engine's actual continuation outcome.
+Threads still suspended make it `false`; an already-running continue reports
+`true` even when its redundant request specifies `singleThread: true`.
+This response does not itself change or prove thread scheduling.
+
 #### NextRequest `next`
 ```text
 ✅  threadId: number;
@@ -873,12 +906,19 @@ How to read the blocks below:
 ✅  logMessage?: string;
 ❌  mode?: string;
 ```
+Hit conditions support `<N`, `<=N`, `==N`, `>N`, `N`/`>=N`, and `%N` for unsigned
+32-bit N (zero is invalid only for `%N`). Invalid strings reject the whole
+request. See [hit count breakpoints](hit_count_breakpoints.md) for parsing and counter
+semantics.
+
 #### FunctionBreakpoint
 ```text
 ✅  name: string;
 ✅  condition?: string;
 ✅  hitCondition?: string;
 ```
+The same [hit count syntax](hit_count_breakpoints.md) applies to function breakpoints.
+
 #### Breakpoint
 ```text
 ✅  id?: number;
@@ -911,6 +951,10 @@ How to read the blocks below:
 ✅  instructionPointerReference?: string;
 ```
 #### ExceptionFilterOptions
+`filterId` accepts the same `all`, `user-unhandled`, and `unhandled` filters
+described in [SetExceptionBreakpointsRequest](#setexceptionbreakpointsrequest-setexceptionbreakpoints).
+See [exception conditions](exception_conditions.md) for exact and prefix matching.
+
 ```text
 ✅  filterId: string;
 ✅  condition?: string;

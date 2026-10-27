@@ -63,7 +63,8 @@ internal sealed class DebugAdapter : IDisposable
             ThreadId = stop.ThreadId,
             HitBreakpointIds = stop.BreakpointIds,
         });
-        engine.Continued += threadId => SendCurrent("continued", new ContinuedEventBody { ThreadId = threadId });
+        engine.ExecutionContinued += (threadId, allThreadsContinued) => SendCurrent("continued",
+            new ContinuedEventBody { ThreadId = threadId, AllThreadsContinued = allThreadsContinued });
         engine.Output += (category, text) => SendCurrent("output", new OutputEventBody { Category = category, Output = text });
         engine.ThreadChanged += (id, started) =>
             SendCurrent("thread", new ThreadEventBody { Reason = started ? "started" : "exited", ThreadId = id });
@@ -356,11 +357,12 @@ internal sealed class DebugAdapter : IDisposable
                     .Select(b => new BreakpointRequest(LineFromClient(b.Line), b.Column is { } c ? ColumnFromClient(c) : null,
                         b.Condition, b.HitCondition, b.LogMessage))
                     .ToArray();
-                _breakpointRequests[path] = requests;
-                return new SetBreakpointsResponseBody
+                var response = new SetBreakpointsResponseBody
                 {
                     Breakpoints = _engine.SetBreakpoints(path, requests).Select(ToBreakpoint).ToArray(),
                 };
+                _breakpointRequests[path] = requests;
+                return response;
             }
 
             case "setFunctionBreakpoints":
@@ -368,11 +370,12 @@ internal sealed class DebugAdapter : IDisposable
                 var args = request.GetArguments<SetFunctionBreakpointsArguments>()!;
                 FunctionBreakpointRequest[] requests = args.Breakpoints
                     .Select(b => new FunctionBreakpointRequest(b.Name, b.Condition, b.HitCondition)).ToArray();
-                _functionBreakpointRequests = requests;
-                return new SetBreakpointsResponseBody
+                var response = new SetBreakpointsResponseBody
                 {
                     Breakpoints = _engine.SetFunctionBreakpoints(requests).Select(ToBreakpoint).ToArray(),
                 };
+                _functionBreakpointRequests = requests;
+                return response;
             }
 
             case "setExceptionBreakpoints":
@@ -598,8 +601,8 @@ internal sealed class DebugAdapter : IDisposable
             case "continue":
             {
                 bool singleThread = SingleThread(request);
-                _engine.Continue(request.GetArguments<ThreadArguments>()!.ThreadId, singleThread);
-                return new ContinueResponseBody { AllThreadsContinued = !singleThread };
+                bool allThreadsContinued = _engine.Continue(request.GetArguments<ThreadArguments>()!.ThreadId, singleThread);
+                return new ContinueResponseBody { AllThreadsContinued = allThreadsContinued };
             }
 
             case "next":
@@ -756,7 +759,7 @@ internal sealed class DebugAdapter : IDisposable
             throw new DebuggerException("Direct native debugging is retired. Start dncdbg-dap with --native-debugger=lldb instead.");
         _engine.AllowImplicitFuncEval = args.ExpressionEvaluationOptions?.AllowImplicitFuncEval ?? args.AllowImplicitFuncEval ?? true;
         _engine.ShowRawValues = args.ExpressionEvaluationOptions?.ShowRawValues ?? false;
-        _engine.Attach(args.GetProcessId(), args.JustMyCode ?? true, args.SourceFileMap, args.StopAtEntry);
+        _engine.Attach(args.GetProcessId(), args.JustMyCode ?? true, args.SourceFileMap, args.StopAtEntry, args.Env);
         _isAttach = true;
         SendProcessEvent(args.GetProcessId().ToString(), "attach");
     }
@@ -790,14 +793,27 @@ internal sealed class DebugAdapter : IDisposable
         });
     }
 
-    private static ExceptionDetails ToExceptionDetails(ExceptionData data) => new()
+    private static ExceptionDetails ToExceptionDetails(ExceptionData data)
     {
-        Message = data.Message,
-        FullTypeName = data.TypeName,
-        TypeName = data.TypeName[(data.TypeName.LastIndexOf('.') + 1)..],
-        StackTrace = data.StackTrace,
-        InnerException = data.Inner == null ? null : [ToExceptionDetails(data.Inner)],
-    };
+        ExceptionDetails? result = null;
+        ExceptionDetails? previous = null;
+        for (ExceptionData? current = data; current != null; current = current.Inner)
+        {
+            var details = new ExceptionDetails
+            {
+                Message = current.Message,
+                FullTypeName = current.TypeName,
+                TypeName = current.TypeName[(current.TypeName.LastIndexOf('.') + 1)..],
+                StackTrace = current.StackTrace,
+            };
+            if (previous != null)
+                previous.InnerException = [details];
+            else
+                result = details;
+            previous = details;
+        }
+        return result!;
+    }
 
     // The two numbers a client decides about paging by; they only make sense together, for values that have elements.
     private static int? Indexed(VariableInfo variable, int handle) => handle != 0 && variable.IndexedChildren > 0 ? variable.IndexedChildren : null;

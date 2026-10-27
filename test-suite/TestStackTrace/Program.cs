@@ -104,15 +104,13 @@ class Program
                 string[] FrameLocations = [ "unhandled_async_trace1",
                                             "unhandled_async_trace2" ];
                 Context.TestStackTrace(@"__FILE__:__LINE__", FrameNames, FrameLocations);
-
-                Context.Continue(@"__FILE__:__LINE__");
             });
 
         Label.Checkpoint("finish", "",
             (Object context) =>
             {
                 Context Context = (Context)context;
-                // At this point debugger stops at unhandled exception, no reason continue process, abort execution.
+                // At this point the debugger stops at the unhandled exception; there is no reason to continue the process, abort execution.
                 Context.AbortExecution(@"__FILE__:__LINE__");
                 Context.WasExit(@"__FILE__:__LINE__", CheckExitCode: null);
                 Context.DebuggerExit(@"__FILE__:__LINE__");

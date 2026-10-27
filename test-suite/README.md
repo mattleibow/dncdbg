@@ -15,7 +15,8 @@ pwsh ./test-suite/run_tests.ps1 TestBreakpoint
 ```
 
 The runner discovers directories named `Test*` that contain a matching
-`Test*.csproj`. Windows-only projects are included automatically on Windows and
+`Test*.csproj`; no registration is required. Projects targeting a Windows-specific
+framework or enabling Windows Forms are included automatically on Windows and
 skipped on other operating systems.
 
 The target framework can be overridden with the `DNCDBG_TARGET_FRAMEWORK` environment variable (for example, `net8.0`); by default, the tests target `net10.0`.
@@ -49,7 +50,10 @@ The smoke runner also exercises startup/unregistration barriers, rejection of
 late startup callbacks, cancellation of a delayed external launcher, a 1 MiB
 stdin write to a non-reading target followed by disconnect, detached-child
 survival beyond disposal timeouts, and pause during function evaluation followed
-by a heartbeat after exactly one continue. They also arm static-initializer and
+by a heartbeat after exactly one continue. On Unix they also alternate real
+managed/noDebug and native launcher helpers to ensure a single reaping owner:
+`System.Diagnostics.Process` reaps its children, while native-created helpers
+use native waiting. They also arm static-initializer and
 user breakpoints, detach, verify internal breakpoint cleanup, dispose the
 debugger, and let the detached target complete its watched initializer.
 Run these safety checks alone with:
@@ -66,20 +70,46 @@ suite. A surviving detached fixture is explicitly cleaned up by the smoke runner
 Run the same tests against either adapter without changing the debuggee or assertions:
 
 ```powershell
-pwsh ./test-suite/run_tests.ps1 TestHitConditionSyntax TestContinueResponse TestUnhandledExceptionCondition
+pwsh ./test-suite/run_tests.ps1 TestHitConditionSyntax TestContinueResponse TestUnhandledExceptionCondition TestExceptionConditionMatching TestUnhandledExceptionFilter
 $env:DNCDBG = "/absolute/path/to/another/debugger"
-pwsh ./test-suite/run_tests.ps1 TestHitConditionSyntax TestContinueResponse TestUnhandledExceptionCondition
+pwsh ./test-suite/run_tests.ps1 TestHitConditionSyntax TestContinueResponse TestUnhandledExceptionCondition TestExceptionConditionMatching TestUnhandledExceptionFilter
 ```
 
 These tests preserve observable native behavior, not assumptions about DAP syntax:
 
 | Test | Exact contract |
 | --- | --- |
-| `TestHitConditionSyntax` | Across seven visits to each source breakpoint, `5` stops on visits 6 and 7. `==5`, `>=5`, and `%5` each stop on visits 1 through 7 and emit exactly one stderr diagnostic identifying the hit condition and saying it will be removed. All four stop sequences and diagnostic counts are collected before comparison. Native evaluates `hitCount > <hitCondition>`; this does not establish support for equality, greater-or-equal, or modulo syntax. |
-| `TestContinueResponse` | The continue response body contains a Boolean `allThreadsContinued`: `true` for explicit `singleThread:false` and for an omitted `singleThread`, and `false` for `singleThread:true`. This tests the response, not multi-thread scheduling. All threads are resumed before process shutdown. |
-| `TestUnhandledExceptionCondition` | With `!System.InvalidOperationException` on both native-supported exception filters (`all` and `user-unhandled`), a caught exception does not stop execution. An uncaught exception of the same type still stops at the throw line, with `exceptionInfo.breakMode == "unhandled"`, `exceptionId == "CLR/System.InvalidOperationException"`, and the matching full type name. Native does not expose a separately configurable `unhandled` filter. |
+| `TestHitConditionSyntax` | Across seven visits, `5` and `>=5` stop on visits 5, 6 and 7; `==5` and `%5` stop only on 5, with no removal diagnostics. All sequences are collected before comparison. Forty-four valid source/function requests and 56 invalid ones prove unsigned bounds, zero/modulo-zero, ASCII-space-only normalization, exact error messages, and rejection of expressions, signs, overflow, tabs/newlines, suffixes and NUL characters. |
+| `TestBreakpointHitCondition` | Exact upstream source/function fixture covers all seven forms (`N`, `<N`, `<=N`, `==N`, `>N`, `>=N`, `%N`) and every expected source/frame stop over seven visits. Repeat all sequences after exit and restart to prove counter reset, then verify the final process exit. |
+| `TestHitConditionLifecycle` | IDs and counts survive unchanged/equivalent/changed thresholds for source and function breakpoints; false expression conditions do not count; logpoint output is gated after counting. Invalid replacement requests preserve existing breakpoints; removal/re-addition resets the count. Repeat the complete sequence after post-exit replacement and restart. Exact stop sequences and expected output are required. |
+| `TestContinueResponse` | Continue responses and matching continued events contain a Boolean `allThreadsContinued`, with the requested thread ID. All-thread resumes report `true`, and the tested single-thread resume with suspended peers reports `false`. A redundant `singleThread:true` continue while the target waits on stdin reports the actual `true` result and emits no extra continued event; stdin releases the target without a timing sleep. This tests observable reporting, not a general scheduling guarantee. |
+| `TestSingleThreadExec` | Preserve all existing single-thread scheduling, source and stepping assertions; additionally require `allThreadsContinued:false` in each next/stepIn/stepOut event and the single-thread continue, then `true` after restoring all-thread execution. |
+| `TestUnhandledExceptionCondition` | With `!System.InvalidOperationException` on `all` and `user-unhandled`, a caught exception does not stop execution. An uncaught exception of the same type still stops at the throw line, with `exceptionInfo.breakMode == "unhandled"`, `exceptionId == "CLR/System.InvalidOperationException"`, and the matching full type name. These two filters do not suppress the final unhandled stop. |
+| `TestExceptionConditionMatching` | Thirty-seven cases cover per-token negation, negative-only conditions, positive/negative order, exclusion priority, ignored lone `!`, empty conditions, additive unconditional entries, duplicate filter options, comma/ASCII-whitespace separators, and wildcard prefixes. Wildcard cases include `*`, `!*`, positive/negative prefix conflicts across entries, ordinal case sensitivity, duplicate prefixes, zero-length suffixes, and literal internal/repeated asterisks and `?`. Every stop and its exact exception details/source line is collected before comparing the complete matrix. |
+| `TestExceptionWildcardCondition` | The unchanged upstream fixture checks `*`, `System.*`, `!System.Null*, *`, broader negated prefixes overriding specific positive prefixes, and `!*` overriding a positive prefix. Exact exception source/type/break-mode assertions and both source-breakpoint checkpoints are preserved. |
+| `TestUnhandledExceptionFilter` | Eighteen sessions cover the default unhandled stop, nonmatching positive conditions, matching/nonmatching exact and prefix exclusions, conflicting conditions in both orders, unconditional entries, lone `!`, and `!*`. Upstream scenarios include an exact nonmatching `!System.Exception` (no base-type matching) and a thrown stop followed by a suppressed final stop. Observed unhandled stops are continued through actual process exit rather than terminated by the test. Suppressed final stops require a nonzero exit code and both exited/terminated events. |
+| `TestInnerExceptionLimit` | Preserve the upstream 65-node fixture's default first/last inner messages (`level 62`/`level 31`) and assert every node's type/message plus the exact 32-inner cutoff. Twenty additional launch/attach sessions prove zero, small and unsigned-maximum limits, invalid/overflow fallback, native numeric-prefix parsing, request overrides and reset to the default. These include the upstream 50-inner cutoff (`level 62`/`level 13`) and limit 100 exposing the complete finite chain (`level 62`/`innermost`). Fully populated terminal nodes are required without empty placeholders. |
 
 These are bounded scenarios, not full coverage of hit conditions or exception handling.
+The continue-response/event and single-thread stepping-event assertions are
+proven against the exact upstream `dc120e19` native reference, including the
+already-running request whose result differs from the requested mode.
+The hit-count fixtures and updated upstream breakpoint/logpoint fixtures are
+proven against the exact upstream `2feb374c` native reference. They intentionally
+replace the old evaluator-based hit-condition contract with parsed counts;
+retired expression scenarios are covered by request-time rejection assertions,
+not weakened or accepted as expressions. Other existing acceptance assertions
+remain unchanged. The historical native
+checkpoint predates per-type negation, wildcard prefixes, and the configurable
+`unhandled` filter. See [exception conditions](../docs/exception_conditions.md)
+for the supported syntax.
+Exception-filter helpers use the upstream `WithConditions` naming; DAP
+`filterOptions` remains the protocol field name.
+`TestFormatSpecifiersAc` also verifies that a loaded type without a static
+constructor can expose its default static field with implicit evaluation
+disabled, alongside its existing initialized/uninitialized constructor checks.
+This does not establish initialization observation for symbol-free/ReadyToRun
+types or constructors that completed before attach.
 
 # How to add a new test
 

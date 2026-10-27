@@ -70,7 +70,7 @@ pwsh ./test-suite/run_tests.ps1
 
 The runner discovers `Test*/Test*.csproj` projects automatically and includes
 Windows-only projects when running on Windows. The macOS arm64 acceptance matrix
-contains 71 tests. Validation on one platform is not proof of parity on Windows,
+contains 81 tests. Validation on one platform is not proof of parity on Windows,
 Linux, or every DAP field. Tests default to `net10.0`; the existing
 `DNCDBG_TARGET_FRAMEWORK` override is preserved.
 See [local testing](test-suite/README.md) for focused cases and lifecycle regressions.
@@ -120,14 +120,24 @@ events are fenced to their originating engine generation. Detach also removes
 user and internal breakpoints, including static-initializer watches, before
 releasing the process.
 
-- [DAP compatibility contract](docs/dap_status.md)
-- [VS Code on Windows](docs/usage_vscode_windows.md)
-- [VS Code on Linux and macOS](docs/usage_vscode_unix.md)
-- [Configuration environment variables](docs/config_env.md)
-- [Pseudo-variables](docs/pseudo_variables.md)
-- [Inputting text into the target](docs/inputting_text.md)
-- [Evaluation format specifiers](docs/evaluation_format_specifiers.md)
-- [Persistent debug server](docs/debug_server.md)
+### Getting started
+
+- [VS Code on Windows](docs/usage_vscode_windows.md) - configure local debugging on Windows.
+- [VS Code on Linux and macOS](docs/usage_vscode_unix.md) - configure local debugging on Unix-like systems.
+- [DAP compatibility contract](docs/dap_status.md) - supported protocol messages and fields.
+
+### Debugger configuration
+
+- [Configuration environment variables](docs/config_env.md) - configure the debugger process or a session.
+- [Persistent debug server](docs/debug_server.md) - run sequential sessions on one connection.
+
+### Debugging features
+
+- [Pseudo-variables](docs/pseudo_variables.md) - inspect the current exception, process and thread IDs.
+- [Evaluation format specifiers](docs/evaluation_format_specifiers.md) - control expression display and evaluation.
+- [Exception conditions](docs/exception_conditions.md) - select exception types and prefixes.
+- [Hit count breakpoints](docs/hit_count_breakpoints.md) - stop or log after selected counts.
+- [Inputting text into the target](docs/inputting_text.md) - send standard input to a launched target.
 
 ## History and contributing
 

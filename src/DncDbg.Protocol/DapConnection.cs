@@ -32,6 +32,8 @@ public sealed class DapConnection : IDisposable
 
     /// <summary>Frames larger than this are not believed: the header is ignored as malformed.</summary>
     private const int MaxContentLength = 64 * 1024 * 1024;
+    // Exception chains are debugger-generated; the incoming message depth limit remains unchanged.
+    private static readonly JsonSerializerOptions OutgoingJsonOptions = new(DapJson.Options) { MaxDepth = int.MaxValue };
 
     /// <summary>
     /// Reads the next message, or returns null when the peer closed the stream. Frames that make no sense (a header
@@ -212,7 +214,7 @@ public sealed class DapConnection : IDisposable
                     _pendingRequests.Add(msg.Seq, completion);
             try
             {
-                byte[] payload = JsonSerializer.SerializeToUtf8Bytes(msg, DapJson.Options);
+                byte[] payload = JsonSerializer.SerializeToUtf8Bytes(msg, OutgoingJsonOptions);
                 byte[] header = Encoding.ASCII.GetBytes($"Content-Length: {payload.Length}\r\n\r\n");
                 Trace?.Invoke("-> " + Encoding.UTF8.GetString(payload));
                 linked.Token.ThrowIfCancellationRequested();

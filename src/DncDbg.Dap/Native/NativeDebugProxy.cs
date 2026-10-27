@@ -308,6 +308,8 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         try { response = native.Request(backendCommand, arguments, OperationToken()); }
         catch
         {
+            if (command == "stepOut")
+                CancelTransitionStep(native);
             if (executionControl && work.Stop == StopEpoch())
                 Invalidate(execution: true, stopped: false, cancelOperation: false);
             throw;
@@ -331,7 +333,11 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
             response.Body = body;
         }
         else
+        {
+            if (command == "stepOut")
+                CancelTransitionStep(native);
             RestoreControlState(work);
+        }
         if (response.Success == true && stopOwned)
             PublishInspection(work, response, mappedInspection);
         else
@@ -545,6 +551,9 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
 
     private void RefreshManagedBreakpoints()
     {
+        lock (_managedBreakpointLock)
+            if (_managedBreakpoints.Count == 0)
+                return;
         NativeAdapterSession? native;
         bool canBind;
         lock (_state)
@@ -776,6 +785,18 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
 
         NativeAdapterSession? native = _native;
         if (native != null)
+            DeleteManagedBackendBreakpoint(native, plan.BackendBreakpointId, strict: false);
+    }
+
+    private void CancelTransitionStep(NativeAdapterSession native)
+    {
+        TransitionStepPlan? plan;
+        lock (_state)
+        {
+            plan = _transitionStep;
+            _transitionStep = null;
+        }
+        if (plan != null)
             DeleteManagedBackendBreakpoint(native, plan.BackendBreakpointId, strict: false);
     }
 

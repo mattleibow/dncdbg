@@ -254,8 +254,13 @@ public sealed partial class DebugEngine : IEvalHost
             // The client believes the debuggee is stopped. It is not if stopping it again failed (Synchronize threw).
             if (!_stopped && !_processExited && _process != null)
             {
+                bool allThreadsContinued = AllThreadsContinued(_process, fallback: _executionThread == null && _frozenThreads.Count == 0);
                 ClearStopState();
-                Task.Run(() => Continued?.Invoke(threadId));
+                Task.Run(() =>
+                {
+                    Continued?.Invoke(threadId);
+                    ExecutionContinued?.Invoke(threadId, allThreadsContinued);
+                });
             }
         }
     }

@@ -113,6 +113,12 @@ How to read the blocks below:
 ✅  threadId: number;
 ✅  allThreadsContinued?: boolean;
 ```
+Successful continue and step requests emit this event with the observed resumed
+thread states, not simply the inverse of `singleThread`. If state inspection
+fails, the debugger logs the failure and falls back to the requested execution
+mode. A redundant continue while already running succeeds without another
+continued event.
+
 #### ExitedEvent
 ```text
 ✅  exitCode: number;
@@ -334,6 +340,11 @@ for examples and VsDbg mappings.
 ✅  allThreadsContinued?: boolean;
 🧩  threadId: number;
 ```
+`allThreadsContinued` comes from the engine's actual continuation outcome.
+Threads still suspended make it `false`; an already-running continue reports
+`true` even when its redundant request specifies `singleThread: true`.
+This response does not itself change or prove thread scheduling.
+
 #### NextRequest `next`
 ```text
 ✅  threadId: number;

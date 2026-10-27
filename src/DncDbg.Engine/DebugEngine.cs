@@ -90,6 +90,9 @@ public sealed partial class DebugEngine : IDisposable
     /// The one way there: an evaluation after which the runtime could not be stopped anymore.
     /// </summary>
     public event Action<int>? Continued;
+
+    /// <summary>A successful continue, step, or unsolicited resume, with the observed thread-state result.</summary>
+    public event Action<int, bool>? ExecutionContinued;
     public event Action<string, string>? Output;
     public event Action<int, bool>? ThreadChanged;
     public event Action<ModuleLoadInfo>? ModuleLoaded;
@@ -1312,16 +1315,18 @@ public sealed partial class DebugEngine : IDisposable
         process.Continue(false);
     }
 
-    public void Continue(int? threadId = null, bool singleThread = false)
+    public bool Continue(int? threadId = null, bool singleThread = false)
     {
         lock (_lock)
         {
             if (_process == null || !_stopped)
-                return;
-            SetExecutionThread(_process, threadId, singleThread);
+                return true;
+            bool allThreadsContinued = SetExecutionThread(_process, threadId, singleThread);
             ClearAsyncStep();
             ClearStepInTarget();
             ResumeProcess(_process);
+            ExecutionContinued?.Invoke(threadId ?? _lastStoppedThreadId, allThreadsContinued);
+            return allThreadsContinued;
         }
     }
 

@@ -63,7 +63,8 @@ internal sealed class DebugAdapter : IDisposable
             ThreadId = stop.ThreadId,
             HitBreakpointIds = stop.BreakpointIds,
         });
-        engine.Continued += threadId => SendCurrent("continued", new ContinuedEventBody { ThreadId = threadId });
+        engine.ExecutionContinued += (threadId, allThreadsContinued) => SendCurrent("continued",
+            new ContinuedEventBody { ThreadId = threadId, AllThreadsContinued = allThreadsContinued });
         engine.Output += (category, text) => SendCurrent("output", new OutputEventBody { Category = category, Output = text });
         engine.ThreadChanged += (id, started) =>
             SendCurrent("thread", new ThreadEventBody { Reason = started ? "started" : "exited", ThreadId = id });
@@ -597,8 +598,8 @@ internal sealed class DebugAdapter : IDisposable
             case "continue":
             {
                 bool singleThread = SingleThread(request);
-                _engine.Continue(request.GetArguments<ThreadArguments>()!.ThreadId, singleThread);
-                return new ContinueResponseBody { AllThreadsContinued = !singleThread };
+                bool allThreadsContinued = _engine.Continue(request.GetArguments<ThreadArguments>()!.ThreadId, singleThread);
+                return new ContinueResponseBody { AllThreadsContinued = allThreadsContinued };
             }
 
             case "next":

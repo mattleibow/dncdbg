@@ -703,7 +703,8 @@ partial class Context
         Assert.Equal(ControlInfo.SourceFilesPath, stackTraceResponse.body.stackFrames[0].source!.path, @"__FILE__:__LINE__" + "\n" + caller_trace);
     }
 
-    public void Continue(string caller_trace, bool? SingleThread = null, bool? ExpectedAllThreadsContinued = null)
+    public void Continue(string caller_trace, bool? SingleThread = null, bool? ExpectedAllThreadsContinued = null,
+                         bool CheckContinuedEvent = false)
     {
         ContinueRequest continueRequest = new ContinueRequest();
         continueRequest.arguments.threadId = threadId;
@@ -722,7 +723,29 @@ partial class Context
                          @"__FILE__:__LINE__" + "\n" + caller_trace);
             Assert.Equal(ExpectedAllThreadsContinued.Value, allThreadsContinued.ToObject<bool>(),
                          @"__FILE__:__LINE__" + "\n" + caller_trace);
+            if (CheckContinuedEvent)
+                CheckContinued(caller_trace, ExpectedAllThreadsContinued.Value);
         }
+    }
+
+    public void CheckContinued(string caller_trace, bool expected)
+    {
+        Assert.True(DAPDebugger.IsNotStopEventReceived(json =>
+        {
+            if (!DAPDebugger.IsResponseContainProperty(json, "event", "continued"))
+                return false;
+            var body = Newtonsoft.Json.Linq.JObject.Parse(json)["body"]!;
+            Assert.Equal(Newtonsoft.Json.Linq.JTokenType.Boolean, body["allThreadsContinued"]!.Type, caller_trace);
+            Assert.Equal(expected, body["allThreadsContinued"]!.ToObject<bool>(), caller_trace);
+            Assert.Equal(threadId, body["threadId"]!.ToObject<int>(), caller_trace);
+            return true;
+        }, GetNewEvents: true), caller_trace);
+    }
+
+    public void CheckNoContinued(string caller_trace)
+    {
+        Assert.False(DAPDebugger.IsNotStopEventReceived(json =>
+            DAPDebugger.IsResponseContainProperty(json, "event", "continued"), GetNewEvents: true), caller_trace);
     }
 
     public void Pause(string caller_trace)

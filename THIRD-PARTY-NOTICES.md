@@ -40,8 +40,9 @@ history, including [checkpoint f19fe33a](https://github.com/mattleibow/dncdbg/tr
 ## Experimental mobile test dependencies and research
 
 The separate `tests/DncDbg.MauiTestApp` fixture is generated from Microsoft's
-MIT-licensed MAUI template. It uses `Microsoft.Maui.Controls` (workload version
-10.0.20), `Microsoft.Extensions.Logging.Debug` 10.0.0, and, **in Debug only**,
+MIT-licensed MAUI template, retargeted to .NET 11. It uses
+`Microsoft.Maui.Controls` (workload version 11.0.0-rc.1.26451.6),
+`Microsoft.Extensions.Logging.Debug` 10.0.0, and, **in Debug only**,
 `Microsoft.Maui.DevFlow.Agent` 0.1.0-preview.12.26421.1 and its transitive DevFlow
 packages. These Microsoft/.NET Foundation packages are MIT-licensed; see
 [`Microsoft.MIT.LICENSE`](src/licenses/Microsoft.MIT.LICENSE) and the packages'

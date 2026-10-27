@@ -34,7 +34,113 @@ uses its real, public `ICorDebug` implementation against a separate process.
 The host-side client currently transports a narrow managed-debugging command
 surface; it cannot be substituted for an `ICorDebug` object in the engine.
 
-## Public-API and runtime blockers
+## Current .NET 11 runtime evidence
+
+The fixture now targets **`net11.0-android;net11.0-ios`**. Its own `global.json`
+selects an already installed SDK; the repository root and debugger remain on
+SDK **10.0.401**. No shared workloads, global Xcode selection or SDK installation
+were modified. The tested toolchain is **RC1**, not a claim about a newer RC/GA:
+
+| Component | Validated version |
+| --- | --- |
+| Fixture SDK | `11.0.100-rc.1.26425.128` |
+| Installed workload set | `11.0.100-rc.1.26460.1` |
+| MAUI SDK/packages | `11.0.0-rc.1.26451.6` |
+| iOS SDK/ref/platform runtime packs | `26.5.12194-net11-rc.1` (`net11.0_26.5`) |
+| Android SDK/ref/platform runtime packs | `37.0.0-rc.1.2257` |
+| CoreCLR runtime packs on both targets | `11.0.0-rc.1.26425.128` |
+| Scoped iOS build Xcode | Installed Xcode 26.6; selected Xcode 27 remains unchanged |
+| DevFlow Agent/CLI | `0.1.0-preview.12.26421.1` |
+
+### Defaults measured without runtime overrides
+
+| Target | Public `UseMonoRuntime` value | Effective SDK runtime | Running app |
+| --- | --- | --- | --- |
+| iOS simulator arm64 | `false` | CoreCLR | `.NET 11.0.0-rc.1.26425.128 (CoreClr)` |
+| Android arm64 emulator | Empty/unset | CoreCLR (`_AndroidRuntime` and `_AndroidRuntimePackRuntime`) | `.NET 11.0.0-rc.1.26425.128 (CoreClr)` |
+
+**CoreCLR is the measured default on both tested targets.** An unset Android
+property is not evidence for Mono. The Android SDK chooses MonoVM when the
+public `UseMonoRuntime=true` switch is supplied, otherwise CoreCLR. Explicit
+`false` also selects CoreCLR. On iOS, explicit `true` changes the evaluated
+configuration to Mono and `false` selects CoreCLR. Override matrix entries were
+evaluated; the device executions reported here use **no runtime override**.
+The `_Android*` properties are recorded as SDK diagnostic evidence, not used as
+runtime APIs or application configuration inputs.
+
+The resolved CoreCLR packs are
+`Microsoft.NETCore.App.Runtime.iossimulator-arm64` and
+`Microsoft.NETCore.App.Runtime.android-arm64`, both at
+`11.0.0-rc.1.26425.128`. They are accompanied by:
+
+- `Microsoft.iOS.Runtime.ios.net11.0_26.5` and
+  `Microsoft.iOS.Runtime.iossimulator-arm64.net11.0_26.5`,
+  both `26.5.12194-net11-rc.1`.
+- `Microsoft.Android.Runtime.37.android` and
+  `Microsoft.Android.Runtime.CoreCLR.37.android-arm64`,
+  both `37.0.0-rc.1.2257`.
+
+The Android fixture minimum is now **API 24**, required by the .NET 11 Android
+pack (`XA4216` rejects the template's previous API 21 minimum). The iOS app has
+a `MauiUISceneDelegate` and scene manifest, verified in the built bundle, for
+its iOS 27 simulator run. Broker registration can precede DevFlow HTTP-listener
+readiness; the runner now gates on actual reachable `agent status`, not an
+arbitrary launch delay.
+
+### What changed, and what remains blocked
+
+The old iOS **`NETSDK1082` runtime-pack blocker is resolved for this .NET 11
+tuple**. Both apps build, run their UI scenario/reset assertions and screenshots,
+and authenticate real remote capability probes reporting CoreCLR 11. iOS
+DevFlow broker wait succeeds. Android preview.12 broker wait still times out;
+explicit forwarded fallback port 9223 works and is recorded separately.
+
+CoreCLR/DBI availability does **not** by itself establish the missing native
+debugger startup implementation. Both bundles contain CoreCLR, DBI and DAC;
+neither contains `dbgshim`. A fresh audit of the published
+`Microsoft.Diagnostics.DbgShim` package **10.0.750501** found only Linux, macOS
+and Windows RID dependencies, not Android/iOS. The local debugger's existing
+dependency remains `10.0.745401`; it was not silently upgraded.
+
+Additional, real public-API probes used the existing `DebugEngine.Attach`
+and its public dbgshim runtime-startup registration against an **owned
+CoreCLR 11 iOS simulator app**. An early-startup probe, repeated with the
+latest published macOS-arm64 dbgshim asset `10.0.750501` in an isolated helper,
+failed with:
+
+```text
+Cannot attach to process <pid>: The .NET runtime could not be debugged:
+the runtime reported the error CORDBG_E_DEBUG_COMPONENT_MISSING.
+```
+
+The repeatable runner's attach after UI validation, with the debugger's existing
+`10.0.745401` dependency, instead timed out with `the runtime did not answer`;
+the default diagnostic IPC endpoint was also unreachable. Both attempts failed.
+The supplementary helper did not change the debugger's dependency manifest.
+
+These are bounded host-side attach probes, not an in-process device startup
+provider or a mobile breakpoint test. They do not establish a universal
+impossibility or identify the exact missing native component. They do establish
+that changing the fixture's TFM/default runtime has **not produced a working
+public startup path in the tested configuration**. There is still no validated
+native execution/transport owner; the managed capability agent continues to
+reject execution with `RuntimeUnavailable`. No private DBI startup exports or
+runtime layout assumptions were introduced.
+
+Current evidence is under ignored `build/validation/mobile/net11-default/`,
+including `*-properties.json`, `*-runtime-matrix.json`, `*-resolved-packs.json`,
+`*-native-assets.json`, screenshots, UI batches, real capability logs,
+`ios-public-attach-probe.log`, `ios-public-attach-latest-shim-probe.log`, and
+`dbgshim-package-audit.json`.
+The validation runner deliberately returns 2 while the mobile breakpoint gate
+is blocked. The portable .NET 10 Release build, 46 remote/desktop checks and
+96 existing local smoke checks were rerun successfully after the retarget.
+The .NET 11 iOS Debug/Release and Android Debug builds succeeded with zero
+warnings/errors. Release reference evaluation excludes both DevFlow and Remote
+even when the experimental property is supplied.
+Earlier .NET 10 evidence remains below for history only.
+
+## Historical .NET 10 baseline (superseded for the current fixture)
 
 Observed with SDK **10.0.401**, MAUI workload/packages **10.0.20**, runtime
 **10.0.12**, and DevFlow **0.1.0-preview.12.26421.1**:
@@ -152,7 +258,7 @@ See [`tests/DncDbg.MauiTestApp/README.md`](../tests/DncDbg.MauiTestApp/README.md
 Evidence belongs in ignored `build/validation/mobile`, not in source control.
 Never check in private endpoint descriptors/tokens.
 
-### Local execution record, 2026-10-28
+### Historical .NET 10 execution record, 2026-10-28
 
 | Check | Result |
 | --- | --- |

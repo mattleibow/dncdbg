@@ -75,7 +75,9 @@ See [VS Code integration testing](tests/DncDbg.VsCodeTests/README.md).
 
 The isolated [`DncDbg.Remote` experiment](docs/experimental-mobile-debugging.md)
 adds a versioned transport precursor and a separately built
-[MAUI fixture](tests/DncDbg.MauiTestApp/README.md). Desktop breakpoint transport
+[MAUI fixture](tests/DncDbg.MauiTestApp/README.md). The fixture uses a local
+.NET 11 SDK pin; the debugger remains on .NET 10. CoreCLR is the measured default
+on its tested .NET 11 simulator/emulator targets. Desktop breakpoint transport
 proof is not mobile-debugger proof: public startup/runtime blockers remain, and
 mobile execution control is deliberately unavailable. The normal DAP debugger
 does not enable or depend on the experiment.

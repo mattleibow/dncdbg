@@ -9,6 +9,25 @@ using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(60));
 CancellationToken token = deadline.Token;
 int passed = 0;
 
+if (args is ["--attach-probe", var processId])
+{
+    using var engine = new DncDbg.Engine.DebugEngine { Log = text => Console.Error.WriteLine(text) };
+    try
+    {
+        engine.Attach(int.Parse(processId, System.Globalization.CultureInfo.InvariantCulture));
+        engine.ConfigurationDone();
+        Console.WriteLine(JsonSerializer.Serialize(new { PublicAttachSucceeded = true, ProcessId = engine.ProcessId, Modules = engine.GetModules().Count }));
+        return;
+    }
+    catch (Exception error)
+    {
+        Console.WriteLine(JsonSerializer.Serialize(new { PublicAttachSucceeded = false, Error = error.GetType().Name, error.Message }));
+        Environment.ExitCode = 2;
+        return;
+    }
+    finally { engine.Detach(); }
+}
+
 if (args is ["--mobile", var descriptor])
 {
     RemoteEndpoint endpoint = JsonSerializer.Deserialize(File.ReadAllText(descriptor), RemoteJson.Default.RemoteEndpoint)!;
@@ -31,7 +50,7 @@ await TestCorrelationAsync();
 if (args is ["--desktop", var fixture, var source, var results])
     await TestDesktopAsync(Path.GetFullPath(fixture), Path.GetFullPath(source), Path.GetFullPath(results));
 else if (args.Length != 0)
-    throw new ArgumentException("Use no arguments, --mobile descriptor.json, or --desktop fixture.dll source.cs result-directory.");
+    throw new ArgumentException("Use no arguments, --mobile descriptor.json, --attach-probe pid, or --desktop fixture.dll source.cs result-directory.");
 Console.WriteLine($"Passed {passed} experimental remote checks.");
 
 void Check(bool condition, string name)

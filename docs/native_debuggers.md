@@ -514,6 +514,43 @@ managed callback with `42`, returns `84` to C++, and returns the final result
 `126` to managed code. This is the baseline for future cross-transition
 StepIn/StepOut work and builds through the same public CMake toolchain.
 
+### MAUI callback sample
+
+`tests/DncDbg.MixedModeTests/MauiSample` is one MAUI project with both
+`net10.0-maccatalyst` and experimental `net10.0-macos` AppKit targets. Shared
+UI and managed callback code are compiled once; the entry point and hosting
+registration are selected by `MACCATALYST`/`MACOS`. AppKit uses
+`UseMauiAppMacOS<App>()` and `AddMacOSEssentials()`, while Mac Catalyst uses the
+standard `UseMauiApp<App>()`. Debug builds register the public
+`Microsoft.Maui.DevFlow.Agent`.
+
+The project builds the same C/C++ fixture source for each Apple target:
+
+```sh
+python3 tests/DncDbg.MixedModeTests/maui_sample.py
+```
+
+The Mac Catalyst build uses an `ios-macabi` target triple and packages the
+resulting dylib as a `NativeReference`; the AppKit build uses a macOS target
+triple. Both bundles contain `libmixedfixture.dylib`.
+
+The runtime proof is AutomationId-based:
+
+```sh
+# AppKit: build, then launch the generated .app.
+open -n "tests/DncDbg.MixedModeTests/MauiSample/bin/Debug/net10.0-macos/osx-arm64/DNCDbg Mixed Mode.app"
+
+# Mac Catalyst: build, then launch the generated .app.
+open -n "tests/DncDbg.MixedModeTests/MauiSample/bin/Debug/net10.0-maccatalyst/maccatalyst-arm64/DNCDbg Mixed Mode.app"
+
+maui devflow ui tap --automationId RunMixedMode
+maui devflow ui assert --automationId MixedModeStatus Text "126"
+```
+
+The AppKit backend is experimental and does not imply Mac Catalyst parity.
+This sample currently validates a shared page, button interaction, DevFlow
+connectivity, and the full native callback chain on both backends.
+
 `LldbProof` is the independent raw public-API baseline. Before proxy
 implementation, the CLI test failed with `Unknown option --native-debugger=lldb`
 and the retirement test failed because the old Windows flag was still accepted.

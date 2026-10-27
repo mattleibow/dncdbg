@@ -25,6 +25,28 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  maui-sample:
+    name: MAUI Catalyst and AppKit sample
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - name: Install public MAUI workloads
+        run: dotnet workload install maui macos --skip-manifest-update
+      - name: Build the single-project MAUI callback sample
+        run: python3 tests/DncDbg.MixedModeTests/maui_sample.py
+      - name: Preserve MAUI build outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mixed-mode-maui-sample
+          path: |
+            build/validation/mixed-mode/maui-native/
+            tests/DncDbg.MixedModeTests/MauiSample/bin/
+
   native-backend:
     name: Native backend (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

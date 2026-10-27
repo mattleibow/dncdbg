@@ -57,6 +57,12 @@ jobs:
       - name: Publish adapter
         run: dotnet publish src/DncDbg.Dap --configuration Release --no-build --output bin --nologo
 
+      - name: Check experimental remote transport and desktop breakpoint proof
+        shell: pwsh
+        run: |
+          dotnet run --project tests/DncDbg.RemoteTests --configuration Release --no-build -- --desktop tests/RemoteBreakpointApp/bin/Release/net10.0/RemoteBreakpointApp.dll tests/RemoteBreakpointApp/Program.cs build/validation/remote
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Run smoke and acceptance tests
         shell: pwsh
         run: |

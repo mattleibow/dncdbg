@@ -3,8 +3,11 @@
     <Project Path="src/DncDbg.Dap/DncDbg.Dap.csproj" />
     <Project Path="src/DncDbg.Engine/DncDbg.Engine.csproj" />
     <Project Path="src/DncDbg.Protocol/DncDbg.Protocol.csproj" />
+    <Project Path="src/DncDbg.Remote/DncDbg.Remote.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/DncDbg.RemoteTests/DncDbg.RemoteTests.csproj" />
     <Project Path="tests/DncDbg.SmokeTests/DncDbg.SmokeTests.csproj" />
+    <Project Path="tests/RemoteBreakpointApp/RemoteBreakpointApp.csproj" />
   </Folder>
 </Solution>

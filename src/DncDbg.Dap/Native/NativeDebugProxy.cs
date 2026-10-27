@@ -35,6 +35,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         public Dictionary<int, ulong> BackendIds { get; } = [];
         public bool Verified => BackendIds.Count > 0;
     }
+    private sealed record TransitionStepPlan(int BackendBreakpointId, int ThreadId);
     private readonly BlockingCollection<Work> _requests = [];
     private readonly BlockingCollection<BackendMessage> _events = [];
     private readonly List<Task> _starts = [];
@@ -67,6 +68,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
     private Exception? _backendFailure;
     private int? _targetPid;
     private (long Frame, long Stop)? _selectedNativeFrame;
+    private TransitionStepPlan? _transitionStep;
     private Thread? _worker, _eventWorker;
     private volatile bool _stopping, _disconnecting;
     private bool _disposed;
@@ -291,6 +293,8 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         }
 
         string backendCommand = command == "dotnet/nativeStackTrace" ? "stackTrace" : command;
+        if (command == "stepOut" && _managed && TryPlanManagedStepOut(native, arguments))
+            backendCommand = "continue";
         bool stopOwned = backendCommand is "stackTrace" or "scopes" or "variables" or "readMemory"
             || frame != null || variable != null || nativeFrameContext != null;
         if (command == "configurationDone")
@@ -359,6 +363,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         _ownsTarget = true;
         _targetPid = null;
         _selectedNativeFrame = null;
+        _transitionStep = null;
         lock (_managedBreakpointLock)
         {
             _managedBreakpoints.Clear();
@@ -683,6 +688,97 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         };
     }
 
+    private bool TryPlanManagedStepOut(NativeAdapterSession native, JsonObject arguments)
+    {
+        int threadId = Integer(arguments, "threadId");
+        JsonElement stack = LldbSnapshotTarget.Body(native.Request("stackTrace", new
+        {
+            threadId,
+            startFrame = 0,
+            levels = 128,
+        }, OperationToken())).GetProperty("stackFrames");
+        JsonElement caller = stack.EnumerateArray().FirstOrDefault(frame =>
+            frame.TryGetProperty("source", out JsonElement source)
+            && source.TryGetProperty("path", out JsonElement path) && path.ValueKind == JsonValueKind.String
+            && frame.TryGetProperty("line", out JsonElement line) && line.TryGetInt32(out int value) && value > 0);
+        if (caller.ValueKind != JsonValueKind.Object)
+            return false;
+
+        string sourcePath = caller.GetProperty("source").GetProperty("path").GetString()!;
+        int currentLine = caller.GetProperty("line").GetInt32();
+        int targetLine = currentLine + 1;
+        try
+        {
+            JsonElement locations = LldbSnapshotTarget.Body(native.Request("breakpointLocations", new
+            {
+                source = new { path = sourcePath },
+                line = currentLine + 1,
+                endLine = currentLine + 100,
+            }, OperationToken())).GetProperty("breakpoints");
+            targetLine = locations.EnumerateArray()
+                .Select(location => location.TryGetProperty("line", out JsonElement line) && line.TryGetInt32(out int value) ? value : 0)
+                .FirstOrDefault(line => line > currentLine);
+            if (targetLine == 0)
+                return false;
+        }
+        catch (DebuggerException)
+        {
+            // Older LLDB-DAP builds can omit breakpointLocations; LLDB still resolves the requested next line.
+        }
+
+        string escapedPath = sourcePath.Replace("\\", "\\\\", StringComparison.Ordinal)
+            .Replace("\"", "\\\"", StringComparison.Ordinal);
+        JsonElement body = LldbSnapshotTarget.Body(native.Request("evaluate", new
+        {
+            expression = $"`breakpoint set --one-shot true --file \"{escapedPath}\" --line {targetLine}",
+            context = "repl",
+        }, OperationToken()));
+        string result = body.TryGetProperty("result", out JsonElement value) ? value.GetString() ?? "" : "";
+        Match match = Regex.Match(result, @"\bBreakpoint (?<id>[1-9][0-9]*):", RegexOptions.CultureInvariant);
+        if (!match.Success || !int.TryParse(match.Groups["id"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out int id))
+            throw new DebuggerException($"LLDB did not return a transition StepOut breakpoint ID: {result}");
+        lock (_state)
+            _transitionStep = new TransitionStepPlan(id, threadId);
+        return true;
+    }
+
+    private void CompleteTransitionStep(JsonObject body)
+    {
+        TransitionStepPlan? plan;
+        lock (_state)
+        {
+            plan = _transitionStep;
+            _transitionStep = null;
+        }
+        if (plan == null)
+            return;
+
+        bool hit = body["hitBreakpointIds"] is JsonArray hits
+            && hits.Any(item => item?.GetValue<int>() == plan.BackendBreakpointId);
+        if (hit)
+        {
+            if (body["hitBreakpointIds"] is JsonArray ids)
+            {
+                var retained = new JsonArray();
+                foreach (JsonNode? item in ids)
+                    if (item?.GetValue<int>() != plan.BackendBreakpointId)
+                        retained.Add(item?.DeepClone());
+                if (retained.Count == 0)
+                    body.Remove("hitBreakpointIds");
+                else
+                    body["hitBreakpointIds"] = retained;
+            }
+            body["reason"] = "step";
+            body["description"] = "managed/native step out";
+            body["threadId"] = plan.ThreadId;
+            return;
+        }
+
+        NativeAdapterSession? native = _native;
+        if (native != null)
+            DeleteManagedBackendBreakpoint(native, plan.BackendBreakpointId, strict: false);
+    }
+
     private long? MapStack(JsonObject body, long thread, bool enrich, Work work)
     {
         JsonArray frames = body["stackFrames"] as JsonArray ?? throw new DebuggerException("Native stackTrace did not return a frame array.");
@@ -903,6 +999,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
                 else if (message.Event == "stopped")
                 {
                     MapManagedBreakpointHits(body);
+                    CompleteTransitionStep(body);
                     RefreshManagedBreakpoints();
                 }
                 Transform(body, "variablesReference", id => _references.Variable(id, false, envelope.Stop, 0));

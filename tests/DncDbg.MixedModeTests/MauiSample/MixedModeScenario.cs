@@ -18,7 +18,7 @@ internal static class MixedModeScenario
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static int ManagedCallback(int value)
     {
-        NativeCheckpoint(3, value);
+        NativeCheckpoint(3, value); // MAUI_MANAGED_CALLBACK_ENTRY
         int result = value * 2; // MAUI_MANAGED_CALLBACK
         return result;
     }

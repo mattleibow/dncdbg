@@ -124,7 +124,7 @@ def main(adapter, lldb):
 
         managed_breakpoints = session.request("setBreakpoints", dict(
             source=dict(path=str(PROJECT.parent / "MixedModeScenario.cs")),
-            breakpoints=[dict(line=line(PROJECT.parent / "MixedModeScenario.cs", "MAUI_MANAGED_CALLBACK"))],
+            breakpoints=[dict(line=line(PROJECT.parent / "MixedModeScenario.cs", "MAUI_MANAGED_CALLBACK_ENTRY"))],
         ))["breakpoints"]
         check(len(managed_breakpoints) == 1 and managed_breakpoints[0]["verified"],
               str(managed_breakpoints))
@@ -144,14 +144,24 @@ def main(adapter, lldb):
         managed_callback = managed_stack["stackFrames"][0]
         check("[Managed]" in managed_callback["name"] and "ManagedCallback" in managed_callback["name"],
               "Managed source breakpoint top frame is not the callback: " + str(managed_stack))
-        check(managed_callback["line"] == line(PROJECT.parent / "MixedModeScenario.cs", "MAUI_MANAGED_CALLBACK")
+        check(managed_callback["line"] == line(PROJECT.parent / "MixedModeScenario.cs", "MAUI_MANAGED_CALLBACK_ENTRY")
               and managed_callback["instructionPointerReference"].lower() == managed_breakpoint_address.lower()
               and managed_callback["dncdbgCodeStartReference"].lower() == callback_address.lower(),
               str(managed_callback))
 
-        session.request("continue", dict(threadId=managed_stop["threadId"]))
+        session.request("stepOut", dict(threadId=managed_stop["threadId"]))
+        transition_stop = session.event("stopped")
+        transition_stack = session.request("stackTrace", dict(threadId=transition_stop["threadId"]))
+        native_caller = transition_stack["stackFrames"][0]
+        check(transition_stop["reason"] == "step"
+              and transition_stop["description"] == "managed/native step out"
+              and "native_callback_roundtrip" in native_caller["name"]
+              and native_caller["source"]["path"].endswith("native.cpp")
+              and native_caller["line"] == line(FIXTURE / "native.cpp", "return native_after_callback"),
+              json.dumps(dict(stop=transition_stop, stack=transition_stack), indent=2))
+        session.request("continue", dict(threadId=transition_stop["threadId"]))
         try:
-            batch.wait(timeout=10)
+            batch.wait(timeout=30)
         except subprocess.TimeoutExpired:
             terminate(batch)
         batch_output = batch.stdout.read()
@@ -166,7 +176,7 @@ def main(adapter, lldb):
         atexit.unregister(terminate)
 
         session.request("disconnect", dict(terminateDebuggee=True))
-        print("PASS MAUI AppKit mixed stack and managed source callback breakpoint", flush=True)
+        print("PASS MAUI AppKit managed source breakpoint and managed-to-native StepOut", flush=True)
 
 
 if __name__ == "__main__":

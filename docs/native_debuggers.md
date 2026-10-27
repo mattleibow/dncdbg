@@ -593,10 +593,32 @@ active mixed session currently require an all-threads stop. Requests remain
 pending when the module or JIT code version is unavailable and are retried at
 later stops. ReadyToRun and tiering remain disabled in the proof; automatic JIT,
 tiering, ReadyToRun and ReJIT generation notifications/rebinding are not yet
-complete. Conditions, hit conditions, logpoints and cross-transition StepIn are
-also not implemented for managed source breakpoints. Mac Catalyst currently
-validates the shared UI and native callback application but is not part of the
-CoreCLR managed inspection proof.
+complete. Conditions, hit conditions and logpoints are not implemented for
+managed source breakpoints.
+
+The AppKit proof also issues standard DAP `stepOut` while stopped in the managed
+callback. DNCDbg finds the first source-bearing native caller in LLDB's physical
+stack, asks LLDB for the next executable source line, installs an LLDB-owned
+one-shot breakpoint there, and resumes. The temporary LLDB breakpoint stop is
+reported to the client as one `step` stop at
+`native_callback_roundtrip` after the callback returns. This is the first
+managed-to-native transition-step vertical slice. It currently assumes a
+source-bearing native caller and a next executable line in the same source
+file; optimized/tail-call code and callers without source are not claimed.
+
+Native-to-managed `StepIn` is still a separate unfinished slice. The public
+ARM64 CoreCLR path was traced through the delegate thunk,
+`TheUMEntryPrestub`, `TheUMEntryPrestubWorker`, and the generated reverse
+P/Invoke stub. The published CoreCLR assembly shows the prestub worker returns
+the real target and tailcalls it, while the generated stub ultimately performs
+an indirect `blr` into managed code. LLDB can stop at each public/native
+transition address, but the current read-only virtual CoreCLR view does not
+publish the callback source frame until enough of the managed prolog has
+executed. DNCDbg therefore does not yet claim native-to-managed `StepIn`; the
+remaining work is a versioned, architecture-aware transition recipe plus a
+bounded stop-correlation contract, not a second CLR execution controller.
+Mac Catalyst currently validates the shared UI and native callback application
+but is not part of the CoreCLR managed inspection proof.
 
 `LldbProof` is the independent raw public-API baseline. Before proxy
 implementation, the CLI test failed with `Unknown option --native-debugger=lldb`

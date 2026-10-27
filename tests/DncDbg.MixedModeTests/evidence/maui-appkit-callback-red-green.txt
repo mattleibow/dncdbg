@@ -108,3 +108,38 @@ Managed source breakpoint GREEN:
   python3 tests/DncDbg.MixedModeTests/maui_debugger.py
 
   PASS MAUI AppKit mixed stack and managed source callback breakpoint
+
+Managed-to-native StepOut RED:
+  Forwarding LLDB-DAP stepOut directly from the managed callback stopped in an
+  unsymbolized reverse-PInvoke/runtime thunk rather than the C++ caller.
+
+Managed-to-native StepOut GREEN:
+  At the managed source stop, DNCDbg locates the first source-bearing native
+  caller in LLDB's physical stack, resolves the next executable source line,
+  installs an LLDB-owned one-shot breakpoint, and resumes. The internal
+  breakpoint ID is removed from the client event and the final stop is reported
+  as reason=step, description="managed/native step out".
+
+  The proof requires the top frame to be native_callback_roundtrip in native.cpp
+  on the return-native_after_callback line, then continues and requires both
+  DevFlow taps plus the final 126:2 assertion.
+
+  PASS MAUI AppKit managed source breakpoint and managed-to-native StepOut
+
+Native-to-managed StepIn blocker evidence:
+  LLDB can enumerate the C++ callback function pointer and stop at its delegate
+  thunk. On macOS arm64 the public CoreCLR route is:
+    delegate thunk -> TheUMEntryPrestub -> TheUMEntryPrestubWorker
+      -> generated reverse-PInvoke stub -> indirect blr managed target
+
+  Exact local disassembly matched public dotnet/runtime ARM64 asmhelpers.S:
+  TheUMEntryPrestub calls TheUMEntryPrestubWorker, receives the target in x0,
+  and tailcalls it. The generated reverse-PInvoke stub later loads an indirect
+  managed target into x2 and executes blr x2.
+
+  The current OpenVirtualProcess read-only view does not expose the callback
+  source frame or a bindable source sequence point early enough at these entry
+  stops. Repeated instruction stepping is too slow and races stop snapshots, so
+  that experiment was rejected and not retained in production. StepIn remains
+  unclaimed until an architecture/version-aware target recipe has deterministic
+  stop-generation correlation and bounded tests.

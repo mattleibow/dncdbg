@@ -24,6 +24,7 @@ public sealed class CoreClrInspection : IDisposable
     private readonly Dictionary<string, ModuleMetadata?> _metadata = new(StringComparer.Ordinal);
     private readonly Dictionary<int, CorDebugILFrame> _frames = [];
     private readonly Dictionary<int, IReadOnlyList<ManagedInspectionFrame>> _stacks = [];
+    private readonly Dictionary<int, int> _skippedFrames = [];
     private int _nextFrame;
     private bool _disposed;
 
@@ -54,6 +55,7 @@ public sealed class CoreClrInspection : IDisposable
         if (thread == null)
             return _stacks[osThreadId] = result;
         CorDebugStackWalk walk = thread.CreateStackWalk();
+        int skipped = 0;
         for (int depth = 0; depth < 1024; depth++)
         {
             HRESULT frameResult = walk.TryGetFrame(out CorDebugFrame frame);
@@ -72,14 +74,29 @@ public sealed class CoreClrInspection : IDisposable
                     source?.Column ?? 0, source?.EndLine ?? 0, source?.EndColumn ?? 0);
                 result.Add(new ManagedInspectionFrame(info, address, codeStart));
             }
-            else if (frameResult is not (HRESULT.S_OK or HRESULT.S_FALSE or HRESULT.CORDBG_E_MISSING_METADATA))
+            else if (frameResult == HRESULT.CORDBG_E_MISSING_METADATA)
+            {
+                skipped++;
+                _log?.Invoke($"Managed inspection skipped frame without metadata: thread={osThreadId}, depth={depth}.");
+            }
+            else if (frameResult is not (HRESULT.S_OK or HRESULT.S_FALSE))
                 frameResult.ThrowOnNotOK();
             HRESULT next = walk.TryNext();
             if (next is HRESULT.S_FALSE or HRESULT.CORDBG_S_AT_END_OF_STACK)
+            {
+                _skippedFrames[osThreadId] = skipped;
                 return _stacks[osThreadId] = result;
+            }
             next.ThrowOnNotOK();
         }
         throw new DebuggerException("Managed inspection exceeded the 1024-frame stack limit.");
+    }
+
+    public int GetSkippedFrameCount(int osThreadId)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        _ = GetStackTrace(osThreadId);
+        return _skippedFrames.GetValueOrDefault(osThreadId);
     }
 
     public IReadOnlyList<VariableInfo> GetVariables(int frameId)
@@ -168,6 +185,7 @@ public sealed class CoreClrInspection : IDisposable
                 metadata?.Dispose();
             _frames.Clear();
             _stacks.Clear();
+            _skippedFrames.Clear();
             GC.KeepAlive(_target);
             GC.KeepAlive(_libraries);
         }

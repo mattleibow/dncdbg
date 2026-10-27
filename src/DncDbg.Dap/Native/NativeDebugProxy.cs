@@ -206,6 +206,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
                     DncDbgCodeStartReference = $"0x{f.CodeStart:x}",
                 }).ToArray(),
                 ReadOnly = true,
+                SkippedFrames = view.GetSkippedFrameCount(Integer(arguments, "threadId")),
             } }, inspection);
             return;
         }
@@ -478,7 +479,12 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
                 CoreClrInspection view = Inspection();
                 managedEpoch = _viewEpoch;
                 managed = view.GetStackTrace(checked((int)thread));
-                body["dncdbgManagedInspection"] = new JsonObject { ["status"] = "read-only", ["snapshot"] = _snapshotSerial };
+                body["dncdbgManagedInspection"] = new JsonObject
+                {
+                    ["status"] = "read-only",
+                    ["snapshot"] = _snapshotSerial,
+                    ["skippedFrames"] = view.GetSkippedFrameCount(checked((int)thread)),
+                };
             }
             catch (Exception error) when (error is not (OperationCanceledException or OutOfMemoryException)
                 && _native?.TransportFailed != true && _backendFailure == null)

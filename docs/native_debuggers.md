@@ -544,7 +544,7 @@ open -n "tests/DncDbg.MixedModeTests/MauiSample/bin/Debug/net10.0-macos/osx-arm6
 open -n "tests/DncDbg.MixedModeTests/MauiSample/bin/Debug/net10.0-maccatalyst/maccatalyst-arm64/DNCDbg Mixed Mode.app"
 
 maui devflow ui tap --automationId RunMixedMode
-maui devflow ui assert --automationId MixedModeStatus Text "126"
+maui devflow ui assert --automationId MixedModeStatus Text "126:1"
 ```
 
 The AppKit backend is experimental and does not imply Mac Catalyst parity.
@@ -564,16 +564,26 @@ The resulting hybrid stack includes the native checkpoint, the C++ callback
 caller, and `[Managed] MixedModeScenario.ManagedCallback`; managed scopes expose
 the callback argument `value=42`. Runtime/interop frames that report
 `CORDBG_E_MISSING_METADATA` are skipped individually rather than making the
-entire managed stack unavailable. This is a mixed-stack and managed-inspection
-proof at a native stop.
+entire managed stack unavailable. The inspection response reports the number of
+skipped frames, and the engine log records their thread and depth so a partial
+stack is not silently presented as complete. This is a mixed-stack and
+managed-inspection proof at a native stop.
 
 The same proof captures the callback method's CLR native-code start separately
 from its current safe-point IP, installs an LLDB hardware breakpoint at that JIT
 address, and invokes the button a second time. LLDB then stops in the managed
 callback before the nested native checkpoint, and DNCDbg maps the stop back to
-the managed source frame. This proves an LLDB-owned managed **address**
-breakpoint on macOS AppKit. It is not yet a managed source-breakpoint binder,
-automatic JIT/tiering rebind, or cross-transition StepIn implementation.
+the managed source frame. The experimental `dncdbgCodeStartReference` property
+is stop-snapshot-scoped and is emitted consistently by hybrid `stackTrace` and
+`dotnet/managedStackTrace`. The proof disables ReadyToRun and tiering; the
+address is not valid across JIT code-version changes. Both DevFlow invocations
+must complete, and the second updates the status to `126:2`.
+
+This proves an LLDB-owned managed **address** breakpoint on macOS AppKit. It is
+not yet a managed source-breakpoint binder, automatic JIT/tiering rebind, or
+cross-transition StepIn implementation. Mac Catalyst currently validates the
+shared UI and native callback application but is not part of the CoreCLR managed
+inspection proof.
 
 `LldbProof` is the independent raw public-API baseline. Before proxy
 implementation, the CLI test failed with `Unknown option --native-debugger=lldb`

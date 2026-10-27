@@ -24,6 +24,7 @@
     <CodeSignEntitlements Condition="'$(Configuration)' == 'Debug'">Platforms/MacCatalyst/Entitlements.Debug.plist</CodeSignEntitlements>
     <MixedModeNativePlatform>maccatalyst</MixedModeNativePlatform>
     <MixedModeNativeArch Condition="$(RuntimeIdentifier.Contains('arm64'))">arm64</MixedModeNativeArch>
+    <MixedModeNativeArch Condition="'$(MixedModeNativeArch)' == '' and '$(NETCoreSdkRuntimeIdentifier)' == 'osx-arm64'">arm64</MixedModeNativeArch>
     <MixedModeNativeArch Condition="'$(MixedModeNativeArch)' == ''">x86_64</MixedModeNativeArch>
   </PropertyGroup>
 
@@ -31,11 +32,12 @@
     <SupportedOSPlatformVersion>14.0</SupportedOSPlatformVersion>
     <MixedModeNativePlatform>macos</MixedModeNativePlatform>
     <MixedModeNativeArch Condition="$(RuntimeIdentifier.Contains('arm64'))">arm64</MixedModeNativeArch>
+    <MixedModeNativeArch Condition="'$(MixedModeNativeArch)' == '' and '$(NETCoreSdkRuntimeIdentifier)' == 'osx-arm64'">arm64</MixedModeNativeArch>
     <MixedModeNativeArch Condition="'$(MixedModeNativeArch)' == ''">x86_64</MixedModeNativeArch>
   </PropertyGroup>
 
   <PropertyGroup>
-    <MixedModeNativeOutput>$(MSBuildProjectDirectory)/../../../build/validation/mixed-mode/maui-native/$(TargetFramework)/$(RuntimeIdentifier)/libmixedfixture.dylib</MixedModeNativeOutput>
+    <MixedModeNativeOutput>$(MSBuildProjectDirectory)/../../../build/validation/mixed-mode/maui-native/$(TargetFramework)/$(MixedModeNativeArch)/libmixedfixture.dylib</MixedModeNativeOutput>
   </PropertyGroup>
 
   <ItemGroup>

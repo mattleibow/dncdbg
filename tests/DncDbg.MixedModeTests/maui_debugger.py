@@ -2,8 +2,10 @@
 """Local AppKit mixed-stack proof driven by DNCDbg, LLDB, and DevFlow."""
 
 import argparse
+import atexit
 import json
 from pathlib import Path
+import re
 import runpy
 import subprocess
 import time
@@ -23,10 +25,22 @@ def wait_for_agent(pid):
         result = subprocess.run(["maui", "devflow", "list", "--json"], capture_output=True, text=True)
         if result.returncode == 0:
             agents = json.loads(result.stdout)
-            if any(agent["processId"] == pid and agent["tfm"] == "net10.0-macos" for agent in agents):
-                return
+            agent = next((agent for agent in agents
+                          if agent["processId"] == pid and agent["tfm"] == "net10.0-macos"), None)
+            if agent:
+                return agent
         time.sleep(0.2)
     raise AssertionError(f"DevFlow agent for debuggee {pid} did not connect")
+
+
+def terminate(process):
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
 
 
 def main(adapter, lldb):
@@ -65,26 +79,30 @@ def main(adapter, lldb):
 
         info = session.request("dotnet/info")
         pid = info["debuggeeProcessId"]
-        wait_for_agent(pid)
+        agent = wait_for_agent(pid)
+        agent_port = str(agent["port"])
         subprocess.run([
             "maui", "devflow", "ui", "query",
+            "--agent-port", agent_port,
             "--automationId", "RunMixedMode",
             "--wait-until", "exists",
             "--timeout", "30",
             "--json",
         ], check=True, capture_output=True, text=True)
         batch = subprocess.Popen([
-            "maui", "devflow", "batch",
+            "maui", "devflow", "batch", "--agent-port", agent_port,
         ], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        atexit.register(terminate, batch)
         batch.stdin.write(
             "ui tap RunMixedMode; "
             "ui tap RunMixedMode; "
-            "ui assert --automationId MixedModeStatus Text 126\n")
+            "ui assert --automationId MixedModeStatus Text 126:2\n")
         batch.stdin.close()
 
         stop = session.event("stopped")
         stack_result = session.request("stackTrace", dict(threadId=stop["threadId"]))
         frames = stack_result["stackFrames"]
+        check(stack_result["dncdbgManagedInspection"]["skippedFrames"] > 0, str(stack_result))
         check("native_checkpoint" in frames[0]["name"], str(frames[:5]))
         callback = next((frame for frame in frames
                          if "[Managed]" in frame["name"] and "ManagedCallback" in frame["name"]), None)
@@ -99,6 +117,11 @@ def main(adapter, lldb):
         check(values.get("value") == "42", "Managed callback argument unavailable: " + str(values))
         check(any("native_callback_roundtrip" in frame["name"] for frame in frames), str(frames))
         callback_address = callback["dncdbgCodeStartReference"]
+        strict = session.request("dotnet/managedStackTrace", dict(threadId=stop["threadId"]))
+        strict_callback = next(frame for frame in strict["stackFrames"]
+                               if "ManagedCallback" in frame["name"])
+        check(strict_callback["dncdbgCodeStartReference"].lower() == callback_address.lower(),
+              str(strict_callback))
 
         hardware = session.request("evaluate", dict(
             expression=f"`breakpoint set --hardware -a {callback_address}",
@@ -106,6 +129,9 @@ def main(adapter, lldb):
         ))
         check("Breakpoint" in hardware["result"] and "address" in hardware["result"],
               str(hardware))
+        hardware_match = re.search(r"Breakpoint (\d+):", hardware["result"])
+        check(hardware_match is not None, str(hardware))
+        hardware_id = int(hardware_match.group(1))
         session.request("setBreakpoints", dict(
             source=dict(path=str(FIXTURE / "native.c")),
             breakpoints=[],
@@ -113,32 +139,32 @@ def main(adapter, lldb):
 
         session.request("continue", dict(threadId=stop["threadId"]))
         managed_stop = session.event("stopped")
+        check(managed_stop["reason"] == "breakpoint"
+              and hardware_id in managed_stop.get("hitBreakpointIds", []),
+              str(managed_stop))
         managed_stack = session.request("stackTrace", dict(threadId=managed_stop["threadId"]))
-        managed_callback = next((frame for frame in managed_stack["stackFrames"]
-                                 if "[Managed]" in frame["name"] and "ManagedCallback" in frame["name"]), None)
-        check(managed_callback is not None,
-              "LLDB managed-address breakpoint did not map to the callback: " + str(managed_stack))
-        check("native_checkpoint" not in managed_stack["stackFrames"][0]["name"],
-              "Managed hardware breakpoint was missed; callback code start remained "
-              + managed_callback["dncdbgCodeStartReference"])
-        check(managed_callback["instructionPointerReference"].lower() == callback_address.lower(),
+        managed_callback = managed_stack["stackFrames"][0]
+        check("[Managed]" in managed_callback["name"] and "ManagedCallback" in managed_callback["name"],
+              "Hardware breakpoint top frame is not the callback: " + str(managed_stack))
+        check(managed_callback["instructionPointerReference"].lower() == callback_address.lower()
+              and managed_callback["dncdbgCodeStartReference"].lower() == callback_address.lower(),
               str(managed_callback))
 
         session.request("continue", dict(threadId=managed_stop["threadId"]))
         try:
-            batch.wait(timeout=3)
+            batch.wait(timeout=10)
         except subprocess.TimeoutExpired:
-            batch.terminate()
-            batch.wait(timeout=5)
+            terminate(batch)
         batch_output = batch.stdout.read()
         batch_error = batch.stderr.read()
         batch_results = [json.loads(result) for result in batch_output.splitlines() if result]
         check(len(batch_results) == 3
-              and all(result["exit_code"] == 0 for result in (batch_results[0], batch_results[2]))
+              and all(result["exit_code"] == 0 for result in batch_results)
               and batch_results[0]["command"] == "ui tap RunMixedMode"
               and batch_results[1]["command"] == "ui tap RunMixedMode"
               and batch_results[2]["command"].startswith("ui assert"),
               batch_output + batch_error)
+        atexit.unregister(terminate)
 
         session.request("disconnect", dict(terminateDebuggee=True))
         print("PASS MAUI AppKit mixed stack and LLDB managed-address callback breakpoint", flush=True)

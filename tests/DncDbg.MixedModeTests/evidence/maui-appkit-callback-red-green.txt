@@ -62,8 +62,16 @@ Managed-address breakpoint GREEN:
   It clears the original native checkpoint breakpoint, continues, and invokes
   the same MAUI button again through the same DevFlow batch session. LLDB stops
   at the managed callback code start, DNCDbg maps the stop to
-  [Managed] MixedModeScenario.ManagedCallback, and the final DevFlow assertion
-  remains MixedModeStatus.Text == 126.
+  [Managed] MixedModeScenario.ManagedCallback, validates the breakpoint stop
+  reason and LLDB breakpoint ID, and requires the managed callback to be the
+  top frame with both current IP and code-start equal to the breakpoint address.
+  Both DevFlow tap commands must succeed, and the final DevFlow assertion is
+  MixedModeStatus.Text == 126:2 so the first invocation cannot create a false
+  green for the second.
+
+  Hybrid stackTrace and dotnet/managedStackTrace both publish the exact
+  dncdbgCodeStartReference spelling. The managed inspection status reports
+  skippedFrames, and the engine log records each missing-metadata frame.
 
   python3 tests/DncDbg.MixedModeTests/maui_debugger.py
 

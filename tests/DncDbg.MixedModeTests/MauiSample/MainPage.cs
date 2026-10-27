@@ -3,6 +3,7 @@ namespace DncDbg.MixedMode.Maui;
 public sealed class MainPage : ContentPage
 {
     private readonly Label _status;
+    private int _runCount;
 
     public MainPage()
     {
@@ -49,9 +50,11 @@ public sealed class MainPage : ContentPage
 
     private void RunMixedMode(object? sender, EventArgs e)
     {
+        int run = ++_runCount;
+        _status.Text = $"Running:{run}";
         try
         {
-            _status.Text = MixedModeScenario.Run(19, 23).ToString();
+            _status.Text = $"{MixedModeScenario.Run(19, 23)}:{run}";
         }
         catch (Exception error)
         {

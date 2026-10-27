@@ -25,7 +25,8 @@ def build(framework, rid=None, architecture=None):
 
 
 if __name__ == "__main__":
-    architecture = "arm64" if platform.machine() == "arm64" else "x64"
-    build("net10.0-maccatalyst", "maccatalyst-" + architecture)
-    build("net10.0-macos", architecture=architecture)
+    rid_architecture = "arm64" if platform.machine() == "arm64" else "x64"
+    native_architecture = "arm64" if platform.machine() == "arm64" else "x86_64"
+    build("net10.0-maccatalyst", "maccatalyst-" + rid_architecture)
+    build("net10.0-macos", architecture=native_architecture)
     print("PASS single-project MAUI sample builds for Mac Catalyst and macOS AppKit", flush=True)

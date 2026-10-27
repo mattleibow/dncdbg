@@ -508,6 +508,11 @@ not a production runtime notification mechanism. Persistent checkpoint identity,
 native source/locals/step (`sum=42`), exact thread/PC correlation, fresh managed
 snapshots (`19,23`, then `result=42`), continue, actual process exit, detach and
 EOF cleanup are checked. No checkpoint hook is installed by production code.
+The portable fixture also includes a deterministic callback path:
+`C# -> C++ -> C# delegate -> C++ -> C#`. It passes `19` and `23`, enters the
+managed callback with `42`, returns `84` to C++, and returns the final result
+`126` to managed code. This is the baseline for future cross-transition
+StepIn/StepOut work and builds through the same public CMake toolchain.
 
 `LldbProof` is the independent raw public-API baseline. Before proxy
 implementation, the CLI test failed with `Unknown option --native-debugger=lldb`

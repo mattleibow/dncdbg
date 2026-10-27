@@ -14,7 +14,8 @@ internal static class Program
             while (!File.Exists(args[index + 1]))
                 Thread.Sleep(20);
         }
-        int result = ManagedCall(19, 23);
+        bool callback = args.Contains("--callback");
+        int result = callback ? ManagedCallbackRoundtrip(19, 23) : ManagedCall(19, 23);
         if (args.Contains("--repeat"))
             result = NativeAdd(19, 23);
         Console.WriteLine($"RESULT:{result}");
@@ -25,7 +26,7 @@ internal static class Program
             while (!File.Exists(args[exitGate + 1]))
                 Thread.Sleep(20);
         }
-        return result == 42 ? 0 : 1;
+        return result == (callback ? 126 : 42) ? 0 : 1;
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
@@ -41,8 +42,32 @@ internal static class Program
         return result;
     }
 
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static int ManagedCallbackRoundtrip(int left, int right)
+    {
+        Console.WriteLine($"CALLBACK_BEFORE:{left},{right}"); // MANAGED_CALLBACK_BEFORE
+        int result = NativeCallbackRoundtrip(left, right, Callback);
+        Console.WriteLine($"CALLBACK_AFTER:{result}"); // MANAGED_CALLBACK_AFTER
+        return result;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static int ManagedCallback(int value)
+    {
+        Console.WriteLine($"CALLBACK:{value}"); // MANAGED_CALLBACK
+        return value * 2;
+    }
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int NativeCallback(int value);
+
+    private static readonly NativeCallback Callback = ManagedCallback;
+
     [DllImport("mixedfixture", EntryPoint = "native_add", CallingConvention = CallingConvention.Cdecl)]
     private static extern int NativeAdd(int left, int right);
+
+    [DllImport("mixedfixture", EntryPoint = "native_callback_roundtrip", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int NativeCallbackRoundtrip(int left, int right, NativeCallback callback);
 
     [DllImport("mixedfixture", EntryPoint = "native_checkpoint", CallingConvention = CallingConvention.Cdecl)]
     private static extern void NativeCheckpoint(int phase, int result);

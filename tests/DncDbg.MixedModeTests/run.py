@@ -151,6 +151,14 @@ def build():
     result = subprocess.run(["dotnet", str(DLL)], capture_output=True, text=True, check=True)
     check(result.stdout.splitlines() == ["BEFORE:19,23", "AFTER:42", "RESULT:42"], result.stdout)
     print("PASS fixture: native_add(19, 23) == 42", flush=True)
+    callback = subprocess.run(["dotnet", str(DLL), "--callback"], capture_output=True, text=True, check=True)
+    check(callback.stdout.splitlines() == [
+        "CALLBACK_BEFORE:19,23",
+        "CALLBACK:42",
+        "CALLBACK_AFTER:126",
+        "RESULT:126",
+    ], callback.stdout)
+    print("PASS fixture: C# -> C++ -> C# callback -> C++ -> C# == 126", flush=True)
 
 
 def native_inspection(native, stop):

@@ -1,7 +1,11 @@
 cmake_minimum_required(VERSION 3.20)
-project(mixedfixture LANGUAGES C)
-add_library(mixedfixture SHARED native.c)
-set_target_properties(mixedfixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED YES)
+project(mixedfixture LANGUAGES C CXX)
+add_library(mixedfixture SHARED native.c native.cpp)
+set_target_properties(mixedfixture PROPERTIES
+  C_STANDARD 11
+  C_STANDARD_REQUIRED YES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED YES)
 if(MSVC)
   target_compile_options(mixedfixture PRIVATE /Od /Zi /W4 /WX)
   target_link_options(mixedfixture PRIVATE /DEBUG)

@@ -162,6 +162,74 @@ internal static class SafetyChecks
             await session.Exited();
         }
 
+        using (var session = new Session(executable))
+        {
+            await session.Initialize();
+            await session.Request("configurationDone", new { });
+            await session.Request("launch", new { program = fixture, args = new[] { "--fixture", "expressions" } });
+            JsonElement stopped = await session.Event("stopped", _ => true);
+            int thread = stopped.GetProperty("body").GetProperty("threadId").GetInt32();
+            JsonElement stack = await session.Request("stackTrace", new { threadId = thread });
+            int frame = stack.GetProperty("body").GetProperty("stackFrames")[0].GetProperty("id").GetInt32();
+
+            await CheckEvaluation("$\"Foo: {text}\"", "\"Foo: test\"", "string");
+            await CheckEvaluation("$\"{text}:{value}:{converted}\"", "\"test:5:10\"", "string");
+            await CheckEvaluation("$\"{{{value}}}\"", "\"{5}\"", "string");
+            await CheckEvaluation("$\"{{left}} {value} {{right}}\"", "\"{left} 5 {right}\"", "string");
+            await CheckEvaluation("$\"|{value,4}|\"", "\"|   5|\"", "string");
+            await CheckEvaluation("$\"{raw:0.00}\"", "\"10.50\"", "string");
+            await CheckEvaluation("(int)raw", "10", "int");
+            await CheckEvaluation("Math.Round(raw, MidpointRounding.AwayFromZero)", "11", "decimal");
+            await CheckEvaluation("object.ReferenceEquals(first.Address, second.Address)", "true", "bool");
+            await CheckEvaluation("first.Address == second.Address", "true", "bool");
+            await CheckEvaluation("string.Join(\",\", selected)", "\"7,9\"", "string");
+            await CheckEvaluation("selected.Count()", "2", "int");
+            await CheckEvaluation("string.Join(\",\", selectedAfterClear)", "\"\"", "string");
+            await CheckEvaluation("selectedAfterClear.Count()", "0", "int");
+
+            JsonElement scopes = await session.Request("scopes", new { frameId = frame });
+            int locals = scopes.GetProperty("body").GetProperty("scopes").EnumerateArray()
+                .Single(scope => scope.GetProperty("name").GetString() == "Locals")
+                .GetProperty("variablesReference").GetInt32();
+            JsonElement variables = await session.Request("variables", new { variablesReference = locals });
+            int record = Reference("record", variables), authored = Reference("authored", variables);
+            JsonElement recordMembers = await session.Request("variables", new { variablesReference = record });
+            Check(Member(recordMembers, "Id", "42", "int"), "record Id is visible");
+            Check(Member(recordMembers, "Subtotal", "105", "decimal"), "record Subtotal is visible");
+            Check(Member(recordMembers, "DiscountRate", "10", "decimal"), "record DiscountRate is visible");
+            Check(!Names(recordMembers).Contains("EqualityContract"), "synthesized record EqualityContract is hidden");
+            JsonElement authoredMembers = await session.Request("variables", new { variablesReference = authored });
+            Check(Member(authoredMembers, "Id", "7", "int"), "authored Id is visible");
+            Check(Member(authoredMembers, "EqualityContract", "\"authored\"", "string"), "authored EqualityContract is visible");
+
+            await session.Request("disconnect", new { terminateDebuggee = true });
+            await session.Exited();
+
+            async Task CheckEvaluation(string expression, string result, string type)
+            {
+                JsonElement response = await session.Request("evaluate", new { expression, frameId = frame, context = "repl" });
+                JsonElement body = response.GetProperty("body");
+                Check(body.GetProperty("result").GetString() == result && body.GetProperty("type").GetString() == type,
+                    $"evaluate {expression}");
+            }
+
+            static int Reference(string name, JsonElement response) =>
+                response.GetProperty("body").GetProperty("variables").EnumerateArray()
+                    .Single(variable => variable.GetProperty("name").GetString() == name)
+                    .GetProperty("variablesReference").GetInt32();
+
+            static HashSet<string> Names(JsonElement response) =>
+                response.GetProperty("body").GetProperty("variables").EnumerateArray()
+                    .Select(variable => variable.GetProperty("name").GetString()!)
+                    .ToHashSet(StringComparer.Ordinal);
+
+            static bool Member(JsonElement response, string name, string value, string type) =>
+                response.GetProperty("body").GetProperty("variables").EnumerateArray().Any(variable =>
+                    variable.GetProperty("name").GetString() == name
+                    && variable.GetProperty("value").GetString() == value
+                    && variable.GetProperty("type").GetString() == type);
+        }
+
         string releasePath = Path.GetFullPath($"build/validation/detach-{Guid.NewGuid():N}.release");
         string resultPath = Path.ChangeExtension(releasePath, ".result");
         using (var engine = new DebugEngine())

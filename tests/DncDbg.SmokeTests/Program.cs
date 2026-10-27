@@ -15,6 +15,11 @@ if (args is ["--fixture", "heartbeat"])
         Thread.Sleep(50);
     }
 }
+if (args is ["--fixture", "expressions"])
+{
+    Program.ExpressionFixture();
+    return;
+}
 if (args is ["--fixture", "detach-initializer", var releasePath, var resultPath])
 {
     while (!File.Exists(releasePath))

@@ -291,7 +291,9 @@ public sealed partial class DebugEngine
             {
                 if (content is InterpolatedStringTextSyntax text)
                 {
-                    sb.Append(text.TextToken.ValueText);
+                    sb.Append(text.TextToken.ValueText
+                        .Replace("{{", "{", StringComparison.Ordinal)
+                        .Replace("}}", "}", StringComparison.Ordinal));
                     continue;
                 }
 

@@ -79,6 +79,41 @@ jobs:
           path: bin/
           if-no-files-found: error
 
+  docker:
+    name: Docker integration (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      DNCDBG_DOCKER_TEST_RUN: gh-${{ github.run_id }}-${{ github.run_attempt }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Run Docker integration tests (Docker required)
+        run: dotnet run --project tests/DncDbg.DockerTests --configuration Release -- --require-docker
+
+      - name: Clean up this run's Docker resources
+        if: always()
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -eu
+          containers="$(timeout 15s docker container ls --all --quiet --filter "label=org.dncdbg.docker-tests=$DNCDBG_DOCKER_TEST_RUN")"
+          if [ -n "$containers" ]; then
+            printf '%s\n' "$containers" | xargs -r timeout 30s docker container rm --force
+          fi
+          images="$(timeout 15s docker image ls --quiet --filter "label=org.dncdbg.docker-tests=$DNCDBG_DOCKER_TEST_RUN")"
+          if [ -n "$images" ]; then
+            printf '%s\n' "$images" | xargs -r timeout 30s docker image rm --force
+          fi
+          timeout 15s rm -rf build/docker-tests
+
   vscode:
     name: VS Code integration
     runs-on: ubuntu-latest

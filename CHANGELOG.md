@@ -2,6 +2,7 @@
 Upcoming changes compared to the previous version.
 
 #### DAP
+- Report the actual `allThreadsContinued` outcome in continue responses and continued events, including successful steps. Redundant already-running continues return `true` without an extra event; failed state inspection logs and falls back to the requested mode.
 - Ported parsed unsigned hit conditions for source/function breakpoints: `<N`, `<=N`, `==N`, `>N`, `N`/`>=N`, and `%N` (`%0` rejected). Validate complete requests before mutation; count without function evaluation and preserve function IDs/counts across replacements.
 - Added `DNCDBG_INNER_EXCEPTION_WALK_LIMIT` with native-compatible process/session configuration, a default of 32 inner exceptions, and fully populated terminal details. Exception traversal and DAP conversion are iterative; outgoing chains may exceed the incoming message depth limit.
 - Matched upstream trailing-`*` prefix exception conditions, including negated prefixes and `!*`. Internal/repeated asterisks are literal rather than general glob patterns.

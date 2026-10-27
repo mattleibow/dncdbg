@@ -342,11 +342,25 @@ public sealed partial class DebugEngine
     private readonly HashSet<int> _frozenThreads = [];
     private int? _executionThread;
 
-    private void SetExecutionThread(CorDebugProcess process, int? threadId, bool singleThread)
+    private bool SetExecutionThread(CorDebugProcess process, int? threadId, bool singleThread)
     {
         _executionThread = singleThread ? threadId ?? throw new DebuggerException("A thread is required for single-thread execution.") : null;
         process.SetAllThreadsDebugState(CorDebugThreadState.THREAD_RUN, null!);
         RestoreFrozenThreads(process);
+        return AllThreadsContinued(process, fallback: !singleThread);
+    }
+
+    private bool AllThreadsContinued(CorDebugProcess process, bool fallback)
+    {
+        try
+        {
+            return process.Threads.All(thread => thread.DebugState != CorDebugThreadState.THREAD_SUSPEND);
+        }
+        catch (Exception e)
+        {
+            Log?.Invoke("Cannot determine resumed thread states: " + e.Message);
+            return fallback;
+        }
     }
 
     /// <summary>A frozen thread stays suspended while the rest of the process runs.</summary>

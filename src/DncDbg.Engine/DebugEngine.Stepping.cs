@@ -50,7 +50,7 @@ public sealed partial class DebugEngine
             CorDebugProcess process = RequireStopped();
             CorDebugThread thread = RequireThread(threadId);
             _requestedStepKind = kind;
-            SetExecutionThread(process, threadId, singleThread);
+            bool allThreadsContinued = SetExecutionThread(process, threadId, singleThread);
             ClearAsyncStep();
             ClearStepInTarget();
             _leavingFilteredMethod = false;
@@ -67,6 +67,7 @@ public sealed partial class DebugEngine
             if (kind == StepKind.Out && ArmAsyncStepOut(thread))
             {
                 ResumeProcess(process);
+                ExecutionContinued?.Invoke(threadId, allThreadsContinued);
                 return;
             }
 
@@ -77,6 +78,7 @@ public sealed partial class DebugEngine
                 ArmReturnSites(thread);
             }
             ResumeProcess(process);
+            ExecutionContinued?.Invoke(threadId, allThreadsContinued);
         }
     }
 

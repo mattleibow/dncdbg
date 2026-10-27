@@ -1,0 +1,42 @@
+MAUI AppKit callback mixed-stack red/green
+
+Fixture:
+  C# MixedModeScenario.Run(19, 23)
+    -> C++ native_callback_roundtrip
+      -> C# ManagedCallback(42)
+        -> native_checkpoint(3, 42)
+      <- 84
+    <- 126
+
+Pre-production RED 1:
+  The MAUI callback did not invoke a native checkpoint while its managed frame
+  was active. `maui_debugger.py` timed out waiting for the LLDB stopped event.
+
+Pre-production RED 2:
+  After adding the callback checkpoint, LLDB stopped with native_checkpoint and
+  native_callback_roundtrip on the stack, but no managed frames were published.
+  The engine log reported:
+
+    Managed inspection unavailable: ClrDebug.DebugException (0x80131C35):
+    Error HRESULT CORDBG_E_MISSING_METADATA ...
+    at DncDbg.Engine.CoreClrInspection.GetStackTrace
+
+Root cause:
+  A runtime/interop frame without managed metadata caused the entire stack walk
+  to fail before reaching the user callback frame.
+
+GREEN:
+  CoreClrInspection skips an individual TryGetFrame result of
+  CORDBG_E_MISSING_METADATA and continues the stack walk.
+
+  python3 tests/DncDbg.MixedModeTests/maui_debugger.py
+
+  PASS MAUI AppKit LLDB-owned mixed stack includes active C# callback
+
+Assertions:
+  - native_checkpoint is the top native frame.
+  - native_callback_roundtrip remains on the physical native stack.
+  - [Managed] MixedModeScenario.ManagedCallback is mapped into the hybrid stack.
+  - managed callback source is MixedModeScenario.cs.
+  - managed callback argument value is 42.
+  - after continue, DevFlow observes MixedModeStatus.Text == 126.

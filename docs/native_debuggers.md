@@ -551,6 +551,23 @@ The AppKit backend is experimental and does not imply Mac Catalyst parity.
 This sample currently validates a shared page, button interaction, DevFlow
 connectivity, and the full native callback chain on both backends.
 
+The local AppKit debugger proof additionally launches the app through DNCDbg
+with LLDB as the execution owner, uses DevFlow to invoke the callback, and stops
+in `native_checkpoint` while the managed callback is still active:
+
+```sh
+dotnet publish src/DncDbg.Dap -c Release -o bin
+python3 tests/DncDbg.MixedModeTests/maui_debugger.py
+```
+
+The resulting hybrid stack includes the native checkpoint, the C++ callback
+caller, and `[Managed] MixedModeScenario.ManagedCallback`; managed scopes expose
+the callback argument `value=42`. Runtime/interop frames that report
+`CORDBG_E_MISSING_METADATA` are skipped individually rather than making the
+entire managed stack unavailable. This is a mixed-stack and managed-inspection
+proof at a native stop, not yet a managed source breakpoint or cross-transition
+stepper.
+
 `LldbProof` is the independent raw public-API baseline. Before proxy
 implementation, the CLI test failed with `Unknown option --native-debugger=lldb`
 and the retirement test failed because the old Windows flag was still accepted.

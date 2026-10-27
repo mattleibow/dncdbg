@@ -14,6 +14,10 @@
     <ApplicationVersion>1</ApplicationVersion>
   </PropertyGroup>
 
+  <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
+    <LinkMode>None</LinkMode>
+  </PropertyGroup>
+
   <PropertyGroup Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'maccatalyst'">
     <SupportedOSPlatformVersion>15.0</SupportedOSPlatformVersion>
     <ApplicationManifest>Platforms/MacCatalyst/Info.plist</ApplicationManifest>

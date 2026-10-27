@@ -71,7 +71,7 @@ public sealed class CoreClrInspection : IDisposable
                     source?.Column ?? 0, source?.EndLine ?? 0, source?.EndColumn ?? 0);
                 result.Add(new ManagedInspectionFrame(info, address));
             }
-            else if (frameResult is not (HRESULT.S_OK or HRESULT.S_FALSE))
+            else if (frameResult is not (HRESULT.S_OK or HRESULT.S_FALSE or HRESULT.CORDBG_E_MISSING_METADATA))
                 frameResult.ThrowOnNotOK();
             HRESULT next = walk.TryNext();
             if (next is HRESULT.S_FALSE or HRESULT.CORDBG_S_AT_END_OF_STACK)

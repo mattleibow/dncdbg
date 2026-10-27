@@ -18,6 +18,7 @@ internal static class MixedModeScenario
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static int ManagedCallback(int value)
     {
+        NativeCheckpoint(3, value);
         int result = value * 2; // MAUI_MANAGED_CALLBACK
         return result;
     }
@@ -27,4 +28,7 @@ internal static class MixedModeScenario
 
     [DllImport("mixedfixture", EntryPoint = "native_callback_roundtrip", CallingConvention = CallingConvention.Cdecl)]
     private static extern int NativeCallbackRoundtrip(int left, int right, NativeCallback callback);
+
+    [DllImport("mixedfixture", EntryPoint = "native_checkpoint", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void NativeCheckpoint(int phase, int result);
 }

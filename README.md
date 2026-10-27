@@ -4,7 +4,7 @@
 for .NET applications. Use it from VS Code or another DAP client.
 
 The implementation is **C# 14 on .NET 10**, with nullable reference types and
-warnings as errors. It consists of three SDK-style projects:
+warnings as errors. Its three core SDK-style projects are:
 
 - `src/DncDbg.Dap`: `dncdbg-dap` executable host, DAP requests, configuration and process lifecycle.
 - `src/DncDbg.Engine`: CLR debugging, symbols, stepping, evaluation and inspection.
@@ -70,6 +70,15 @@ npm test --prefix tests/DncDbg.VsCodeTests
 ```
 
 See [VS Code integration testing](tests/DncDbg.VsCodeTests/README.md).
+
+### Mobile investigation (not supported debugger targets)
+
+The isolated [`DncDbg.Remote` experiment](docs/experimental-mobile-debugging.md)
+adds a versioned transport precursor and a separately built
+[MAUI fixture](tests/DncDbg.MauiTestApp/README.md). Desktop breakpoint transport
+proof is not mobile-debugger proof: public startup/runtime blockers remain, and
+mobile execution control is deliberately unavailable. The normal DAP debugger
+does not enable or depend on the experiment.
 
 ## Usage
 

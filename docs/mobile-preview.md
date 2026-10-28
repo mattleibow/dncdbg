@@ -63,9 +63,16 @@ to the desktop engine.
 
 ## Transport and lifecycle
 
-- **Android debugger:** `adb -s SERIAL forward --no-rebind tcp:0 tcp:TARGET`
-  allocates a host port dynamically for the target's dynamically allocated,
-  loopback-only debugger listener. Cleanup removes only that owned local port.
+- **Android debugger:** first allocate with
+  `adb -s SERIAL forward --no-rebind tcp:0 localabstract:dncdbg-UNIQUE_NONCE`,
+  then rebind only that acquired host port to `tcp:TARGET`, the target's
+  dynamically allocated, loopback-only debugger listener. The unique staging
+  destination is an ownership marker, not a device listener. If allocation is
+  canceled or errors after the daemon commits but before the CLI returns the
+  port, bounded rollback queries `adb forward --list` for that exact
+  serial/nonce and removes exactly its local port. Rebinding and normal disposal
+  already know that owned port; repeated cleanup does not remove it twice.
+  Rollback has an independent 10-second budget, not the canceled startup token.
   No fixed debugger port, `--remove-all`, global reset, or debugger `reverse`.
 - **iOS simulator:** direct host loopback networking, without a tunnel process.
 - `IMobileTunnel` is the route-ownership boundary for future device transports;
@@ -93,6 +100,10 @@ to the desktop engine.
   no later acquisition or process event is permitted after session closure.
 
 ## Typed model and feature boundary
+
+Module paging follows DAP: omitted or zero `moduleCount` returns all remaining
+modules from `startModule`; a positive count bounds the page. `totalModules`
+always describes the full snapshot, including for an empty out-of-range page.
 
 `src/DncDbg.Remote/contract.json` is the interface schema. Run
 `python3 src/DncDbg.Remote/generate_contract.py` after editing it; CI checks

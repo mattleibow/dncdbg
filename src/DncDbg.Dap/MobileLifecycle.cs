@@ -36,6 +36,7 @@ internal sealed class MobileCommands
                 process.Kill(entireProcessTree: true);
                 await process.WaitForExitAsync(CancellationToken.None);
             }
+            await Task.WhenAll(output, error);
         }
         string text = await output;
         string diagnostic = await error;
@@ -66,19 +67,65 @@ internal sealed class AdbTunnel(MobileCommands commands, string device) : IMobil
     private int ownedPort;
     public async Task<RemoteEndpoint> OpenAsync(RemoteEndpoint target, CancellationToken token)
     {
-        string result = await commands.RunAsync("adb",
-            ["-s", device, "forward", "--no-rebind", "tcp:0", $"tcp:{target.Port}"], token);
-        if (!int.TryParse(result, out int port) || port is < 1 or > 65535)
-            throw new InvalidDataException("ADB did not return the dynamically allocated debugger forward.");
-        ownedPort = port;
-        return target with { Port = port };
+        token.ThrowIfCancellationRequested();
+        // ADB commits in its daemon before the CLI returns the allocated port.
+        // A unique staging destination lets us recover ownership after a lost reply,
+        // even when other sessions forward to the same device/target TCP endpoint.
+        string allocation = $"localabstract:dncdbg-{Guid.NewGuid():N}";
+        try
+        {
+            string result = await commands.RunAsync("adb",
+                ["-s", device, "forward", "--no-rebind", "tcp:0", allocation], token);
+            if (!int.TryParse(result, out int port) || port is < 1 or > 65535)
+                throw new InvalidDataException("ADB did not return the dynamically allocated debugger forward.");
+            ownedPort = port;
+            token.ThrowIfCancellationRequested();
+            await commands.RunAsync("adb",
+                ["-s", device, "forward", $"tcp:{port}", $"tcp:{target.Port}"], token);
+            token.ThrowIfCancellationRequested();
+            return target with { Port = port };
+        }
+        catch (Exception acquisitionFailure)
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            try
+            {
+                if (ownedPort == 0)
+                {
+                    string forwards = await commands.RunAsync("adb", ["forward", "--list"], timeout.Token);
+                    foreach (string line in forwards.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+                    {
+                        string[] fields = line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+                        if (fields.Length == 3 && fields[0] == device && fields[2] == allocation &&
+                            fields[1].StartsWith("tcp:", StringComparison.Ordinal) &&
+                            int.TryParse(fields[1].AsSpan(4), out int port) && port is > 0 and <= 65535)
+                        {
+                            ownedPort = port;
+                            break;
+                        }
+                    }
+                }
+                await RemoveAsync(timeout.Token);
+            }
+            catch (Exception cleanupFailure)
+            {
+                throw new AggregateException("ADB forward acquisition and its bounded rollback failed.",
+                    acquisitionFailure, cleanupFailure);
+            }
+            throw;
+        }
     }
     public async ValueTask DisposeAsync()
     {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await RemoveAsync(timeout.Token);
+    }
+
+    private async Task RemoveAsync(CancellationToken token)
+    {
         int port = Interlocked.Exchange(ref ownedPort, 0);
         if (port == 0) return;
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-        await commands.RunAsync("adb", ["-s", device, "forward", "--remove", $"tcp:{port}"], timeout.Token);
+        await commands.RunAsync("adb", ["-s", device, "forward", "--remove", $"tcp:{port}"], token);
     }
 }
 

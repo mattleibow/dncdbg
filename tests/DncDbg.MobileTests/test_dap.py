@@ -310,8 +310,10 @@ class MobileDapTests(unittest.TestCase):
         self.dap.close()
         commands = [json.loads(x) for x in (self.state / "commands.jsonl").read_text().splitlines()]
         forwards = [c for c in commands if "forward" in c]
-        self.assertEqual(forwards, [["adb", "-s", "emulator-5556", "forward", "--no-rebind", "tcp:0",
-                                     f"tcp:{self.remote.endpoint['Port']}"],
+        self.assertRegex(forwards[0][-1], r"^localabstract:dncdbg-[0-9a-f]{32}$")
+        self.assertEqual(forwards, [["adb", "-s", "emulator-5556", "forward", "--no-rebind", "tcp:0", forwards[0][-1]],
+                                    ["adb", "-s", "emulator-5556", "forward",
+                                     f"tcp:{self.remote.endpoint['Port']}", f"tcp:{self.remote.endpoint['Port']}"],
                                     ["adb", "-s", "emulator-5556", "forward", "--remove",
                                      f"tcp:{self.remote.endpoint['Port']}"]])
         self.assertFalse(any("reverse" in c or "--remove-all" in c for c in commands))
@@ -579,7 +581,8 @@ class MobileDapTests(unittest.TestCase):
         self.dap.response(pending)
         self.dap.event("stopped")
         self.assertEqual(len(self.daemon.mappings()), len(self.daemon.baseline) + 1)
-        self.dap.request("disconnect")
+        self.dap.request("terminate")
+        self.dap.event("terminated")
         self.dap.request("disconnect")
         self.dap.close()
         self.assert_exact_rollback()

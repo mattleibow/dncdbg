@@ -25,7 +25,13 @@ and removes only its own UI mapping, including on failure.
 **real completed install** before the adapter can launch, then terminates during
 initial deployment and restart redeployment. It also uses uncatchable SIGKILL
 to simulate abrupt crashes of real running and stopped targets and verifies
-DAP/endpoint/forward cleanup. Its watchdog scenario
+DAP/endpoint/forward cleanup. Android additionally withholds the CLI response
+after a real daemon forward allocation and after rebinding, then cancels launch.
+Both require the exact acquired forward removed while preserving baseline
+mappings. Host contracts use an independent fake daemon to cover allocation
+cancellation/errors/malformed replies, duplicate cleanup and daemon/client
+process termination. Module paging is checked through both the host dispatcher
+and fresh real-device suites. The watchdog scenario
 requires explicit test-only builds:
 
 ```sh

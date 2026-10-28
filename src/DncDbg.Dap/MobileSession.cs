@@ -278,9 +278,9 @@ internal sealed class MobileSession : IDisposable
                 Require("modules");
                 RemoteModule[] modules = Wait(Client.RequestModulesAsync(new(), Token));
                 int start = request.Arguments?.TryGetProperty("startModule", out var s) == true ? s.GetInt32() : 0;
-                int count = request.Arguments?.TryGetProperty("moduleCount", out var c) == true ? c.GetInt32() : modules.Length;
+                int count = request.Arguments?.TryGetProperty("moduleCount", out var c) == true ? c.GetInt32() : 0;
                 if (start < 0 || count < 0) throw new ArgumentException("Invalid module page.");
-                return new { totalModules = modules.Length, modules = modules.Skip(start).Take(count).Select(Module).ToArray() };
+                return new { totalModules = modules.Length, modules = modules.Skip(start).Take(count > 0 ? count : modules.Length).Select(Module).ToArray() };
             }
             case "stackTrace":
             {

@@ -226,6 +226,17 @@ def main():
         dap.request("continue", {"threadId": paused["threadId"]})
         check(len(dap.request("threads")["threads"]) > 0 and dap.request("modules")["totalModules"] > 0,
               "DAP real thread/module snapshots")
+        modules = dap.request("modules")
+        total = modules["totalModules"]
+        ids = [module["id"] for module in modules["modules"]]
+        pages = [({}, ids), ({"moduleCount": 0}, ids),
+                 ({"startModule": 1}, ids[1:]), ({"startModule": 1, "moduleCount": 0}, ids[1:]),
+                 ({"startModule": 1, "moduleCount": 2}, ids[1:3]),
+                 ({"startModule": total + 1}, [])]
+        for arguments, expected in pages:
+            page = dap.request("modules", arguments)
+            assert page["totalModules"] == total and [module["id"] for module in page["modules"]] == expected, page
+        check(len(ids) == total, "module paging: omitted/zero all remaining, explicit counts, nonzero/out-of-range starts and totalModules")
         dap.request("restart")
         check(True, "default replaceExisting=false/uninstallOnDisconnect=false restarts its own installation")
         restored = dap.event("breakpoint")["breakpoint"]

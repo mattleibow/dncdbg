@@ -66,7 +66,10 @@ def main():
         return pending
 
     reports = []
-    for scenario in ("terminate-install", "terminate-redeploy", "crash-running", "crash-stopped", "watchdog"):
+    scenarios = ["terminate-install", "terminate-redeploy", "crash-running", "crash-stopped", "watchdog"]
+    if args.platform == "android":
+        scenarios[2:2] = ["terminate-forward-allocation", "terminate-forward-rebind"]
+    for scenario in scenarios:
         output = args.output / scenario
         output.mkdir(exist_ok=True)
         checks = []
@@ -92,6 +95,8 @@ def main():
                 env |= {"PATH": str(tools) + os.pathsep + base_env["PATH"], "DNCDBG_INSTALL_GATE": str(output),
                         "DNCDBG_INSTALL_GATE_TOOL": adb if args.platform == "android" else xcrun,
                         "DNCDBG_INSTALL_GATE_NUMBER": "2" if scenario == "terminate-redeploy" else "1"}
+                if scenario.startswith("terminate-forward-"):
+                    env["DNCDBG_FORWARD_GATE_STAGE"] = scenario.removeprefix("terminate-forward-")
             dap = Dap(env, timeout=120)
             dap.request("initialize", {"adapterID": "dncdbg"})
             if scenario.startswith("terminate-"):
@@ -102,22 +107,26 @@ def main():
                 else:
                     pending = launch(dap, uninstall=True, start=False)
                 deadline = time.monotonic() + 90
-                while not (output / "install-blocked").exists():
+                forward_gate = scenario.startswith("terminate-forward-")
+                barrier = "forward" if forward_gate else "install"
+                while not (output / f"{barrier}-blocked").exists():
                     if time.monotonic() >= deadline:
-                        raise TimeoutError("The real install did not reach its barrier.")
+                        raise TimeoutError(f"The real {barrier} did not reach its barrier.")
                     time.sleep(0.02)
+                if forward_gate:
+                    verify(len(forwards() - baseline) == 1, "real ADB daemon committed one forward before its CLI reply")
                 before = len((output / "commands.jsonl").read_text().splitlines())
                 started = time.monotonic()
                 dap.request("terminate")
-                (output / "release-install").touch()
+                (output / f"release-{barrier}").touch()
                 dap.event("terminated")
                 dap.response(pending, success=False)
-                verify(time.monotonic() - started < 15, "termination settles deployment within 15 seconds")
+                verify(time.monotonic() - started < 15, "termination settles acquisition within 15 seconds")
                 dap.close()
                 later = [json.loads(row) for row in (output / "commands.jsonl").read_text().splitlines()[before:]]
                 verify(not any("launch" in row or ("start" in row and "--es" in row) for row in later),
-                       "no app launch after interrupted real installation")
-                verify(not any("forward" in row and "--remove" not in row for row in later),
+                       "no app launch after interrupted real acquisition")
+                verify(not any("forward" in row and "--remove" not in row and "--list" not in row for row in later),
                        "no debugger forward/client acquisition after closure")
                 while not dap.messages.empty():
                     dap.history.append(dap.messages.get_nowait())

@@ -209,7 +209,26 @@ def main(adapter, lldb):
             threadId=run_stop["threadId"] + 1,
             targetId=native_target["id"],
         ), success=False)
-        session.request("stepIn", dict(threadId=run_stop["threadId"], targetId=native_target["id"]))
+        session.request("setBreakpoints", dict(
+            source=dict(path=str(FIXTURE / "native.c")),
+            breakpoints=[],
+        ))
+        invalidated = session.event("invalidated")
+        check(set(invalidated["areas"]) >= {"stacks", "variables"}, str(invalidated))
+        session.request("stepIn", dict(
+            threadId=run_stop["threadId"],
+            targetId=native_target["id"],
+        ), success=False)
+        refreshed_run_stack = session.request("stackTrace", dict(threadId=run_stop["threadId"]))
+        refreshed_run = refreshed_run_stack["stackFrames"][0]
+        refreshed_targets = session.request("stepInTargets", dict(frameId=refreshed_run["id"]))["targets"]
+        refreshed_native_target = next((target for target in refreshed_targets
+                                        if target["label"] == "native_callback_roundtrip (mixedfixture)"), None)
+        check(refreshed_native_target is not None and len(refreshed_targets) == 1, str(refreshed_targets))
+        session.request("stepIn", dict(
+            threadId=run_stop["threadId"],
+            targetId=refreshed_native_target["id"],
+        ))
         native_step = session.event("stopped")
         check(native_step["threadId"] == run_stop["threadId"], str(native_step))
         native_step_stack = session.request("stackTrace", dict(threadId=native_step["threadId"]))

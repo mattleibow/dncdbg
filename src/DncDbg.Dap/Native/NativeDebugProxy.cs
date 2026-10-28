@@ -53,6 +53,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
     private readonly Dictionary<string, List<ManagedBreakpointState>> _managedBreakpoints = new(StringComparer.Ordinal);
     private readonly Dictionary<int, int> _managedBackendBreakpointIds = [];
     private readonly Dictionary<int, ManagedNativeStepTarget> _managedStepTargets = [];
+    private readonly HashSet<int> _issuedManagedStepTargetIds = [];
     private readonly CancellationTokenSource _lifetime = new();
     private readonly List<CancellationTokenSource> _retiredTokens = [];
     private CancellationTokenSource _snapshotCancellation = new();
@@ -264,6 +265,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
                     foreach (ManagedNativeStepInTarget target in targets)
                     {
                         int targetId = ++_nextManagedStepTargetId;
+                        _issuedManagedStepTargetIds.Add(targetId);
                         _managedStepTargets[targetId] = new ManagedNativeStepTarget(
                             targetId, target.Library, target.EntryPoint, frame.ThreadId,
                             frame.NativeId, stop, inspection);
@@ -413,6 +415,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         _selectedNativeFrame = null;
         _transitionStep = null;
         _managedStepTargets.Clear();
+        _issuedManagedStepTargetIds.Clear();
         lock (_managedBreakpointLock)
         {
             _managedBreakpoints.Clear();
@@ -565,9 +568,6 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         lock (_managedBreakpointLock)
         {
             _managedBreakpoints.TryGetValue(path, out List<ManagedBreakpointState>? previous);
-            if (stopped && previous != null)
-                DeleteManagedBackendBreakpoints(native, previous, strict: true);
-
             var reused = new HashSet<int>();
             created = requested.Select(item =>
             {
@@ -576,11 +576,13 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
                 int? column = source["column"]?.GetValue<int>();
                 int normalizedLine = _linesStartAt1 ? line : line + 1;
                 int? normalizedColumn = column is null or 0 ? column : _columnsStartAt1 ? column : column + 1;
-                ManagedBreakpointState? old = previous?.FirstOrDefault(b =>
-                    b.RequestedLine == normalizedLine && b.RequestedColumn == normalizedColumn && reused.Add(b.Id));
                 string? unsupported = source["condition"] != null || source["hitCondition"] != null || source["logMessage"] != null
                     ? "Conditions, hit conditions, and logpoints are not yet supported for LLDB-owned managed source breakpoints."
                     : normalizedLine <= 0 ? "Source lines start at 1." : null;
+                ManagedBreakpointState? old = previous?.FirstOrDefault(b =>
+                    b.RequestedLine == normalizedLine && b.RequestedColumn == normalizedColumn && reused.Add(b.Id));
+                if (old != null && old.Unsupported == unsupported)
+                    return old;
                 return new ManagedBreakpointState
                 {
                     Id = old?.Id ?? ++_nextManagedBreakpointId,
@@ -590,6 +592,8 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
                     Unsupported = unsupported,
                 };
             }).ToList();
+            if (stopped && previous != null)
+                DeleteManagedBackendBreakpoints(native, previous.Where(old => !created.Contains(old)), strict: true);
             if (created.Count == 0)
                 _managedBreakpoints.Remove(path);
             else
@@ -773,10 +777,18 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         if (arguments["targetId"] is not JsonValue value || !value.TryGetValue<int>(out int targetId))
             return false;
         ManagedNativeStepTarget? target;
+        bool issued;
         lock (_state)
+        {
             _managedStepTargets.TryGetValue(targetId, out target);
+            issued = _issuedManagedStepTargetIds.Contains(targetId);
+        }
         if (target == null)
+        {
+            if (issued)
+                throw new DebuggerException("The selected managed/native StepIn target is stale.");
             return false;
+        }
         if (target.Stop != stop || target.Inspection != inspection)
             throw new DebuggerException("The selected managed/native StepIn target is stale.");
         int threadId = Integer(arguments, "threadId");
@@ -784,14 +796,15 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
             throw new DebuggerException("The selected managed/native StepIn target belongs to a different active frame.");
         if (!Regex.IsMatch(target.EntryPoint, @"^[A-Za-z_?$@][A-Za-z0-9_?$@.]*$", RegexOptions.CultureInvariant))
             throw new DebuggerException("The P/Invoke entry point cannot be represented safely as an LLDB symbol.");
-        string library = NativeLibraryName(target.Library);
+        string library = ResolveNativeLibraryName(native, target.Library)
+            ?? throw new DebuggerException($"The P/Invoke library '{target.Library}' is not loaded in the native target.");
         if (!Regex.IsMatch(library, @"^[A-Za-z0-9_.+-]+$", RegexOptions.CultureInvariant))
             throw new DebuggerException("The P/Invoke library cannot be represented safely as an LLDB module.");
         JsonElement body = LldbSnapshotTarget.Body(native.Request("evaluate", new
         {
             expression = $"`breakpoint set --one-shot true --name \"{target.EntryPoint}\" --shlib \"{library}\" --thread-id {threadId}",
             context = "repl",
-        }, OperationToken()));
+        }, SessionToken()));
         string result = body.TryGetProperty("result", out JsonElement resultValue)
             ? resultValue.GetString() ?? "" : "";
         Match match = Regex.Match(result, @"\bBreakpoint (?<id>[1-9][0-9]*):", RegexOptions.CultureInvariant);
@@ -822,14 +835,40 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
             && id.TryGetInt64(out long top) && top == frameId;
     }
 
-    private static string NativeLibraryName(string import)
+    private string? ResolveNativeLibraryName(NativeAdapterSession native, string import)
     {
-        string name = Path.GetFileName(import);
-        if (Path.HasExtension(name))
+        JsonElement modules = LldbSnapshotTarget.Body(native.Request("modules", new { }, OperationToken()))
+            .GetProperty("modules");
+        string wanted = NormalizeLibrary(import);
+        foreach (JsonElement module in modules.EnumerateArray())
+        {
+            string? name = module.TryGetProperty("name", out JsonElement nameValue)
+                ? nameValue.GetString() : null;
+            string? path = module.TryGetProperty("path", out JsonElement pathValue)
+                ? pathValue.GetString() : null;
+            if (name != null && NormalizeLibrary(name) == wanted)
+                return name;
+            if (path != null && NormalizeLibrary(path) == wanted)
+                return Path.GetFileName(path);
+        }
+        return null;
+
+        static string NormalizeLibrary(string value)
+        {
+            string name = Path.GetFileName(value).ToLowerInvariant();
+            if (name.StartsWith("lib", StringComparison.Ordinal))
+                name = name[3..];
+            foreach (string marker in new[] { ".framework", ".dylib", ".dll", ".so" })
+            {
+                int index = name.IndexOf(marker, StringComparison.Ordinal);
+                if (index >= 0)
+                {
+                    name = name[..index];
+                    break;
+                }
+            }
             return name;
-        if (OperatingSystem.IsWindows())
-            return name + ".dll";
-        return "lib" + name + (OperatingSystem.IsMacOS() ? ".dylib" : ".so");
+        }
     }
 
     private bool TryPlanManagedStepOut(NativeAdapterSession native, JsonObject arguments)
@@ -845,7 +884,13 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         if (frames.Length == 0)
             return false;
 
-        IReadOnlyList<ManagedInspectionFrame> managed = Inspection().GetStackTrace(threadId);
+        IReadOnlyList<ManagedInspectionFrame> managed;
+        try { managed = Inspection().GetStackTrace(threadId); }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            log("Managed transition StepOut unavailable; forwarding native StepOut: " + error.Message);
+            return false;
+        }
         HashSet<ulong> managedPcs = managed.Select(frame => frame.InstructionPointer).ToHashSet();
         if (!TryInstructionPointer(frames[0], out ulong top) || !managedPcs.Contains(top))
             return false;
@@ -1286,6 +1331,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
     }
 
     private CancellationToken OperationToken() { lock (_state) return _operation?.Token ?? _lifetime.Token; }
+    private CancellationToken SessionToken() { lock (_state) return _sessionCancellation.Token; }
     private long StopEpoch() { lock (_state) return _stop; }
     private long InspectionEpoch() { lock (_state) return _inspectionEpoch; }
     private long Session() => Interlocked.Read(ref _session);

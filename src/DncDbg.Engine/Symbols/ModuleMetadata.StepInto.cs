@@ -129,19 +129,6 @@ internal sealed partial class ModuleMetadata
         if (import.Module.IsNil)
             return null;
         string entryPoint = import.Name.IsNil ? _md.GetString(method.Name) : _md.GetString(import.Name);
-        if (OperatingSystem.IsWindows() && (((int)import.Attributes & 1) == 0))
-        {
-            string? suffix = ((int)import.Attributes & 6) switch
-            {
-                2 => "A",
-                4 or 6 => "W",
-                _ => null,
-            };
-            if (suffix == null)
-                return null;
-            if (!entryPoint.EndsWith(suffix, StringComparison.Ordinal))
-                entryPoint += suffix;
-        }
         string library = _md.GetString(_md.GetModuleReference(import.Module).Name);
         return new PInvokeTarget(library, entryPoint);
     }

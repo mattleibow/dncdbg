@@ -140,6 +140,9 @@ Managed-to-native StepIn GREEN:
   `stepInTargets` publishes that exact entry point. Selecting the target installs
   an LLDB-owned one-shot symbol breakpoint qualified by libmixedfixture.dylib
   and scoped to the original OS thread. A different-thread reuse is rejected.
+  A native breakpoint mutation invalidates the stop snapshot; reusing the old
+  managed target ID is rejected as stale, then a refreshed top-frame target is
+  required.
   The accepted target resumes, removes the internal breakpoint ID, and reports
   one reason=step stop on the original thread with native_callback_roundtrip as
   the top native.cpp frame. Querying native stepInTargets at that stop must not

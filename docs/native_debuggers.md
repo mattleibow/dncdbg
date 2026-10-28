@@ -642,8 +642,15 @@ retained managed callback breakpoint. This proves the C# P/Invoke → C++
 direction without giving CoreCLR execution ownership. The library and symbol
 must already be loaded and resolve to one address. Indirect function pointers,
 delegate/function-address creation, runtime-generated interop stubs without a
-metadata import, ambiguous symbols, and unsupported Windows name mangling are
-not offered as StepIn targets.
+metadata import are not offered. Loaded-library lookup, ambiguous symbols and
+Windows A/W name-mangling that differs from the metadata entry point are
+rejected when the target is selected.
+
+The experimental `initialize.dncdbg` capability object reports
+`requiresManagedInspection`, `supportsManagedSourceBreakpoints`,
+`supportsManagedNativeStepInTargets`, `supportsManagedNativeStepOut`, and
+`supportsNativeToManagedStepIn`. These describe available opt-in LLDB features,
+not the current launch mode; `supportsNativeToManagedStepIn` remains false.
 
 Native-to-managed callback `StepIn` is still a separate unfinished slice. The public
 ARM64 CoreCLR path was traced through the delegate thunk,

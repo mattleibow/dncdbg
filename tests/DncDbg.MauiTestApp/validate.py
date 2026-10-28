@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -18,9 +19,46 @@ PROJECT = "tests/DncDbg.MauiTestApp"
 EVIDENCE = ROOT / "build/validation/mobile/net11-default"
 
 
+def start_owned(*args, **kwargs):
+    if os.name != "posix":
+        raise RuntimeError("The mobile runner requires POSIX process-group ownership")
+    return subprocess.Popen(*args, start_new_session=True, **kwargs)
+
+
+def stop_owned(process):
+    def signal_group(value):
+        try:
+            os.killpg(process.pid, value)
+            return True
+        except ProcessLookupError:
+            return False
+
+    # The leader may already have exited while its debugger/CLI child is alive.
+    if signal_group(signal.SIGTERM):
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            process.poll()
+            if not signal_group(0):
+                break
+            time.sleep(0.02)
+        else:
+            signal_group(signal.SIGKILL)
+    process.wait(timeout=1)
+    deadline = time.monotonic() + 1
+    while signal_group(0):
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"Owned process group {process.pid} remained after termination")
+        time.sleep(0.02)
+
+
 def run(*args, env=None, check=True, input=None, timeout=180, log=None, cwd=ROOT):
-    result = subprocess.run(args, cwd=cwd, env=env, input=input, text=True,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+    with start_owned(args, cwd=cwd, env=env, text=True, stdin=subprocess.PIPE if input is not None else None,
+                     stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
+        try:
+            stdout, stderr = process.communicate(input, timeout=timeout)
+            result = subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
+        finally:
+            stop_owned(process)
     if log:
         (EVIDENCE / log).write_text(result.stdout + result.stderr)
     if check and result.returncode:
@@ -121,6 +159,9 @@ def main():
                 device("reverse", "tcp:19223", "tcp:19223")
                 added_reverse = True
 
+        run("dotnet", "build", "tests/DncDbg.RemoteTests", "-c", "Release", "--nologo", "-v:q",
+            timeout=180, log=f"{prefix}-host-build.log")
+        helper = ["dotnet", str(ROOT / "tests/DncDbg.RemoteTests/bin/Release/net10.0/DncDbg.RemoteTests.dll")]
         env = os.environ.copy()
         if args.build_developer_dir:
             env["DEVELOPER_DIR"] = args.build_developer_dir
@@ -193,7 +234,7 @@ def main():
         (EVIDENCE / f"{prefix}-native-assets.json").write_text(json.dumps(native_assets, indent=2) + "\n")
         if args.diagnostic_trace:
             trace_output = (EVIDENCE / f"{prefix}-diagnostic-trace.log").open("w")
-            tracer = subprocess.Popen(
+            tracer = start_owned(
                 ["dotnet-trace", "collect", "--diagnostic-port", str(diagnostic_socket),
                  "--duration", "00:00:00:02", "--profile", "dotnet-sampled-thread-time",
                  "--output", str(EVIDENCE / f"{prefix}-diagnostic.nettrace")],
@@ -206,7 +247,7 @@ def main():
             if diagnostic_tcp_port is not None:
                 router_path = shutil.which("dotnet-dsrouter") or str(ROOT / "build/tools/dotnet-dsrouter")
                 router_output = (EVIDENCE / f"{prefix}-diagnostic-router.log").open("w")
-                router = subprocess.Popen(
+                router = start_owned(
                     [router_path, "client-server", "-ipcc", str(diagnostic_socket),
                      "-tcps", f"127.0.0.1:{diagnostic_tcp_port}", "-rt", "120", "-v", "debug"],
                     cwd=ROOT, stdout=router_output, stderr=subprocess.STDOUT, text=True)
@@ -299,7 +340,7 @@ def main():
             proof = ["--mobile-proof", str(forwarded_file), str(fixture / "MainPage.xaml.cs"),
                      str(output / "DncDbg.MauiTestApp.dll"), str(output / "DncDbg.MauiTestApp.pdb"),
                      str(port), "disconnect" if args.private_disconnect else "continue"]
-        capability_result = run("dotnet", "run", "--project", "tests/DncDbg.RemoteTests", "--", *proof,
+        capability_result = run(*helper, *proof,
                                 timeout=90, log=f"{prefix}-remote-capability.log")
         native_cleanup = None
         if args.private_bootstrap:
@@ -314,10 +355,10 @@ def main():
                     if not any(row["Phase"] == "cleanup-detach-return" and row["HResult"] == "0x00000000" for row in phases):
                         raise RuntimeError("The native owner finished without successful target detach")
                     native_cleanup = "owner finished, callback/frame leases released, listener closed, DBI terminated"
-                    if prefix == "ios":
-                        with socket.socket() as verify:
-                            if verify.connect_ex(("127.0.0.1", endpoint["Port"])) == 0:
-                                raise RuntimeError("Native listener remained open after cleanup")
+                    with socket.socket() as verify:
+                        verify.settimeout(1)
+                        if verify.connect_ex(("127.0.0.1", endpoint["Port"])) == 0:
+                            raise RuntimeError("Native listener remained open after cleanup")
                     break
                 if time.monotonic() >= cleanup_deadline:
                     raise RuntimeError("Native owner did not prove bounded cleanup; inspect its preserved phase log")
@@ -341,7 +382,7 @@ def main():
                 host_libraries = Path(run("which", "dotnet").stdout.strip()).resolve().parent / "shared/Microsoft.NETCore.App" / startup["Runtime"].removeprefix(".NET ")
                 for name, libraries in (("default", None), ("target", target_libraries), ("host", host_libraries)):
                     destination = EVIDENCE / f"ios-startup-{name}.json"
-                    command = ["dotnet", "run", "--project", "tests/DncDbg.RemoteTests", "--", "--startup-probe",
+                    command = [*helper, "--startup-probe",
                                str(status["app"]["processId"]), str(target_libraries / "libcoreclr.dylib"), str(destination)]
                     if libraries:
                         command += ["--libraries", str(libraries)]
@@ -361,7 +402,7 @@ def main():
                 diagnostic_trace = {"Timeout": True, "Connected": False}
         public_attach = None
         if args.public_attach_probe:
-            probe = run("dotnet", "run", "--project", "tests/DncDbg.RemoteTests", "--", "--attach-probe",
+            probe = run(*helper, "--attach-probe",
                         str(status["app"]["processId"]), env=probe_env, check=False, timeout=60, log="ios-public-attach-probe.log")
             public_attach = json.loads(next(line for line in probe.stdout.splitlines() if line.startswith("{")))
             if probe.returncode not in (0, 2):
@@ -394,7 +435,7 @@ def main():
                 cleanup(lambda: device("logcat", "-d", "--pid", str(target_pid), "-t", "2000", log="android-target-logcat.log"))
             if args.private_bootstrap:
                 # Preserve native phase evidence even if DBI crashed the target before DevFlow connected.
-                for name in ("dncdbg-private-preflight.json", "dncdbg-private-startup.jsonl"):
+                def preserve_native(name):
                     if prefix == "ios":
                         saved_container = run("xcrun", "simctl", "get_app_container", args.device, APP, "data", check=False)
                         if saved_container.returncode == 0:
@@ -405,26 +446,18 @@ def main():
                         saved = device("exec-out", "run-as", APP, "cat", f"files/{name}", check=False)
                         if saved.returncode == 0:
                             (EVIDENCE / f"{prefix}-{name}").write_text(saved.stdout)
+                for name in ("dncdbg-private-preflight.json", "dncdbg-private-startup.jsonl"):
+                    cleanup(lambda name=name: preserve_native(name))
             if prefix == "ios":
                 cleanup(lambda: run("xcrun", "simctl", "terminate", args.device, APP, check=False))
                 cleanup(lambda: run("xcrun", "simctl", "uninstall", args.device, APP))
             else:
                 cleanup(lambda: device("shell", "am", "force-stop", APP))
                 cleanup(lambda: device("uninstall", APP))
-        if tracer is not None and tracer.poll() is None:
-            tracer.terminate()
-            try:
-                tracer.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                tracer.kill()
-                tracer.wait(timeout=5)
-        if router is not None and router.poll() is None:
-            router.terminate()
-            try:
-                router.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                router.kill()
-                router.wait(timeout=5)
+        if tracer is not None:
+            cleanup(lambda: stop_owned(tracer))
+        if router is not None:
+            cleanup(lambda: stop_owned(router))
         if trace_output is not None:
             trace_output.close()
         if router_output is not None:
@@ -441,6 +474,42 @@ def main():
             cleanup(lambda: device("reverse", "--remove", f"tcp:{diagnostic_tcp_port}"))
         for path in [endpoint_file, forwarded_file]:
             cleanup(lambda path=path: path.unlink(missing_ok=True))
+
+        def verify_cleanup():
+            if installed:
+                if prefix == "ios":
+                    if run("xcrun", "simctl", "get_app_container", args.device, APP, "app", check=False).returncode == 0:
+                        raise RuntimeError("Owned iOS fixture remained installed")
+                    if target_pid:
+                        try:
+                            os.kill(target_pid, 0)
+                        except ProcessLookupError:
+                            pass
+                        else:
+                            raise RuntimeError("Owned iOS fixture PID remained alive")
+                else:
+                    if device("shell", "pidof", APP, check=False).stdout.strip():
+                        raise RuntimeError("Owned Android fixture PID remained alive")
+                    if device("shell", "pm", "path", APP, check=False).stdout.strip().startswith("package:"):
+                        raise RuntimeError("Owned Android fixture remained installed")
+            if prefix == "android":
+                mappings = run(adb, "forward", "--list").stdout.splitlines()
+                if any(row.startswith(f"{args.device} tcp:{port} ") for row in mappings for port in forwards):
+                    raise RuntimeError("Owned ADB forward remained")
+                reverse = device("reverse", "--list").stdout
+                if added_reverse and "tcp:19223 tcp:19223" in reverse:
+                    raise RuntimeError("Owned broker reverse remained")
+                if diagnostic_reverse_added and f"tcp:{diagnostic_tcp_port} tcp:{diagnostic_tcp_port}" in reverse:
+                    raise RuntimeError("Owned diagnostic reverse remained")
+            if any(path.exists() for path in (endpoint_file, forwarded_file)):
+                raise RuntimeError("Owned endpoint descriptor remained")
+            (EVIDENCE / f"{prefix}-cleanup.json").write_text(json.dumps({
+                "fixture_uninstalled": installed, "owned_app_pid_gone": True,
+                "owned_host_process_groups_gone": True, "owned_adb_mappings_removed": True,
+                "endpoint_descriptors_removed": True, "errors": cleanup_errors,
+            }, indent=2) + "\n")
+
+        cleanup(verify_cleanup)
         if cleanup_errors:
             raise RuntimeError("Cleanup incomplete: " + "; ".join(cleanup_errors))
 

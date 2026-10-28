@@ -526,7 +526,9 @@ void* Run(void*) {
                 }
                 wire.Reply(request, result);
             } catch (const nlohmann::json::exception&) {
-                Report("MalformedPayload", Fail);
+                // Validation can already have mutated command state. Fail closed:
+                // EOF and owner cleanup, never consume a sequence and silently wait.
+                throw std::runtime_error("MalformedPayload");
             } catch (const std::exception& error) {
                 if (std::strcmp(error.what(), "InvalidState") != 0) throw;
                 wire.Reply(request, Json::object(), "InvalidState");

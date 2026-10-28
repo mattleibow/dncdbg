@@ -62,7 +62,22 @@ Portable/native negative checks (neither is mobile proof):
 ```sh
 dotnet run --project tests/DncDbg.RemoteTests -c Release
 python3 src/DncDbg.Remote.Target/build.py --test-host
+python3 tests/DncDbg.MauiTestApp/test_validate.py
 ```
+
+The POSIX mobile runner builds the host helper once, then invokes its DLL
+directly (no `dotnet run` launcher). Every command and the diagnostic helpers
+own a fresh process group; timeout, error and normal completion terminate any
+remaining descendants, with bounded SIGTERM/SIGKILL escalation. The host-only
+regression spawns a waiting parent/child and TCP listener, forces a timeout and
+requires both PIDs and the listener gone within five seconds.
+
+Authenticated native JSON payload errors fail closed: the owner closes the
+connection immediately (EOF, not an uncorrelated or missing reply), consumes an
+outstanding stop once and cleans/detaches. A payload may have partially changed
+state before validation throws, so it is not safe to continue the session.
+Native contract tests require EOF or a correlated `MalformedPayload` within one
+second, both idle and stopped, with exact-once cleanup.
 
 ## Portable protocol and actual desktop breakpoint test
 

@@ -98,6 +98,14 @@ frames expire on continue/disconnect. The portable lease implementation also
 encodes non-reused connection generations. Duplicate continue/release is an
 error, not another runtime operation.
 
+Malformed authenticated JSON payloads close the connection immediately with
+EOF and run the same exact-once cleanup. They do not consume a sequence and
+silently wait for another request. Fail-closed is deliberate: command validation
+can already have partially mutated state when JSON conversion throws. Host
+contracts require malformed `Release` without `Handles` to finish within one
+second, both idle and with an outstanding stop, and verify continue/detach and
+every retained reference exactly once.
+
 Handshake/read/write/stop waits are bounded (5/30 seconds; initial host wait
 120 seconds). EOF, cancellation and timeout consume an outstanding stop once,
 deactivate the breakpoint, release leases, detach, terminate the DBI object and

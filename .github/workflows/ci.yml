@@ -65,7 +65,9 @@ jobs:
 
       - name: Check native target ownership contracts (no mobile runtime)
         if: runner.os != 'Windows'
-        run: python3 src/DncDbg.Remote.Target/build.py --test-host
+        run: |
+          python3 tests/DncDbg.MauiTestApp/test_validate.py
+          python3 src/DncDbg.Remote.Target/build.py --test-host
 
       - name: Run smoke and acceptance tests
         shell: pwsh

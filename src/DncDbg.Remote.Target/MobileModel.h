@@ -185,6 +185,13 @@ Json ModelSetBreakpoints(const Json& request) {
     return result;
 }
 Json ModelStackFrame(Frame* frame, uint32_t token, uint32_t offset, int64_t handle) {
+    if (catalog.empty()) {
+        bool matches = !location.is_null() && MatchesFrame(frame, token);
+        return {{"Handle", handle}, {"Name", matches ? location.at("Method") : Json("method " + std::to_string(token))},
+            {"Source", matches ? breakpoints.at("Source") : Json(nullptr)},
+            {"Line", matches && offset == location.at("IlOffset").get<uint32_t>() ? breakpoints.at("Lines")[0] : Json(0)},
+            {"StopId", stopId}, {"MethodToken", token}, {"IlOffset", offset}};
+    }
     Ref<Function> function;
     Ref<Module> module;
     Require(frame->GetFunction(&function.value)); Require(function.value->GetModule(&module.value));
@@ -198,35 +205,72 @@ Json ModelStackFrame(Frame* frame, uint32_t token, uint32_t offset, int64_t hand
         {"Source", point.is_null() ? Json(nullptr) : point.at("Source")}, {"Line", point.is_null() ? Json(0) : point.at("Line")},
         {"StopId", stopId}, {"Mvid", mvid}, {"MethodToken", token}, {"IlOffset", offset}};
 }
-Json ModelFullStack() {
+Json ModelFullStack(const Json& request) {
+    int start = request.value("Start", 0), count = request.value("Count", 0);
+    if (start < 0 || count < 0) throw std::runtime_error("InvalidState");
+    if (count > 4096) throw std::runtime_error("StackPageLimit");
+    constexpr uint32_t scanLimit = 16384;
+    struct Selection {
+        Frame* frame;
+        uint32_t token, offset;
+    };
+    struct Page {
+        std::vector<Selection> selected;
+        ~Page() { for (auto& entry : selected) entry.frame->Release(); }
+    } page;
     Ref<ChainEnum> chains;
     Require(static_cast<Thread*>(stoppedThread)->EnumerateChains(reinterpret_cast<Unknown**>(&chains.value)));
-    Json result = Json::array();
-    for (int c = 0; c < 128 && result.size() < 128; ++c) {
+    if (!chains.value) throw std::runtime_error("InvalidStackEnumeration");
+    uint32_t chainCount = 0, scanned = 0, total = 0;
+    while (true) {
         Ref<Chain> chain;
         uint32_t fetched = 0;
         Require(chains.value->Next(1, &chain.value, &fetched));
         if (!fetched) break;
+        if (fetched != 1 || !chain.value) throw std::runtime_error("InvalidStackEnumeration");
+        if (++chainCount > scanLimit) throw std::runtime_error("StackLimit");
         Bool managed = 0; Require(chain.value->IsManaged(&managed));
         if (!managed) continue;
         Ref<FrameEnum> entries;
         Require(chain.value->EnumerateFrames(&entries.value));
-        while (result.size() < 128) {
+        if (!entries.value) throw std::runtime_error("InvalidStackEnumeration");
+        while (true) {
             Ref<Frame> frame;
+            fetched = 0;
             Require(entries.value->Next(1, &frame.value, &fetched));
             if (!fetched) break;
+            if (fetched != 1 || !frame.value) throw std::runtime_error("InvalidStackEnumeration");
+            if (++scanned > scanLimit) throw std::runtime_error("StackLimit");
             Ref<ILFrame> il;
             uint32_t token = 0, offset = 0, mapping = 0;
-            if (frame.value->QueryInterface(ILFrameId, reinterpret_cast<void**>(&il.value)) < 0 ||
-                frame.value->GetFunctionToken(&token) < 0 || il.value->GetIP(&offset, &mapping) < 0) continue;
-            if (frames.size() + modelLeases.size() >= 4096) throw std::runtime_error("HandleLimit");
-            int64_t handle = NewId();
-            Json row = ModelStackFrame(frame.value, token, offset, handle);
-            frame.value->AddRef(); frames.emplace(handle, frame.value);
-            result.push_back(std::move(row));
+            HResult hr = frame.value->QueryInterface(ILFrameId, reinterpret_cast<void**>(&il.value));
+            if (hr == static_cast<HResult>(0x80004002)) continue; // Non-IL runtime frames are outside this model.
+            Require(hr);
+            if (!il.value) throw std::runtime_error("InvalidStackEnumeration");
+            Require(frame.value->GetFunctionToken(&token)); Require(il.value->GetIP(&offset, &mapping));
+            uint32_t index = total++;
+            if (index < static_cast<uint32_t>(start) || (count && page.selected.size() >= static_cast<size_t>(count))) continue;
+            if (frames.size() + modelLeases.size() + page.selected.size() >= 4096) throw std::runtime_error("HandleLimit");
+            page.selected.push_back({frame.value, token, offset});
+            frame.value = nullptr;
         }
     }
-    return result;
+    Json result = Json::array();
+    for (auto& entry : page.selected)
+        result.push_back(ModelStackFrame(entry.frame, entry.token, entry.offset, NewId()));
+    try {
+        for (size_t i = 0; i < page.selected.size(); ++i) {
+            frames.emplace(result[i].at("Handle").get<int64_t>(), page.selected[i].frame);
+            page.selected[i].frame->AddRef();
+        }
+    } catch (...) {
+        for (auto& row : result) {
+            auto found = frames.find(row.at("Handle").get<int64_t>());
+            if (found != frames.end()) { found->second->Release(); frames.erase(found); }
+        }
+        throw;
+    }
+    return {{"Frames", std::move(result)}, {"TotalFrames", total}, {"Complete", true}};
 }
 int64_t Lease(Unknown* value, bool scope = false, Json variables = nullptr) {
     if (modelLeases.size() + frames.size() >= 4096) throw std::runtime_error("HandleLimit");
@@ -259,6 +303,18 @@ template<class T> std::string FloatingText(T value) {
     if (!text) throw std::runtime_error("ValueFormattingFailed");
     return text.str();
 }
+uint32_t ArrayCount(ArrayValue* array) {
+    uint32_t count = 0, rank = 0;
+    Require(array->GetRank(&rank));
+    if (rank != 1) throw std::runtime_error("UnsupportedArrayRank");
+    Bool lower = 0; Require(array->HasBaseIndicies(&lower));
+    if (lower) {
+        uint32_t index = 0; Require(array->GetBaseIndicies(rank, &index));
+        if (index != 0) throw std::runtime_error("UnsupportedArrayBounds");
+    }
+    Require(array->GetCount(&count));
+    return count;
+}
 Json Describe(Value* original, const std::string& name = "") {
     Ref<Value> value;
     Dereference(original, value);
@@ -278,14 +334,7 @@ Json Describe(Value* original, const std::string& name = "") {
     }
     Ref<ArrayValue> array;
     if (value.value->QueryInterface(ArrayValueId, reinterpret_cast<void**>(&array.value)) >= 0 && array.value) {
-        uint32_t count = 0, rank = 0;
-        Require(array.value->GetRank(&rank)); Require(array.value->GetCount(&count));
-        if (rank != 1) throw std::runtime_error("UnsupportedArrayRank");
-        Bool lower = 0; Require(array.value->HasBaseIndicies(&lower));
-        if (lower) {
-            uint32_t index = 0; Require(array.value->GetBaseIndicies(1, &index));
-            if (index != 0) throw std::runtime_error("UnsupportedArrayBounds");
-        }
+        uint32_t count = ArrayCount(array.value);
         result["Value"] = "array[" + std::to_string(count) + "]"; result["Type"] = "array";
         result["Handle"] = Lease(value.value); result["IndexedVariables"] = count; return result;
     }
@@ -336,10 +385,9 @@ void ChildValue(Value* value, const std::string& member, bool indexed, Ref<Value
     if (indexed) {
         Ref<ArrayValue> array;
         Require(target.value->QueryInterface(ArrayValueId, reinterpret_cast<void**>(&array.value)));
-        uint32_t rank = 0, count = 0;
-        Require(array.value->GetRank(&rank)); Require(array.value->GetCount(&count));
+        uint32_t count = ArrayCount(array.value);
         unsigned long index = std::stoul(member);
-        if (rank != 1 || index >= count) throw std::runtime_error("InvalidIndex");
+        if (index >= count) throw std::runtime_error("InvalidIndex");
         Require(array.value->GetElementAtPosition(static_cast<uint32_t>(index), &child.value));
     } else {
         Ref<ObjectValue> object;
@@ -384,7 +432,7 @@ Json ModelVariables(const Json& request) {
         bool indexed = value->QueryInterface(ArrayValueId, reinterpret_cast<void**>(&array.value)) >= 0 && array.value;
         if ((indexed && filter == "named") || (!indexed && filter == "indexed")) return result;
         if (indexed) {
-            uint32_t size = 0; Require(array.value->GetCount(&size));
+            uint32_t size = ArrayCount(array.value);
             if (all && size > static_cast<uint64_t>(start) + count) throw std::runtime_error("VariableLimit");
             for (uint32_t i = static_cast<uint32_t>(start); i < size && result.size() < static_cast<size_t>(count); ++i) {
                 Ref<Value> child; Require(array.value->GetElementAtPosition(i, &child.value));

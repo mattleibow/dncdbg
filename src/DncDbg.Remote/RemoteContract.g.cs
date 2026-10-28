@@ -26,7 +26,7 @@ public enum RemoteOperation
     ExceptionInfo = 19,
 }
 
-public static class RemoteContract { public const int ModelVersion = 3; }
+public static class RemoteContract { public const int ModelVersion = 4; }
 
 public sealed record RemoteHello(string Token);
 public sealed record RemoteCapabilities(string Runtime, string Platform, bool ManagedDebugging, string? Blocker, string? Bootstrap = null, PrivateBootstrapIdentity? SupportedBuild = null, string? Scope = null, int ModelVersion = 0, string? Provider = null, string[]? Features = null);
@@ -36,6 +36,8 @@ public sealed record RemoteManagedLocation(string Mvid, int MethodToken, int IlO
 public sealed record RemoteManagedVariable(string Name, int Index, bool Parameter, int StartOffset = 0, int EndOffset = 2147483647);
 public sealed record RemoteBreakpoint(int Line, bool Verified, string? Message = null, string? Source = null);
 public sealed record RemoteStop(long Id, string Reason, int ThreadId);
+public sealed record RemoteStackRequest(long Id, int Start = 0, int Count = 0);
+public sealed record RemoteStackPage(RemoteFrame[] Frames, int TotalFrames, bool Complete);
 public sealed record RemoteFrame(long Handle, string Name, string? Source, int Line, long StopId = 0, string? Mvid = null, int MethodToken = 0, int IlOffset = 0);
 public sealed record RemoteEvaluation(long Frame, string Expression);
 public sealed record RemoteValue(string Value, string Type, long Handle = 0, string? Name = null, int? IndexedVariables = null, int? NamedVariables = null, string? EvaluateName = null);
@@ -76,6 +78,10 @@ public sealed record RemoteException(string Type, string Description, string Bre
 [JsonSerializable(typeof(RemoteBreakpoint[]))]
 [JsonSerializable(typeof(RemoteStop))]
 [JsonSerializable(typeof(RemoteStop[]))]
+[JsonSerializable(typeof(RemoteStackRequest))]
+[JsonSerializable(typeof(RemoteStackRequest[]))]
+[JsonSerializable(typeof(RemoteStackPage))]
+[JsonSerializable(typeof(RemoteStackPage[]))]
 [JsonSerializable(typeof(RemoteFrame))]
 [JsonSerializable(typeof(RemoteFrame[]))]
 [JsonSerializable(typeof(RemoteEvaluation))]
@@ -127,7 +133,7 @@ public interface IRemoteDebugModel : IAsyncDisposable
     Task<RemoteBreakpoint[]> RequestSetBreakpointsAsync(RemoteBreakpoints request, CancellationToken token);
     Task<RemoteEmpty> RequestStartAsync(RemoteEmpty request, CancellationToken token);
     Task<RemoteStop> RequestWaitForStopAsync(RemoteEmpty request, CancellationToken token);
-    Task<RemoteFrame[]> RequestStackAsync(RemoteId request, CancellationToken token);
+    Task<RemoteStackPage> RequestStackAsync(RemoteStackRequest request, CancellationToken token);
     Task<RemoteValue> RequestEvaluateAsync(RemoteEvaluation request, CancellationToken token);
     Task<RemoteEmpty> RequestContinueAsync(RemoteId request, CancellationToken token);
     Task<RemoteEmpty> RequestReleaseAsync(RemoteHandles request, CancellationToken token);
@@ -154,8 +160,8 @@ public sealed partial class RemoteDebugClient : IRemoteDebugModel
         CallAsync<RemoteEmpty, RemoteEmpty>(RemoteOperation.Start, request, token);
     public Task<RemoteStop> RequestWaitForStopAsync(RemoteEmpty request, CancellationToken token) =>
         CallAsync<RemoteEmpty, RemoteStop>(RemoteOperation.WaitForStop, request, token);
-    public Task<RemoteFrame[]> RequestStackAsync(RemoteId request, CancellationToken token) =>
-        CallAsync<RemoteId, RemoteFrame[]>(RemoteOperation.Stack, request, token);
+    public Task<RemoteStackPage> RequestStackAsync(RemoteStackRequest request, CancellationToken token) =>
+        CallAsync<RemoteStackRequest, RemoteStackPage>(RemoteOperation.Stack, request, token);
     public Task<RemoteValue> RequestEvaluateAsync(RemoteEvaluation request, CancellationToken token) =>
         CallAsync<RemoteEvaluation, RemoteValue>(RemoteOperation.Evaluate, request, token);
     public Task<RemoteEmpty> RequestContinueAsync(RemoteId request, CancellationToken token) =>

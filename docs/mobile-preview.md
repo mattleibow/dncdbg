@@ -234,3 +234,28 @@ The original direct-client native proofs remain separate regression gates.
 gates and full independent review are required before merge. No automatic
 merge is authorized. Historical proof results in the architecture document
 must not be treated as evidence for newly added preview features.
+## Inspection completeness and array shape
+
+The private inspection contract is **typed-model v4**; older helpers are refused.
+`Stack` takes `RemoteStackRequest(Id, Start=0, Count=0)` and returns
+`RemoteStackPage(Frames, TotalFrames, Complete)`. Omitted/zero count means all
+remaining managed IL frames; positive counts select only that page. Every
+successful request enumerates to exhaustion before reporting the full
+`TotalFrames` and `Complete=true`, including empty/out-of-range pages. The
+adapter forwards DAP `startFrame`/`levels` and refuses incomplete or inconsistent
+responses, rather than inventing a total from a truncated page.
+
+Enumeration is bounded at 16,384 chains and 16,384 entries across managed
+chains (`StackLimit` on overflow). Non-IL runtime frames are outside this model;
+other enumeration/inspection failures propagate as errors. Explicit pages may
+contain at most 4,096 frames (`StackPageLimit`); frames and value leases share
+a 4,096 live-handle budget (`HandleLimit`). An all-frame request that cannot
+fit fails explicitly; use bounded pages and release handles. Failed scans do
+not publish partial frames or retain their handles.
+
+Only rank-one, zero-based arrays are supported. Root inspection, safe indexed
+evaluation, and child paging share the same rank/lower-bound validation before
+any positional read. Rank mismatch returns `UnsupportedArrayRank`; nonzero
+lower bounds return stable `UnsupportedArrayBounds`, including expressions
+such as `shifted[0]` and `shifted[5]`. No logical-to-physical index alias is
+permitted. Normal zero-based arrays and their paging are unchanged.

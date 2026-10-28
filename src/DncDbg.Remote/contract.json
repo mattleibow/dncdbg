@@ -1,11 +1,11 @@
 {
-  "modelVersion": 3,
+  "modelVersion": 4,
   "operations": [
     ["Hello", 1, "RemoteHello", "RemoteCapabilities"],
     ["SetBreakpoints", 2, "RemoteBreakpoints", "RemoteBreakpoint[]"],
     ["Start", 3, "RemoteEmpty", "RemoteEmpty"],
     ["WaitForStop", 4, "RemoteEmpty", "RemoteStop"],
-    ["Stack", 5, "RemoteId", "RemoteFrame[]"],
+    ["Stack", 5, "RemoteStackRequest", "RemoteStackPage"],
     ["Evaluate", 6, "RemoteEvaluation", "RemoteValue"],
     ["Continue", 7, "RemoteId", "RemoteEmpty"],
     ["Release", 8, "RemoteHandles", "RemoteEmpty"],
@@ -34,6 +34,8 @@
     "RemoteManagedVariable": ["string Name", "int Index", "bool Parameter", "int StartOffset = 0", "int EndOffset = 2147483647"],
     "RemoteBreakpoint": ["int Line", "bool Verified", "string? Message = null", "string? Source = null"],
     "RemoteStop": ["long Id", "string Reason", "int ThreadId"],
+    "RemoteStackRequest": ["long Id", "int Start = 0", "int Count = 0"],
+    "RemoteStackPage": ["RemoteFrame[] Frames", "int TotalFrames", "bool Complete"],
     "RemoteFrame": ["long Handle", "string Name", "string? Source", "int Line", "long StopId = 0", "string? Mvid = null", "int MethodToken = 0", "int IlOffset = 0"],
     "RemoteEvaluation": ["long Frame", "string Expression"],
     "RemoteValue": ["string Value", "string Type", "long Handle = 0", "string? Name = null", "int? IndexedVariables = null", "int? NamedVariables = null", "string? EvaluateName = null"],

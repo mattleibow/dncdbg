@@ -7,7 +7,12 @@ historical results do not prove the newer DAP surface.
 
 The fresh actual-adapter suites also check default-policy restart, all 150 array
 children (omitted/zero count), bounded explicit pages, round-trip floats/doubles,
-special floating-point values, and combined stage/type exception filters:
+special floating-point values, and combined stage/type exception filters.
+The `deep-scenario` fixture adds 150 non-inlined recursive frames and an actual
+`Array.CreateInstance(typeof(int), new[] {150}, new[] {5})`. Both real suites
+require complete stacks with omitted/zero levels, `startFrame:128`, explicit
+pages and truthful totals; they inspect the shifted array root and evaluate
+indices 0/5/149/150, all requiring `UnsupportedArrayBounds` rather than a value:
 
 ```sh
 python3 tests/DncDbg.MobileTests/run_device.py \

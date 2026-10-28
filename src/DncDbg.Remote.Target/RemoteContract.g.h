@@ -23,7 +23,7 @@ enum class Operation {
     Exceptions = 18,
     ExceptionInfo = 19,
 };
-constexpr int ModelVersion = 3;
+constexpr int ModelVersion = 4;
 inline bool ContractInteger(const Json& value, int64_t minimum, int64_t maximum) {
     if (!value.is_number_integer()) return false;
     if (value.is_number_unsigned()) { uint64_t number = value.get<uint64_t>();
@@ -43,6 +43,8 @@ inline void Validate_RemoteManagedLocation(const Json& body);
 inline void Validate_RemoteManagedVariable(const Json& body);
 inline void Validate_RemoteBreakpoint(const Json& body);
 inline void Validate_RemoteStop(const Json& body);
+inline void Validate_RemoteStackRequest(const Json& body);
+inline void Validate_RemoteStackPage(const Json& body);
 inline void Validate_RemoteFrame(const Json& body);
 inline void Validate_RemoteEvaluation(const Json& body);
 inline void Validate_RemoteValue(const Json& body);
@@ -165,6 +167,25 @@ inline void Validate_RemoteStop(const Json& body) {
     if (!(ContractInteger(body.at("Id"), (-9223372036854775807LL - 1), 9223372036854775807LL))) throw std::runtime_error("MalformedPayload");
     if (!(body.at("Reason").is_string())) throw std::runtime_error("MalformedPayload");
     if (!(ContractInteger(body.at("ThreadId"), -2147483648LL, 2147483647LL))) throw std::runtime_error("MalformedPayload");
+}
+inline void Validate_RemoteStackRequest(const Json& body) {
+    if (!body.is_object()) throw std::runtime_error("MalformedPayload");
+    if (!(ContractInteger(body.at("Id"), (-9223372036854775807LL - 1), 9223372036854775807LL))) throw std::runtime_error("MalformedPayload");
+    if (body.contains("Start")) {
+        if (!(ContractInteger(body.at("Start"), -2147483648LL, 2147483647LL))) throw std::runtime_error("MalformedPayload");
+    }
+    if (body.contains("Count")) {
+        if (!(ContractInteger(body.at("Count"), -2147483648LL, 2147483647LL))) throw std::runtime_error("MalformedPayload");
+    }
+}
+inline void Validate_RemoteStackPage(const Json& body) {
+    if (!body.is_object()) throw std::runtime_error("MalformedPayload");
+    if (!body.at("Frames").is_array()) throw std::runtime_error("MalformedPayload");
+    for (const auto& element : body.at("Frames")) {
+        Validate_RemoteFrame(element);
+    }
+    if (!(ContractInteger(body.at("TotalFrames"), -2147483648LL, 2147483647LL))) throw std::runtime_error("MalformedPayload");
+    if (!(body.at("Complete").is_boolean())) throw std::runtime_error("MalformedPayload");
 }
 inline void Validate_RemoteFrame(const Json& body) {
     if (!body.is_object()) throw std::runtime_error("MalformedPayload");
@@ -368,7 +389,7 @@ inline void ValidateRequest(int operation, const Json& body) {
         case 2: Validate_RemoteBreakpoints(body); break;
         case 3: Validate_RemoteEmpty(body); break;
         case 4: Validate_RemoteEmpty(body); break;
-        case 5: Validate_RemoteId(body); break;
+        case 5: Validate_RemoteStackRequest(body); break;
         case 6: Validate_RemoteEvaluation(body); break;
         case 7: Validate_RemoteId(body); break;
         case 8: Validate_RemoteHandles(body); break;

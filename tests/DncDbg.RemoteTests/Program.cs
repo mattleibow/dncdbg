@@ -324,6 +324,18 @@ async Task TestDesktopAsync(string fixture, string source, string results)
                 RemoteFrame[] stack = await client.StackAsync(stop.Id, token);
                 RemoteFrame top = stack[0];
                 Check(top.Line == line && Path.GetFullPath(top.Source!) == source, "managed stack source and line");
+                foreach (var pageRequest in new[] {
+                    new RemoteStackRequest(stop.Id), new(stop.Id, 0, 0),
+                    new(stop.Id, 1, 1), new(stop.Id, stack.Length + 1, 0) })
+                {
+                    RemoteStackPage page = await client.RequestStackAsync(pageRequest, token);
+                    int remaining = Math.Max(0, stack.Length - pageRequest.Start);
+                    Check(page.Complete && page.TotalFrames == stack.Length &&
+                          page.Frames.Length == (pageRequest.Count > 0 ? Math.Min(pageRequest.Count, remaining) : remaining),
+                          "host typed stack pages preserve complete totals and omitted/zero/explicit count semantics");
+                }
+                await RejectAsync(() => client.RequestStackAsync(new(stop.Id, -1), token), "InvalidState");
+                await RejectAsync(() => client.RequestStackAsync(new(stop.Id, 0, -1), token), "InvalidState");
                 Check((await client.EvaluateAsync(top.Handle, "input", token)).Value == "1", "inspect managed argument");
                 Check((await client.EvaluateAsync(top.Handle, "answer", token)).Value == "42", "inspect managed local");
                 Check((await client.EvaluateAsync(top.Handle, "answer + 1", token)).Value == "43", "evaluate expression through ICorDebug-backed engine");

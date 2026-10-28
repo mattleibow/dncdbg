@@ -76,7 +76,7 @@ def tool():
 
 
 class Remote:
-    def __init__(self, state, platform, model_version=3, start_error=None):
+    def __init__(self, state, platform, model_version=4, start_error=None):
         self.listener = socket.socket()
         self.listener.bind(("127.0.0.1", 0))
         self.listener.listen()
@@ -364,7 +364,7 @@ class MobileDapTests(unittest.TestCase):
         frame = self.dap.request("stackTrace", {"threadId": 7})["stackFrames"][0]["id"]
         for expression in ("shifted", "shifted[0]", "shifted[5]", "shifted[149]", "shifted[150]"):
             error = self.dap.request("evaluate", {"frameId": frame, "expression": expression}, success=False)
-            self.assertIn("UnsupportedArrayBounds", error["message"])
+            self.assertIn("UnsupportedArrayBounds", error["error"]["format"])
 
     def test_source_breakpoint_verification_events_keep_dap_identity(self):
         self.remote = Remote(self.state, "Android")

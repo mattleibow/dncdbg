@@ -80,7 +80,7 @@ void ModelModule(Unknown*, bool);
 void ModelThread(Unknown*, bool);
 void ModelDeactivateStepper();
 Json ModelStackFrame(Frame*, uint32_t, uint32_t, int64_t);
-Json ModelFullStack();
+Json ModelFullStack(const Json& request);
 Json ModelEvaluate(const Json&);
 constexpr Guid ILFrameId{0x03e26311, 0x4f76, 0x11d3, {0x88, 0xc6, 0, 0x60, 0x97, 0x94, 0x54, 0x18}};
 constexpr Guid GenericValueId{0xcc7bcaf8, 0x8a68, 0x11d2, {0x98, 0x3c, 0, 0, 0xf8, 8, 0x34, 0x2d}};
@@ -326,47 +326,9 @@ void Pump() {
     }
 }
 
-Json Stack() {
+Json Stack(const Json& request) {
     if (!stoppedThread) throw std::runtime_error("InvalidState");
-    if (!catalog.empty()) return ModelFullStack();
-    Ref<Frame> active;
-    Report("stack-active-frame-enter");
-    Require(static_cast<Thread*>(stoppedThread)->GetActiveFrame(&active.value));
-    Report("stack-active-frame-return");
-    Json result = Json::array();
-    for (int i = 0; active.value && i < 32; ++i) {
-        uint32_t token = 0, offset = 0, mapping = 0;
-        Report("stack-function-token-enter");
-        HResult tokenHr = active.value->GetFunctionToken(&token);
-        Ref<ILFrame> il;
-        Report("stack-il-interface-enter");
-        HResult ilHr = active.value->QueryInterface(ILFrameId, reinterpret_cast<void**>(&il.value));
-        Report("stack-il-ip-enter");
-        if (tokenHr >= 0 && ilHr >= 0 && il.value->GetIP(&offset, &mapping) >= 0) {
-            Report("stack-module-identity-enter");
-            bool matches = !location.is_null() && MatchesFrame(active.value, token);
-            int64_t handle = NewId();
-            if (frames.size() >= 4096) throw std::runtime_error("HandleLimit");
-            active.value->AddRef();
-            frames.emplace(handle, active.value);
-            char fallback[32];
-            std::snprintf(fallback, sizeof(fallback), "method 0x%08x", token);
-            Json row{{"Handle", handle}, {"Name", matches ? location.at("Method").get<std::string>() : std::string(fallback)},
-                {"Source", matches ? breakpoints.at("Source") : Json(nullptr)},
-                {"Line", matches && offset == location.at("IlOffset").get<uint32_t>() ? breakpoints.at("Lines")[0] : Json(0)},
-                {"MethodToken", token}, {"IlOffset", offset}, {"Mapping", mapping}, {"StopId", stopId}};
-            if (!catalog.empty()) row = ModelStackFrame(active.value, token, offset, handle);
-            result.push_back(row);
-        }
-        Ref<Frame> caller;
-        Report("stack-caller-enter");
-        HResult callerHr = active.value->GetCaller(&caller.value);
-        active.value->Release();
-        active.value = callerHr >= 0 ? caller.value : nullptr;
-        if (callerHr >= 0) caller.value = nullptr;
-    }
-    Report("stack-complete");
-    return result;
+    return ModelFullStack(request);
 }
 
 Json Evaluate(const Json& request) {
@@ -581,7 +543,7 @@ void* Run(void*) {
                         break;
                     case 5:
                         if (!stopId || body.at("Id") != stopId) throw std::runtime_error("InvalidState");
-                        result = Stack(); break;
+                        result = Stack(body); break;
                     case 6: result = Evaluate(body); break;
                     case 7:
                         if (!stopId || body.at("Id") != stopId) throw std::runtime_error("InvalidState");

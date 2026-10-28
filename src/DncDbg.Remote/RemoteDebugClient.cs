@@ -37,7 +37,13 @@ public sealed partial class RemoteDebugClient : IAsyncDisposable
         CallAsync<RemoteBreakpoints, RemoteBreakpoint[]>(RemoteOperation.SetBreakpoints, request, token);
     public Task<RemoteEmpty> StartAsync(CancellationToken token) => CallAsync<RemoteEmpty, RemoteEmpty>(RemoteOperation.Start, new(), token);
     public Task<RemoteStop> WaitForStopAsync(CancellationToken token) => CallAsync<RemoteEmpty, RemoteStop>(RemoteOperation.WaitForStop, new(), token);
-    public Task<RemoteFrame[]> StackAsync(long stop, CancellationToken token) => CallAsync<RemoteId, RemoteFrame[]>(RemoteOperation.Stack, new(stop), token);
+    public async Task<RemoteFrame[]> StackAsync(long stop, CancellationToken token)
+    {
+        RemoteStackPage page = await RequestStackAsync(new(stop), token);
+        if (!page.Complete || page.TotalFrames != page.Frames.Length)
+            throw new InvalidDataException("Incomplete remote stack.");
+        return page.Frames;
+    }
     public Task<RemoteValue> EvaluateAsync(long frame, string expression, CancellationToken token) =>
         CallAsync<RemoteEvaluation, RemoteValue>(RemoteOperation.Evaluate, new(frame, expression), token);
     public Task<RemoteEmpty> ContinueAsync(long stop, CancellationToken token) => CallAsync<RemoteId, RemoteEmpty>(RemoteOperation.Continue, new(stop), token);

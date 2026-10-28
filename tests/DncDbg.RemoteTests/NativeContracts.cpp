@@ -233,8 +233,39 @@ void StackChecks() {
     StackThread thread;
     catalog = Json::array({{{"Mvid", std::string(32, '0')}, {"Methods", Json::array()}}});
     Enqueue(&controller, &thread, CallbackKind::Breakpoint); Pump();
-    Json result = Stack();
-    Check(result.size() == 150, "native stack enumerates all 150 frames beyond the old 128-frame cap");
+    for (Json request : {Json::object(), Json{{"Count", 0}}, Json{{"Start", 128}},
+                         Json{{"Start", 128}, {"Count", 0}}, Json{{"Start", 128}, {"Count", 10}},
+                         Json{{"Start", 149}, {"Count", 10}}, Json{{"Start", 150}}, Json{{"Start", 200}}}) {
+        Json result = Stack(request);
+        int remaining = std::max(0, 150 - request.value("Start", 0)), count = request.value("Count", 0);
+        Check(result.at("TotalFrames") == 150 && result.at("Complete") == true &&
+              result.at("Frames").size() == static_cast<size_t>(count ? std::min(count, remaining) : remaining),
+              "native omitted/zero/explicit deep stack pages enumerate beyond 128 with truthful totals");
+    }
+    size_t before = frames.size();
+    thread.chain.entries.fail = true;
+    bool rejected = false;
+    try { Stack({{"Count", 2}}); } catch (const std::runtime_error&) { rejected = true; }
+    Check(rejected && frames.size() == before, "late stack enumeration errors never return a partial page or leak handles");
+    thread.chain.entries.fail = false;
+    thread.chain.entries.count = 5000;
+    Json large = Stack({{"Start", 4096}, {"Count", 2}});
+    Check(large.at("TotalFrames") == 5000 && large.at("Frames").size() == 2 && large.at("Complete") == true,
+          "bounded pages count stacks larger than the handle budget without leasing skipped frames");
+    before = frames.size();
+    rejected = false;
+    try { Stack(Json::object()); }
+    catch (const std::runtime_error& error) { rejected = std::strcmp(error.what(), "HandleLimit") == 0; }
+    Check(rejected && frames.size() == before, "all-frame requests beyond the handle budget explicitly fail without partial handles");
+    thread.chain.entries.count = 16385;
+    rejected = false;
+    try { Stack({{"Count", 2}}); }
+    catch (const std::runtime_error& error) { rejected = std::strcmp(error.what(), "StackLimit") == 0; }
+    Check(rejected && frames.size() == before, "runtime stacks beyond the scan limit explicitly fail instead of claiming completeness");
+    thread.chain.entries.count = 1;
+    thread.chains.count = 150;
+    Check(Stack({{"Start", 128}, {"Count", 2}}).at("TotalFrames") == 150,
+          "native chain enumeration also continues beyond 128 chains");
     ContinueStop(); ModelCleanup();
     Check(thread.chain.frame.refs == 1 && thread.chain.entries.refs == 1 && thread.chains.refs == 1,
           "deep stack releases frame, chain and enumerator references");

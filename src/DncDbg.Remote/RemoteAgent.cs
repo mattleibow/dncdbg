@@ -104,7 +104,13 @@ public sealed class RemoteAgent : IAsyncDisposable
                         await ReplyAsync(request, await backend.WaitForStopAsync(requestTimeout.Token), null, requestTimeout.Token);
                         break;
                     case RemoteOperation.Stack:
-                        await ReplyAsync(request, await backend.StackAsync(ReadId(request), requestTimeout.Token), null, requestTimeout.Token);
+                        var stackRequest = RemoteProtocol.Unpack<RemoteStackRequest>(request.Body);
+                        if (stackRequest.Id <= 0 || stackRequest.Start < 0 || stackRequest.Count < 0)
+                            throw new ArgumentException("Invalid stack request.");
+                        var stack = await backend.StackAsync(stackRequest.Id, requestTimeout.Token);
+                        await ReplyAsync(request, new RemoteStackPage(
+                            stack.Skip(stackRequest.Start).Take(stackRequest.Count > 0 ? stackRequest.Count : stack.Length).ToArray(),
+                            stack.Length, true), null, requestTimeout.Token);
                         break;
                     case RemoteOperation.Evaluate:
                         var evaluation = RemoteProtocol.Unpack<RemoteEvaluation>(request.Body);

@@ -286,13 +286,19 @@ internal sealed class MobileSession : IDisposable
             {
                 var args = request.GetArguments<StackTraceArguments>()!;
                 Thread(args.ThreadId);
-                RemoteFrame[] stack = Wait(Client.RequestStackAsync(new(Current().Id), Token));
-                if (stack.Any(f => f.StopId != Current().Id))
+                int start = args.StartFrame ?? 0, count = args.Levels ?? 0;
+                if (start < 0 || count < 0) throw new ArgumentException("Invalid stack page.");
+                RemoteStackPage stack = Wait(Client.RequestStackAsync(new(Current().Id, start, count), Token));
+                int remaining = Math.Max(0, stack.TotalFrames - start);
+                if (!stack.Complete || stack.TotalFrames < 0 || stack.Frames is null ||
+                    stack.Frames.Length != (count > 0 ? Math.Min(count, remaining) : remaining))
+                    throw new InvalidDataException("Incomplete remote stack page.");
+                if (stack.Frames.Any(f => f.StopId != Current().Id))
                     throw new InvalidDataException("Remote stack belongs to another stop generation.");
                 return new StackTraceResponseBody
                 {
-                    TotalFrames = stack.Length,
-                    StackFrames = stack.Skip(args.StartFrame ?? 0).Take(args.Levels is > 0 ? args.Levels.Value : stack.Length)
+                    TotalFrames = stack.TotalFrames,
+                    StackFrames = stack.Frames
                         .Select(f => new StackFrame
                         {
                             Id = Handle(f.Handle, true), Name = f.Name, Line = f.Line > 0 ? toClientLine(f.Line) : 0, Column = 1,

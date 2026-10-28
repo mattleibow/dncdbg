@@ -106,6 +106,7 @@ def main():
 
     source = ROOT / "tests/DncDbg.MauiTestApp/MainPage.xaml.cs"
     line = next(i + 1 for i, text in enumerate(source.read_text().splitlines()) if "// MOBILE_BREAKPOINT:" in text)
+    deep_line = next(i + 1 for i, text in enumerate(source.read_text().splitlines()) if "// MOBILE_DEEP_BREAKPOINT:" in text)
     try:
         dap.request("initialize", {"adapterID": "dncdbg", "linesStartAt1": True, "columnsStartAt1": True})
         launch = dap.send("launch", {"mobile": {
@@ -113,13 +114,15 @@ def main():
             "deviceId": args.device, "assetsPath": str(assets.resolve()),
             "runtimeIdentifier": "android-arm64" if args.platform == "android" else "iossimulator-arm64",
             "replaceExisting": False, "uninstallOnDisconnect": False, "startupTimeoutSeconds": 90}})
-        breakpoint = dap.request("setBreakpoints", {"source": {"path": str(source)}, "breakpoints": [{"line": line}]})["breakpoints"][0]
+        breakpoint = dap.request("setBreakpoints", {"source": {"path": str(source)},
+                                                  "breakpoints": [{"line": line}, {"line": deep_line}]})["breakpoints"][0]
         dap.request("setExceptionBreakpoints", {"filters": []})
         dap.request("configurationDone")
         dap.response(launch)
         changed = dap.event("breakpoint")["breakpoint"]
         check(changed["id"] == breakpoint["id"] and changed["verified"] and changed["source"]["path"] == str(source),
               "DAP breakpoint identity survives asynchronous module binding")
+        check(dap.event("breakpoint")["breakpoint"]["line"] == deep_line, "deep inspection breakpoint bound before execution")
         evidence["provider"] = dap.request("dotnet/info")["mobile"]
         wait = subprocess.run(["maui", "devflow", "--device", args.device, "wait", "--wait-platform",
                                "Android" if args.platform == "android" else "iOS", "--timeout", "20"],
@@ -186,9 +189,6 @@ def main():
         dap.request("continue", {"threadId": step["threadId"]})
         ui.receive()
         ui.command('MAUI assert --automationId result-status Text "Result: 42"')
-        deep_line = next(i + 1 for i, text in enumerate(source.read_text().splitlines()) if "// MOBILE_DEEP_BREAKPOINT:" in text)
-        dap.request("setBreakpoints", {"source": {"path": str(source)},
-                                     "breakpoints": [{"line": line}, {"line": deep_line}]})
         ui.send("MAUI tap --automationId deep-scenario")
         deep = dap.event("stopped")
         complete = dap.request("stackTrace", {"threadId": deep["threadId"]})
@@ -208,12 +208,11 @@ def main():
                   "real native stack page " + json.dumps(arguments))
         for expression in ("shifted", "shifted[0]", "shifted[5]", "shifted[149]", "shifted[150]"):
             error = dap.request("evaluate", {"frameId": deep_frames[0]["id"], "expression": expression}, success=False)
-            check("UnsupportedArrayBounds" in error["message"], "real lower-bound-five array rejects " + expression)
+            check("UnsupportedArrayBounds" in error["error"]["format"], "real lower-bound-five array rejects " + expression)
         evidence["deepStack"] = complete
         dap.request("continue", {"threadId": deep["threadId"]})
         ui.receive()
         ui.command('MAUI assert --automationId result-status Text "Deep result: 55"')
-        dap.request("setBreakpoints", {"source": {"path": str(source)}, "breakpoints": [{"line": line}]})
         dap.request("setExceptionBreakpoints", {"filters": [], "filterOptions": [
             {"filterId": "all", "condition": "System.ArgumentException"},
             {"filterId": "unhandled", "condition": "System.InvalidOperationException"}]})

@@ -43,8 +43,10 @@ avoid user Python process-group shims; `DNCDBG_PYTHON` can override it.
 `11.0.100-rc.1.26460.1`, MAUI `11.0.0-rc.1.26451.6` and both DevFlow CLI/agent
 `0.1.0-preview.12.26421.1`. Install the SDKs with official `actions/setup-dotnet`
 or Microsoft's installer. From `tests/DncDbg.MauiTestApp`, install
-`maui-ios`/`maui-android` with `dotnet workload install ... --version
-11.0.100-rc.1.26460.1`. Install `Microsoft.Maui.Cli` at the pinned version and put
+`maui-ios`/`maui-android` with `dotnet workload install maui-ios` or
+`dotnet workload install maui-android`. The fixture's `global.json` already pins
+the exact workload set; supplying `--version` there is rejected by the SDK.
+Install `Microsoft.Maui.Cli` at the pinned version and put
 its `maui` command on PATH. The fixture's `global.json` selects .NET 11; all
 portable projects still select the root .NET 10 SDK.
 

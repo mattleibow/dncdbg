@@ -33,6 +33,19 @@ class MobileRunnerTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True), self.assertRaisesRegex(RuntimeError, "ANDROID_HOME"):
             android_sdk()
 
+    def test_mobile_workload_install_consumes_the_fixture_global_pin(self):
+        sdk = json.loads((ROOT / "tests/DncDbg.MauiTestApp/global.json").read_text())["sdk"]
+        self.assertEqual(sdk["workloadVersion"], PIN["workload"])
+        workflow = (ROOT / ".github/workflows/mobile.yml").read_text()
+        self.assertNotIn("--version " + PIN["workload"], workflow)
+
+    @unittest.skipUnless(os.name == "posix", "Portable no-op console helper")
+    def test_remote_console_helper_exits_without_running_contracts(self):
+        result = subprocess.run(["dotnet", str(ROOT / "tests/DncDbg.RemoteTests/bin/Release/net10.0/DncDbg.RemoteTests.dll"),
+                                 "--console-utf8", "0"], capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "")
+
     def test_android_x64_tuple_is_explicit_and_separate_from_local_arm64(self):
         args = Namespace(platform="android", output=self.output, xcode_dir=None, android_abi="x86_64")
         hosted = Suite(args)

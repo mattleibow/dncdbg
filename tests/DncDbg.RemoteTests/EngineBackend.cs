@@ -35,6 +35,7 @@ internal sealed class EngineBackend(string program, string resultPath) : IRemote
             throw new InvalidOperationException("Already started.");
         started = true;
         engine.Log += message => Console.WriteLine("[desktop-fixture] " + message);
+        engine.Output += (category, text) => Console.Error.WriteLine($"[desktop-fixture {category}] {text}");
         engine.Stopped += OnStopped;
         engine.Exited += OnExited;
         subscribed = true;
@@ -149,6 +150,8 @@ internal sealed class EngineBackend(string program, string resultPath) : IRemote
             {
                 await target.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
                 Console.WriteLine("[desktop-fixture] Detached target exit observed.");
+                if (OperatingSystem.IsWindows())
+                    Console.WriteLine("[desktop-fixture] Detached target exit code: " + target.ExitCode);
             }
         }
         catch (Exception error)

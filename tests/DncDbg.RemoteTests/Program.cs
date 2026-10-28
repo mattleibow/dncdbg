@@ -7,6 +7,12 @@ using System.Runtime.InteropServices;
 using ClrDebug;
 using DncDbg.Remote;
 
+if (args is [DncDbg.Engine.Launch.ConsoleCodePage.HelperOption, var consoleOwner] && int.TryParse(consoleOwner, out int consolePid))
+{
+    Environment.ExitCode = DncDbg.Engine.Launch.ConsoleCodePage.RunHelper(consolePid);
+    return;
+}
+
 using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(60));
 CancellationToken token = deadline.Token;
 int passed = 0;

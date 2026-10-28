@@ -38,7 +38,7 @@ jobs:
           set -euo pipefail
           mkdir -p build/mobile-tools build/workload-scratch
           cd tests/DncDbg.MauiTestApp
-          dotnet workload install maui-ios --version 11.0.100-rc.1.26460.1 --temp-dir ../../build/workload-scratch
+          dotnet workload install maui-ios --temp-dir ../../build/workload-scratch
           cd ../..
           dotnet tool install Microsoft.Maui.Cli --version 0.1.0-preview.12.26421.1 --tool-path build/mobile-tools
           echo "$PWD/build/mobile-tools" >> "$GITHUB_PATH"
@@ -120,7 +120,7 @@ jobs:
           set -euo pipefail
           mkdir -p build/mobile-tools build/workload-scratch
           cd tests/DncDbg.MauiTestApp
-          dotnet workload install maui-android --version 11.0.100-rc.1.26460.1 --temp-dir ../../build/workload-scratch
+          dotnet workload install maui-android --temp-dir ../../build/workload-scratch
           cd ../..
           dotnet tool install Microsoft.Maui.Cli --version 0.1.0-preview.12.26421.1 --tool-path build/mobile-tools
           echo "$PWD/build/mobile-tools" >> "$GITHUB_PATH"

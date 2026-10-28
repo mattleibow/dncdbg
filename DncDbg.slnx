@@ -6,6 +6,7 @@
     <Project Path="src/DncDbg.Remote/DncDbg.Remote.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/DncDbg.DockerTests/DncDbg.DockerTests.csproj" />
     <Project Path="tests/DncDbg.RemoteTests/DncDbg.RemoteTests.csproj" />
     <Project Path="tests/DncDbg.SmokeTests/DncDbg.SmokeTests.csproj" />
     <Project Path="tests/RemoteBreakpointApp/RemoteBreakpointApp.csproj" />

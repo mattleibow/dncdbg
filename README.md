@@ -71,6 +71,17 @@ npm test --prefix tests/DncDbg.VsCodeTests
 
 See [VS Code integration testing](tests/DncDbg.VsCodeTests/README.md).
 
+The Docker integration test publishes for the Linux daemon's native architecture
+and exercises a real stdio DAP session with adapter and target in one container:
+
+```sh
+dotnet run --project tests/DncDbg.DockerTests -- --require-docker
+```
+
+See [Docker and WSL debugging](docs/docker_wsl.md) for prerequisites, cleanup,
+source mapping and host-client transport configuration. Linux CI requires Docker;
+without `--require-docker`, local runs skip when Docker is unavailable.
+
 ### Mobile investigation (not supported debugger targets)
 
 The isolated [`DncDbg.Remote` experiment](docs/experimental-mobile-debugging.md)
@@ -122,6 +133,7 @@ releasing the process.
 
 - [VS Code on Windows](docs/usage_vscode_windows.md) - configure local debugging on Windows.
 - [VS Code on Linux and macOS](docs/usage_vscode_unix.md) - configure local debugging on Unix-like systems.
+- [Docker and WSL](docs/docker_wsl.md) - run the adapter beside the Linux target and transport DAP over stdio.
 - [DAP compatibility contract](docs/dap_status.md) - supported protocol messages and fields.
 
 ### Debugger configuration

@@ -79,6 +79,21 @@ class MobileRunnerTests(unittest.TestCase):
                                     ("/sdk/adb", "forward", "--list")])
         self.assertFalse(self.suite.state["cleanupDone"])
 
+    def test_ios_cleanup_is_idempotent_after_partial_deletion(self):
+        self.suite.args.platform = "ios"
+        with patch.object(self.suite, "run", return_value=subprocess.CompletedProcess([], 0, '{"devices":{}}', "")) as run:
+            self.suite.cleanup()
+        run.assert_called_once_with("xcrun", "simctl", "list", "devices", "-j", timeout=30)
+        self.assertTrue(self.suite.state["cleanupDone"])
+
+    def test_ios_cleanup_refuses_another_device_identity(self):
+        self.suite.args.platform = "ios"
+        devices = {"devices": {"runtime": [{"udid": self.suite.state["device"], "name": "another-owner"}]}}
+        with patch.object(self.suite, "run", return_value=subprocess.CompletedProcess([], 0, json.dumps(devices), "")) as run:
+            with self.assertRaisesRegex(RuntimeError, "identity changed"):
+                self.suite.cleanup()
+        self.assertEqual(run.call_count, 1)
+
     def test_cleanup_removes_only_dedicated_emulator_forwards(self):
         commands = []
 

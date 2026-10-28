@@ -277,13 +277,19 @@ class Suite:
             if self.args.xcode_dir:
                 self.env["DEVELOPER_DIR"] = str(self.args.xcode_dir.resolve())
             if device:
-                clean("xcrun", "simctl", "terminate", device, APP, check=False)
-                clean("xcrun", "simctl", "uninstall", device, APP, check=False)
-                clean("xcrun", "simctl", "shutdown", device, check=False)
-                clean("xcrun", "simctl", "delete", device)
                 devices = clean("xcrun", "simctl", "list", "devices", "-j")
-                if devices and device in devices.stdout:
-                    errors.append("Owned simulator remains after deletion.")
+                matches = [d for group in json.loads(devices.stdout)["devices"].values() for d in group
+                           if d["udid"] == device] if devices else []
+                if matches and matches[0]["name"] != self.state["name"]:
+                    errors.append("Simulator identity changed; refusing to touch a different device.")
+                elif matches:
+                    clean("xcrun", "simctl", "terminate", device, APP, check=False)
+                    clean("xcrun", "simctl", "uninstall", device, APP, check=False)
+                    clean("xcrun", "simctl", "shutdown", device, check=False)
+                    clean("xcrun", "simctl", "delete", device)
+                    remaining = clean("xcrun", "simctl", "list", "devices", "-j")
+                    if remaining and device in remaining.stdout:
+                        errors.append("Owned simulator remains after deletion.")
         elif device:
             # The serial may have been reused after cancellation: check the unique AVD identity first.
             identity = clean(adb_path(), "-s", device, "emu", "avd", "name", check=False)

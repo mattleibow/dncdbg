@@ -14,6 +14,8 @@ import time
 import unittest
 import uuid
 
+from fake_adb import FakeAdbDaemon
+
 ROOT = Path(__file__).resolve().parents[2]
 ADAPTER = ROOT / "src/DncDbg.Dap/bin/Release/net10.0/dncdbg-dap.dll"
 IDENTITIES = {
@@ -33,6 +35,10 @@ def tool():
     args = sys.argv[1:]
     with (state / "commands.jsonl").open("a") as log:
         log.write(json.dumps([os.environ["DNCDBG_FAKE_TOOL"], *args]) + "\n")
+    if "forward" in args and (state / "daemon-ready.json").exists():
+        import runpy
+        runpy.run_path(str(Path(__file__).with_name("fake_adb.py")), run_name="__client__")
+        return
     if "install" in args:
         if (state / "block-install").exists():
             (state / "install-blocked").touch()
@@ -81,6 +87,8 @@ class Remote:
         self.platform = platform
         self.model_version = model_version
         self.start_error = start_error
+        self.modules = [{"Id": "module-1", "Name": "RemoteBreakpointApp", "Path": "fixture.dll",
+                         "Mvid": "0" * 32, "Generation": 1}]
         self.operations = []
         self.requests = []
         self.thread = threading.Thread(target=self.serve, daemon=True)
@@ -127,8 +135,7 @@ class Remote:
                     elif op == 12:
                         result = [{"Id": 7, "Name": "main"}]
                     elif op == 13:
-                        result = [{"Id": "module-1", "Name": "RemoteBreakpointApp", "Path": "fixture.dll",
-                                   "Mvid": "0" * 32, "Generation": 1}]
+                        result = self.modules
                     elif op == 5:
                         result = [{"Handle": generation + 1, "Name": "Program.Main", "Source": None,
                                    "Line": 0, "StopId": generation, "Mvid": "0" * 32,
@@ -241,6 +248,7 @@ class MobileDapTests(unittest.TestCase):
         for name in ("adb", "xcrun"):
             path = self.state / "tools" / name
             path.write_text("#!" + sys.executable + "\nimport runpy, os\n"
+                            "import sys; sys.path.insert(0, " + repr(str(Path(__file__).parent)) + ")\n"
                             "os.environ['DNCDBG_FAKE_TOOL'] = " + repr(name) + "\n"
                             "runpy.run_path(" + repr(str(Path(__file__))) + ", run_name='__tool__')\n")
             path.chmod(0o755)
@@ -257,6 +265,8 @@ class MobileDapTests(unittest.TestCase):
             self.remote.close()
         if hasattr(self, "old_remote"):
             self.old_remote.close()
+        if hasattr(self, "daemon"):
+            self.daemon.close()
         shutil.rmtree(self.state)
 
     def options(self, platform):
@@ -479,6 +489,112 @@ class MobileDapTests(unittest.TestCase):
                 self.assertEqual([v["value"] for v in values], [str(i) for i in range(150)])
         page = self.dap.request("variables", {"variablesReference": array, "start": 141, "count": 4})["variables"]
         self.assertEqual([v["value"] for v in page], ["141", "142", "143", "144"])
+
+    def test_modules_paging_returns_all_remaining_for_omitted_or_zero_count(self):
+        self.launch("android")
+        self.remote.modules = [self.remote.modules[0] | {"Id": f"module-{i}", "Name": f"Module{i}"}
+                               for i in range(151)]
+        for arguments, expected in (
+                ({}, range(151)), ({"moduleCount": 0}, range(151)),
+                ({"moduleCount": 3}, range(3)), ({"startModule": 147}, range(147, 151)),
+                ({"startModule": 147, "moduleCount": 0}, range(147, 151)),
+                ({"startModule": 147, "moduleCount": 2}, range(147, 149)),
+                ({"startModule": 150, "moduleCount": 20}, range(150, 151)),
+                ({"startModule": 151}, range(0)), ({"startModule": 200, "moduleCount": 0}, range(0))):
+            with self.subTest(arguments=arguments):
+                result = self.dap.request("modules", arguments)
+                self.assertEqual(result["totalModules"], 151)
+                self.assertEqual([m["id"] for m in result["modules"]], [f"module-{i}" for i in expected])
+        for arguments in ({"startModule": -1}, {"moduleCount": -1}):
+            self.dap.request("modules", arguments, success=False)
+
+    def daemon_launch(self, mode):
+        self.remote = Remote(self.state, "Android")
+        self.daemon = FakeAdbDaemon(self.state, mode)
+        return self.dap.send("launch", {"mobile": self.options("android")})
+
+    def assert_exact_rollback(self):
+        self.assertEqual(self.daemon.mappings(), self.daemon.baseline)
+        removes = [c for c in self.commands() if "forward" in c and "--remove" in c]
+        self.assertEqual(removes, [["adb", "-s", "emulator-5556", "forward", "--remove",
+                                    f"tcp:{self.remote.endpoint['Port']}"]])
+        self.assertFalse(any("--remove-all" in c or "reverse" in c or "kill-server" in c for c in self.commands()))
+
+    def assert_process_gone(self, pid):
+        deadline = time.monotonic() + 3
+        while True:
+            status = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+            if not status or status.startswith("Z"):
+                return
+            if time.monotonic() >= deadline:
+                self.fail(f"Owned process {pid} is still running ({status}).")
+            time.sleep(0.01)
+
+    def cancel_committed_forward(self, mode):
+        pending = self.daemon_launch(mode)
+        committed = self.daemon.committed()
+        self.assertEqual(len(self.daemon.mappings()), len(self.daemon.baseline) + 1)
+        before = time.monotonic()
+        self.dap.request("terminate")
+        self.dap.event("terminated")
+        self.dap.response(pending, success=False)
+        self.assertLess(time.monotonic() - before, 5)
+        self.assert_process_gone(committed["pid"])
+        self.assert_process_gone(committed["child"])
+        self.assertIsNone(self.daemon.process.poll(), "Cancellation must not terminate the shared daemon.")
+        self.assert_exact_rollback()
+        self.dap.request("disconnect")
+        self.dap.close()
+        self.assert_exact_rollback()
+
+    def test_android_cancel_after_daemon_commit_before_cli_allocation_reply(self):
+        self.cancel_committed_forward("hold-allocation")
+
+    def test_android_cancel_after_daemon_commit_before_cli_rebind_reply(self):
+        self.cancel_committed_forward("hold-rebind")
+
+    def failed_forward(self, mode):
+        pending = self.daemon_launch(mode)
+        self.dap.response(pending, success=False)
+        self.assert_exact_rollback()
+
+    def test_android_forward_error_after_commit_rolls_back_exact_mapping(self):
+        self.failed_forward("error-allocation")
+
+    def test_android_forward_malformed_reply_rolls_back_exact_mapping(self):
+        self.failed_forward("malformed-allocation")
+
+    def test_android_rebind_error_after_commit_rolls_back_exact_mapping(self):
+        self.failed_forward("error-rebind")
+
+    def test_android_forward_rejected_before_commit_does_not_remove_unrelated_mapping(self):
+        pending = self.daemon_launch("reject-allocation")
+        self.dap.response(pending, success=False)
+        self.assertEqual(self.daemon.mappings(), self.daemon.baseline)
+        self.assertFalse(any("--remove" in c for c in self.commands()))
+
+    def test_android_transaction_normal_and_duplicate_cleanup(self):
+        pending = self.daemon_launch("normal")
+        self.dap.request("configurationDone")
+        self.dap.response(pending)
+        self.dap.event("stopped")
+        self.assertEqual(len(self.daemon.mappings()), len(self.daemon.baseline) + 1)
+        self.dap.request("disconnect")
+        self.dap.request("disconnect")
+        self.dap.close()
+        self.assert_exact_rollback()
+
+    def test_android_daemon_death_terminates_waiting_client_without_hanging_cleanup(self):
+        pending = self.daemon_launch("hold-allocation")
+        committed = self.daemon.committed()
+        before = time.monotonic()
+        self.daemon.close()
+        self.dap.response(pending, success=False)
+        self.dap.close()
+        self.assertLess(time.monotonic() - before, 5)
+        self.assert_process_gone(committed["pid"])
+        self.assert_process_gone(committed["child"])
+        self.assertEqual(self.daemon.mappings(), [])
 
     def test_exception_filter_conditions_remain_associated_with_stages(self):
         self.launch("android")

@@ -26,7 +26,7 @@ public enum RemoteOperation
     ExceptionInfo = 19,
 }
 
-public static class RemoteContract { public const int ModelVersion = 2; }
+public static class RemoteContract { public const int ModelVersion = 3; }
 
 public sealed record RemoteHello(string Token);
 public sealed record RemoteCapabilities(string Runtime, string Platform, bool ManagedDebugging, string? Blocker, string? Bootstrap = null, PrivateBootstrapIdentity? SupportedBuild = null, string? Scope = null, int ModelVersion = 0, string? Provider = null, string[]? Features = null);
@@ -52,9 +52,10 @@ public sealed record RemoteEvent(string Kind, long Generation, RemoteStop? Stop 
 public sealed record RemoteThread(int Id, string Name);
 public sealed record RemoteModule(string Id, string Name, string Path, string Mvid, long Generation);
 public sealed record RemoteScope(string Name, long Handle, int Count);
-public sealed record RemoteVariables(long Handle, int Start = 0, int Count = 100, string? Filter = null);
+public sealed record RemoteVariables(long Handle, int Start = 0, int Count = 0, string? Filter = null);
 public sealed record RemoteStep(long Stop, int ThreadId, string Kind);
-public sealed record RemoteExceptions(string[] Filters, string[]? Types = null);
+public sealed record RemoteExceptionRule(string Filter, string? Type = null);
+public sealed record RemoteExceptions(RemoteExceptionRule[] Rules);
 public sealed record RemoteException(string Type, string Description, string BreakMode);
 
 [JsonSerializable(typeof(RemoteEnvelope))]
@@ -111,6 +112,8 @@ public sealed record RemoteException(string Type, string Description, string Bre
 [JsonSerializable(typeof(RemoteVariables[]))]
 [JsonSerializable(typeof(RemoteStep))]
 [JsonSerializable(typeof(RemoteStep[]))]
+[JsonSerializable(typeof(RemoteExceptionRule))]
+[JsonSerializable(typeof(RemoteExceptionRule[]))]
 [JsonSerializable(typeof(RemoteExceptions))]
 [JsonSerializable(typeof(RemoteExceptions[]))]
 [JsonSerializable(typeof(RemoteException))]

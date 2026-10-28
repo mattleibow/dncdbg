@@ -23,7 +23,7 @@ enum class Operation {
     Exceptions = 18,
     ExceptionInfo = 19,
 };
-constexpr int ModelVersion = 2;
+constexpr int ModelVersion = 3;
 inline bool ContractInteger(const Json& value, int64_t minimum, int64_t maximum) {
     if (!value.is_number_integer()) return false;
     if (value.is_number_unsigned()) { uint64_t number = value.get<uint64_t>();
@@ -61,6 +61,7 @@ inline void Validate_RemoteModule(const Json& body);
 inline void Validate_RemoteScope(const Json& body);
 inline void Validate_RemoteVariables(const Json& body);
 inline void Validate_RemoteStep(const Json& body);
+inline void Validate_RemoteExceptionRule(const Json& body);
 inline void Validate_RemoteExceptions(const Json& body);
 inline void Validate_RemoteException(const Json& body);
 inline void Validate_RemoteHello(const Json& body) {
@@ -341,17 +342,18 @@ inline void Validate_RemoteStep(const Json& body) {
     if (!(ContractInteger(body.at("ThreadId"), -2147483648LL, 2147483647LL))) throw std::runtime_error("MalformedPayload");
     if (!(body.at("Kind").is_string())) throw std::runtime_error("MalformedPayload");
 }
+inline void Validate_RemoteExceptionRule(const Json& body) {
+    if (!body.is_object()) throw std::runtime_error("MalformedPayload");
+    if (!(body.at("Filter").is_string())) throw std::runtime_error("MalformedPayload");
+    if (body.contains("Type") && !body.at("Type").is_null()) {
+        if (!(body.at("Type").is_string())) throw std::runtime_error("MalformedPayload");
+    }
+}
 inline void Validate_RemoteExceptions(const Json& body) {
     if (!body.is_object()) throw std::runtime_error("MalformedPayload");
-    if (!body.at("Filters").is_array()) throw std::runtime_error("MalformedPayload");
-    for (const auto& element : body.at("Filters")) {
-        if (!(element.is_string())) throw std::runtime_error("MalformedPayload");
-    }
-    if (body.contains("Types") && !body.at("Types").is_null()) {
-        if (!body.at("Types").is_array()) throw std::runtime_error("MalformedPayload");
-        for (const auto& element : body.at("Types")) {
-            if (!(element.is_string())) throw std::runtime_error("MalformedPayload");
-        }
+    if (!body.at("Rules").is_array()) throw std::runtime_error("MalformedPayload");
+    for (const auto& element : body.at("Rules")) {
+        Validate_RemoteExceptionRule(element);
     }
 }
 inline void Validate_RemoteException(const Json& body) {

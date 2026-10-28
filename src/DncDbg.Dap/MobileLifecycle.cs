@@ -16,6 +16,7 @@ internal sealed class MobileCommands
         if (environment != null)
             foreach (var (name, value) in environment) start.Environment[name] = value;
         using var process = new Process { StartInfo = start };
+        token.ThrowIfCancellationRequested();
         process.Start();
         Task<string> output = process.StandardOutput.ReadToEndAsync();
         Task<string> error = process.StandardError.ReadToEndAsync();
@@ -52,7 +53,11 @@ internal interface IMobileTunnel : IAsyncDisposable
 
 internal sealed class SimulatorTunnel : IMobileTunnel
 {
-    public Task<RemoteEndpoint> OpenAsync(RemoteEndpoint target, CancellationToken token) => Task.FromResult(target);
+    public Task<RemoteEndpoint> OpenAsync(RemoteEndpoint target, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        return Task.FromResult(target);
+    }
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 }
 
@@ -110,11 +115,21 @@ internal sealed class PrivateCoreClrProvider : IMobileDebuggerProvider
     }
 }
 
+internal sealed class MobileInstallation
+{
+    public string Id { get; } = Guid.NewGuid().ToString("N");
+    public bool Owned { get; set; }
+}
+
 internal sealed class MobileLifecycle : IAsyncDisposable
 {
     private readonly MobileLaunchArguments options;
     private readonly MobileCommands commands = new();
     private readonly IMobileTunnel tunnel;
+    private readonly MobileInstallation installation;
+    private readonly object gate = new();
+    private readonly CancellationTokenSource acquisitionCancellation = new();
+    private Task? acquisition, closing;
     private bool installed, started;
     private bool disposed;
     private string? dataContainer;
@@ -122,9 +137,10 @@ internal sealed class MobileLifecycle : IAsyncDisposable
     public int ProcessId { get; private set; }
     public IRemoteDebugModel? Client { get; private set; }
 
-    public MobileLifecycle(MobileLaunchArguments options)
+    public MobileLifecycle(MobileLaunchArguments options, MobileInstallation installation)
     {
         this.options = options;
+        this.installation = installation;
         if (options.Platform is not ("android" or "iosSimulator") ||
             options.RuntimeIdentifier != (options.Platform == "android" ? "android-arm64" : "iossimulator-arm64"))
             throw new PlatformNotSupportedException("Only pinned android-arm64 emulators and iossimulator-arm64 simulators are implemented.");
@@ -153,9 +169,19 @@ internal sealed class MobileLifecycle : IAsyncDisposable
     private Task<string> Sim(CancellationToken token, bool allowFailure = false, params string[] args) =>
         commands.RunAsync("xcrun", new[] { "simctl" }.Concat(args), token, allowFailure);
 
-    public async Task ConnectAsync(CancellationToken token)
+    public Task ConnectAsync(CancellationToken token)
     {
-        using var startup = CancellationTokenSource.CreateLinkedTokenSource(token);
+        lock (gate)
+        {
+            ObjectDisposedException.ThrowIf(disposed, this);
+            if (acquisition != null) throw new InvalidOperationException("Mobile acquisition has already started.");
+            return acquisition = ConnectCoreAsync(token);
+        }
+    }
+
+    private async Task ConnectCoreAsync(CancellationToken token)
+    {
+        using var startup = CancellationTokenSource.CreateLinkedTokenSource(token, acquisitionCancellation.Token);
         startup.CancelAfter(TimeSpan.FromSeconds(options.StartupTimeoutSeconds));
         token = startup.Token;
         string? container = null;
@@ -164,15 +190,20 @@ internal sealed class MobileLifecycle : IAsyncDisposable
             if (await Adb(token, false, "shell", "getprop", "sys.boot_completed") != "1")
                 throw new InvalidOperationException("The selected emulator is not booted.");
             string previous = await Adb(token, true, "shell", "pm", "path", options.ApplicationId);
-            if (previous.StartsWith("package:", StringComparison.Ordinal) && !options.ReplaceExisting)
+            bool owned = installation.Owned &&
+                await Adb(token, true, "exec-out", "run-as", options.ApplicationId, "cat", "files/dncdbg-installation-id") == installation.Id;
+            if (previous.StartsWith("package:", StringComparison.Ordinal) && !options.ReplaceExisting && !owned)
                 throw new InvalidOperationException("The application is already installed. Set mobile.replaceExisting explicitly or select a dedicated emulator.");
-            await Adb(token, false, "install", "-r", Path.GetFullPath(options.AppPath));
             installed = true;
+            await Adb(token, false, "install", "-r", Path.GetFullPath(options.AppPath));
+            installation.Owned = true;
             await Adb(token, false, "shell", "am", "force-stop", options.ApplicationId);
             await Adb(token, true, "shell", "run-as", options.ApplicationId, "rm", "-f", "files/dncdbg-remote.json");
             await Adb(token, false, "shell", "run-as", options.ApplicationId, "mkdir", "-p", "files");
             await commands.RunAsync("adb", ["-s", options.DeviceId, "shell", "-T", "run-as", options.ApplicationId,
                 "tee", "files/dncdbg-session-id"], token, input: SessionId);
+            await commands.RunAsync("adb", ["-s", options.DeviceId, "shell", "-T", "run-as", options.ApplicationId,
+                "tee", "files/dncdbg-installation-id"], token, input: installation.Id);
             string activity = (await Adb(token, false, "shell", "cmd", "package", "resolve-activity", "--brief", options.ApplicationId))
                 .Split('\n').Last().Trim();
             if (!Regex.IsMatch(activity, @"\A" + Regex.Escape(options.ApplicationId) + @"/[A-Za-z0-9_.$]+\z"))
@@ -189,13 +220,22 @@ internal sealed class MobileLifecycle : IAsyncDisposable
                 .Any(x => x.GetProperty("udid").GetString() == options.DeviceId))
                 throw new InvalidOperationException("The exact selected iOS simulator is not booted.");
             string previous = await Sim(token, true, "get_app_container", options.DeviceId, options.ApplicationId, "app");
-            if (previous.Length > 0 && !options.ReplaceExisting)
+            bool owned = false;
+            if (previous.Length > 0 && installation.Owned)
+            {
+                string previousData = await Sim(token, false, "get_app_container", options.DeviceId, options.ApplicationId, "data");
+                string marker = Path.Combine(previousData, "Library/dncdbg-installation-id");
+                owned = File.Exists(marker) && await File.ReadAllTextAsync(marker, token) == installation.Id;
+            }
+            if (previous.Length > 0 && !options.ReplaceExisting && !owned)
                 throw new InvalidOperationException("The application is already installed. Set mobile.replaceExisting explicitly or select a dedicated simulator.");
-            await Sim(token, false, "install", options.DeviceId, Path.GetFullPath(options.AppPath));
             installed = true;
+            await Sim(token, false, "install", options.DeviceId, Path.GetFullPath(options.AppPath));
+            installation.Owned = true;
             await Sim(token, true, "terminate", options.DeviceId, options.ApplicationId);
             container = await Sim(token, false, "get_app_container", options.DeviceId, options.ApplicationId, "data");
             dataContainer = container;
+            await File.WriteAllTextAsync(Path.Combine(container, "Library/dncdbg-installation-id"), installation.Id, token);
             started = true;
             await commands.RunAsync("xcrun", ["simctl", "launch", options.DeviceId, options.ApplicationId], token,
                 environment: new Dictionary<string, string> { ["SIMCTL_CHILD_DNCDBG_SESSION_ID"] = SessionId });
@@ -219,14 +259,33 @@ internal sealed class MobileLifecycle : IAsyncDisposable
             if (endpoint == null) await Task.Delay(100, token);
         }
         ProcessId = endpoint.ProcessId;
+        token.ThrowIfCancellationRequested();
         RemoteEndpoint routeEndpoint = await tunnel.OpenAsync(endpoint, token);
+        token.ThrowIfCancellationRequested();
         Client = await new PrivateCoreClrProvider().ConnectAsync(routeEndpoint, options, token);
+        token.ThrowIfCancellationRequested();
     }
 
-    public async Task CloseAsync(bool terminate)
+    public Task CloseAsync(bool terminate)
     {
-        if (disposed) return;
-        disposed = true;
+        lock (gate)
+        {
+            if (closing != null) return closing;
+            disposed = true;
+            acquisitionCancellation.Cancel();
+            return closing = CloseCoreAsync(terminate);
+        }
+    }
+
+    private async Task CloseCoreAsync(bool terminate)
+    {
+        // Acquisition may publish an installed app, route or client as cancellation
+        // arrives. Settle it before taking the final resource snapshot.
+        if (acquisition != null)
+        {
+            try { await acquisition; }
+            catch (Exception) { }
+        }
         var failures = new List<Exception>();
         async Task Attempt(Func<CancellationToken, Task> action)
         {
@@ -278,10 +337,12 @@ internal sealed class MobileLifecycle : IAsyncDisposable
                     await Adb(token, false, "uninstall", options.ApplicationId);
                 else
                     await Sim(token, false, "uninstall", options.DeviceId, options.ApplicationId);
+                installation.Owned = false;
             }
         });
         try { await tunnel.DisposeAsync(); }
         catch (Exception e) { failures.Add(e); }
+        acquisitionCancellation.Dispose();
         if (failures.Count > 0) throw new AggregateException("Mobile cleanup failed.", failures);
     }
 

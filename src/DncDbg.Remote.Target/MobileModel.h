@@ -250,6 +250,15 @@ Json ObjectSymbols(ObjectValue* object, Ref<Class>& klass) {
     if (!symbols.is_null()) for (auto& type : symbols.at("Types")) if (type.at("Token") == token) return type;
     return nullptr;
 }
+template<class T> std::string FloatingText(T value) {
+    if (std::isnan(value)) return "NaN";
+    if (std::isinf(value)) return std::signbit(value) ? "-Infinity" : "Infinity";
+    char buffer[128];
+    auto result = std::to_chars(buffer, buffer + sizeof(buffer), value, std::chars_format::general,
+                               std::numeric_limits<T>::max_digits10);
+    if (result.ec != std::errc{}) throw std::runtime_error("ValueFormattingFailed");
+    return std::string(buffer, result.ptr);
+}
 Json Describe(Value* original, const std::string& name = "") {
     Ref<Value> value;
     Dereference(original, value);
@@ -294,8 +303,8 @@ Json Describe(Value* original, const std::string& name = "") {
             case 9: result["Value"] = std::to_string(static_cast<uint32_t>(bits)); result["Type"] = "uint"; break;
             case 10: result["Value"] = std::to_string(static_cast<int64_t>(bits)); result["Type"] = "long"; break;
             case 11: result["Value"] = std::to_string(bits); result["Type"] = "ulong"; break;
-            case 12: { float f; std::memcpy(&f, &bits, sizeof(f)); result["Value"] = std::to_string(f); result["Type"] = "float"; break; }
-            case 13: { double d; std::memcpy(&d, &bits, sizeof(d)); result["Value"] = std::to_string(d); result["Type"] = "double"; break; }
+            case 12: { float f; std::memcpy(&f, &bits, sizeof(f)); result["Value"] = FloatingText(f); result["Type"] = "float"; break; }
+            case 13: { double d; std::memcpy(&d, &bits, sizeof(d)); result["Value"] = FloatingText(d); result["Type"] = "double"; break; }
         }
         return result;
     }
@@ -346,16 +355,18 @@ void ChildValue(Value* value, const std::string& member, bool indexed, Ref<Value
 }
 Json ModelVariables(const Json& request) {
     int64_t id = request.at("Handle").get<int64_t>();
-    int start = request.value("Start", 0), count = request.value("Count", 100);
+    int start = request.value("Start", 0), count = request.value("Count", 0);
     if (!stoppedController || !modelLeases.count(id) || start < 0 || count < 0 || count > 1000)
         throw std::runtime_error("InvalidState");
-    if (count == 0) count = 100;
+    bool all = count == 0;
+    if (all) count = 1000;
     std::string filter = request.contains("Filter") && !request.at("Filter").is_null() ? request.at("Filter").get<std::string>() : "";
     if (filter != "" && filter != "named" && filter != "indexed") throw std::runtime_error("InvalidState");
     const auto& lease = modelLeases.at(id);
     Json result = Json::array();
     if (lease.scope) {
         if (filter == "indexed") return result;
+        if (all && lease.variables.size() > static_cast<size_t>(start) + count) throw std::runtime_error("VariableLimit");
         int index = 0;
         for (auto& variable : lease.variables) {
             if (index++ < start) continue;
@@ -374,6 +385,7 @@ Json ModelVariables(const Json& request) {
         if ((indexed && filter == "named") || (!indexed && filter == "indexed")) return result;
         if (indexed) {
             uint32_t size = 0; Require(array.value->GetCount(&size));
+            if (all && size > static_cast<uint64_t>(start) + count) throw std::runtime_error("VariableLimit");
             for (uint32_t i = static_cast<uint32_t>(start); i < size && result.size() < static_cast<size_t>(count); ++i) {
                 Ref<Value> child; Require(array.value->GetElementAtPosition(i, &child.value));
                 result.push_back(Describe(child.value, "[" + std::to_string(i) + "]"));
@@ -383,6 +395,7 @@ Json ModelVariables(const Json& request) {
             Require(value->QueryInterface(ObjectValueId, reinterpret_cast<void**>(&object.value)));
             Json symbols = ObjectSymbols(object.value, klass);
             if (symbols.is_null()) throw std::runtime_error("SymbolsUnavailable");
+            if (all && symbols.at("Fields").size() > static_cast<size_t>(start) + count) throw std::runtime_error("VariableLimit");
             int index = 0;
             for (auto& field : symbols.at("Fields")) {
                 if (index++ < start) continue;
@@ -522,16 +535,41 @@ std::string ModelExceptionType(Thread* thread) {
     if (count > 1024) throw std::runtime_error("TypeNameLimit");
     return Utf8(name, count && name[count - 1] == 0 ? count - 1 : count);
 }
-bool ModelExceptionMatches(Unknown* thread) {
-    if (exceptionTypes.empty()) return true;
-    std::string type = ModelExceptionType(static_cast<Thread*>(thread));
-    return std::find(exceptionTypes.begin(), exceptionTypes.end(), type) != exceptionTypes.end();
+void ModelExceptions(const Json& request) {
+    const auto& rules = request.at("Rules");
+    if (rules.size() > 64) throw std::runtime_error("InvalidState");
+    std::vector<ExceptionRule> parsed;
+    for (const auto& rule : rules) {
+        std::string filter = rule.at("Filter").get<std::string>();
+        if (filter != "all" && filter != "unhandled") throw std::runtime_error("UnsupportedOperation");
+        std::string type;
+        if (rule.contains("Type") && !rule.at("Type").is_null()) {
+            type = rule.at("Type").get<std::string>();
+            if (type.empty() || type.size() > 256 ||
+                !(std::isalpha(static_cast<unsigned char>(type[0])) || type[0] == '_') ||
+                !std::all_of(type.begin(), type.end(), [](unsigned char c) {
+                    return std::isalnum(c) || c == '_' || c == '.' || c == '+' || c == '`';
+                })) throw std::runtime_error("InvalidState");
+        }
+        parsed.push_back({filter == "all" ? CallbackKind::ExceptionThrown : CallbackKind::ExceptionUnhandled, std::move(type)});
+    }
+    exceptionRules = std::move(parsed);
+}
+bool ModelExceptionMatches(Unknown* thread, CallbackKind stage) {
+    std::string type;
+    for (const auto& rule : exceptionRules) {
+        if (rule.stage != stage) continue;
+        if (rule.type.empty()) return true;
+        if (type.empty()) type = ModelExceptionType(static_cast<Thread*>(thread));
+        if (rule.type == type) return true;
+    }
+    return false;
 }
 Json ModelException(int64_t id) {
     if (id != stopId || stopReason != "exception" || !stoppedThread) throw std::runtime_error("InvalidState");
     std::string type = ModelExceptionType(static_cast<Thread*>(stoppedThread));
     return {{"Type", type}, {"Description", type + " (message/property func-eval is unavailable in this provider)"},
-        {"BreakMode", breakThrown ? "always" : "unhandled"}};
+        {"BreakMode", exceptionBreakMode}};
 }
 void ModelConfigure(const Json& request) {
     bool append = request.value("Append", false);

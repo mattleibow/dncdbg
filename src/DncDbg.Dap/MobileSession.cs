@@ -16,18 +16,19 @@ internal sealed class MobileSession : IDisposable
     private readonly ConcurrentDictionary<(string Source, int Line), int> breakpointIds = new();
     private int nextBreakpoint;
     private readonly object stateGate = new();
+    private readonly object acquisitionGate = new(), closeGate = new();
+    private readonly MobileInstallation installation = new();
     private int terminatedSent;
     private readonly Dictionary<string, int[]> breakpoints = new(StringComparer.Ordinal);
     private int nextHandle;
     private RemoteStop? stop;
     private RemoteSymbols symbols = null!;
     private MobileLifecycle lifecycle = null!;
-    private CancellationTokenSource lifetime = new();
+    private readonly CancellationTokenSource lifetime = new();
     private CancellationTokenSource pollStop = new();
     private Task? polling;
-    private string[] exceptionFilters = ["unhandled"];
-    private string[]? exceptionTypes;
-    private bool closed;
+    private RemoteExceptionRule[] exceptionRules = [new("unhandled")];
+    private volatile bool closed;
     private bool started;
     private IRemoteDebugModel Client => lifecycle.Client ?? throw new InvalidOperationException("The mobile debugger is not connected.");
     private CancellationToken Token => lifetime.Token;
@@ -46,7 +47,19 @@ internal sealed class MobileSession : IDisposable
 
     public void Launch()
     {
-        lifecycle = new MobileLifecycle(options);
+        lock (acquisitionGate) LaunchCore();
+    }
+
+    private void CheckOpen()
+    {
+        ObjectDisposedException.ThrowIf(closed, this);
+        Token.ThrowIfCancellationRequested();
+    }
+
+    private void LaunchCore()
+    {
+        CheckOpen();
+        lifecycle = new MobileLifecycle(options, installation);
         try
         {
             symbols = new RemoteSymbols(options.AssetsPath);
@@ -63,29 +76,33 @@ internal sealed class MobileSession : IDisposable
             }
             throw;
         }
-        connection.SendEvent("process", new
+        lock (stateGate)
         {
-            name = options.ApplicationId, systemProcessId = lifecycle.ProcessId > 0 ? (int?)lifecycle.ProcessId : null,
-            isLocalProcess = false, startMethod = "launch",
-        });
-        connection.SendEvent("capabilities", new
-        {
-            capabilities = new
+            CheckOpen();
+            connection.SendEvent("process", new
             {
-                supportsConfigurationDoneRequest = true, supportsRestartRequest = true, supportsTerminateRequest = true,
-                supportsModulesRequest = Has("modules"), supportsEvaluateForHovers = Has("safeEvaluate"),
-                supportsExceptionInfoRequest = Has("exceptions"), supportsConditionalBreakpoints = false,
-                supportsHitConditionalBreakpoints = false, supportsLogPoints = false, supportsFunctionBreakpoints = false,
-                supportsSetVariable = false, supportsSetExpression = false, supportsReadMemoryRequest = false,
-                supportsWriteMemoryRequest = false, supportsGotoTargetsRequest = false, supportsStepInTargetsRequest = false,
-                supportsSingleThreadExecutionRequests = false, supportsBreakpointLocationsRequest = false,
-                supportsCancelRequest = false, supportsValueFormattingOptions = false,
-                supportsLoadedSourcesRequest = false, supportsExceptionFilterOptions = true,
-                exceptionBreakpointFilters = new[] {
-                    new { filter = "all", label = "Thrown CLR exceptions", @default = false, supportsCondition = true, conditionDescription = "One exact CLR type name, e.g. System.InvalidOperationException" },
-                    new { filter = "unhandled", label = "Unhandled CLR exceptions", @default = true, supportsCondition = true, conditionDescription = "One exact CLR type name, e.g. System.InvalidOperationException" } },
-            },
-        });
+                name = options.ApplicationId, systemProcessId = lifecycle.ProcessId > 0 ? (int?)lifecycle.ProcessId : null,
+                isLocalProcess = false, startMethod = "launch",
+            });
+            connection.SendEvent("capabilities", new
+            {
+                capabilities = new
+                {
+                    supportsConfigurationDoneRequest = true, supportsRestartRequest = true, supportsTerminateRequest = true,
+                    supportsModulesRequest = Has("modules"), supportsEvaluateForHovers = Has("safeEvaluate"),
+                    supportsExceptionInfoRequest = Has("exceptions"), supportsConditionalBreakpoints = false,
+                    supportsHitConditionalBreakpoints = false, supportsLogPoints = false, supportsFunctionBreakpoints = false,
+                    supportsSetVariable = false, supportsSetExpression = false, supportsReadMemoryRequest = false,
+                    supportsWriteMemoryRequest = false, supportsGotoTargetsRequest = false, supportsStepInTargetsRequest = false,
+                    supportsSingleThreadExecutionRequests = false, supportsBreakpointLocationsRequest = false,
+                    supportsCancelRequest = false, supportsValueFormattingOptions = false,
+                    supportsLoadedSourcesRequest = false, supportsExceptionFilterOptions = true,
+                    exceptionBreakpointFilters = new[] {
+                        new { filter = "all", label = "Thrown CLR exceptions", @default = false, supportsCondition = true, conditionDescription = "One exact CLR type name, e.g. System.InvalidOperationException" },
+                        new { filter = "unhandled", label = "Unhandled CLR exceptions", @default = true, supportsCondition = true, conditionDescription = "One exact CLR type name, e.g. System.InvalidOperationException" } },
+                },
+            });
+        }
     }
 
     private bool Has(string feature) => Client.Capabilities.Features?.Contains(feature, StringComparer.Ordinal) == true;
@@ -96,9 +113,18 @@ internal sealed class MobileSession : IDisposable
 
     public void Start()
     {
+        lock (acquisitionGate)
+        {
+            CheckOpen();
+            StartCore();
+        }
+    }
+
+    private void StartCore()
+    {
         if (started) throw new InvalidOperationException("Mobile configuration has already completed.");
-        if (Has("exceptions")) Wait(Client.RequestExceptionsAsync(new(exceptionFilters, exceptionTypes), Token));
-        else if (exceptionFilters.Length > 0) throw new NotSupportedException("The mobile provider does not support exception filters.");
+        if (Has("exceptions")) Wait(Client.RequestExceptionsAsync(new(exceptionRules), Token));
+        else if (exceptionRules.Length > 0) throw new NotSupportedException("The mobile provider does not support exception filters.");
         Wait(Client.RequestStartAsync(new(), Token));
         started = true;
         polling = PollAsync();
@@ -235,15 +261,13 @@ internal sealed class MobileSession : IDisposable
                 Require("exceptions");
                 var args = request.GetArguments<SetExceptionBreakpointsArguments>() ?? new();
                 var filterOptions = args.FilterOptions ?? [];
-                string[] filters = args.Filters.Concat(filterOptions.Select(f => f.FilterId)).Distinct(StringComparer.Ordinal).ToArray();
-                if (filters.Any(x => x is not ("all" or "unhandled")) ||
-                    filterOptions.Any(f => f.Condition == null || !System.Text.RegularExpressions.Regex.IsMatch(f.Condition, @"\A[A-Za-z_][A-Za-z0-9_.+`]*\z")) ||
-                    (filterOptions.Length > 0 && args.Filters.Length > 0))
-                    throw new NotSupportedException("Mobile exception filters support 'all'/'unhandled' and exact CLR type conditions; no wildcards or mixing conditional/unconditional filters.");
-                string[]? types = filterOptions.Length == 0 ? null : filterOptions.Select(f => f.Condition!).Distinct(StringComparer.Ordinal).ToArray();
-                Wait(Client.RequestExceptionsAsync(new(filters, types), Token));
-                exceptionFilters = filters;
-                exceptionTypes = types;
+                var rules = args.Filters.Select(f => new RemoteExceptionRule(f))
+                    .Concat(filterOptions.Select(f => new RemoteExceptionRule(f.FilterId, f.Condition))).Distinct().ToArray();
+                if (rules.Any(r => r.Filter is not ("all" or "unhandled")) ||
+                    rules.Any(r => r.Type != null && !System.Text.RegularExpressions.Regex.IsMatch(r.Type, @"\A[A-Za-z_][A-Za-z0-9_.+`]*\z")))
+                    throw new NotSupportedException("Mobile exception filters support first-chance 'all' and 'unhandled', each with an optional exact CLR type; user-unhandled and wildcards are not supported.");
+                Wait(Client.RequestExceptionsAsync(new(rules), Token));
+                exceptionRules = rules;
                 return null;
             }
             case "threads":
@@ -291,7 +315,7 @@ internal sealed class MobileSession : IDisposable
                 return new VariablesResponseBody
                 {
                     Variables = Wait(Client.RequestVariablesAsync(new(Resolve(args.VariablesReference, false),
-                        args.Start ?? 0, args.Count ?? 100, args.Filter), Token)).Select(Variable).ToArray(),
+                        args.Start ?? 0, args.Count ?? 0, args.Filter), Token)).Select(Variable).ToArray(),
                 };
             }
             case "evaluate":
@@ -347,9 +371,11 @@ internal sealed class MobileSession : IDisposable
                 Restart();
                 return null;
             case "terminate":
+                Cancel();
                 after = () => CloseAfterResponse(true);
                 return null;
             case "detach":
+                Cancel();
                 after = () => CloseAfterResponse(false);
                 return null;
             case "disconnect":
@@ -362,8 +388,8 @@ internal sealed class MobileSession : IDisposable
 
     public void Cancel()
     {
-        pollStop.Cancel();
-        if (!started) lifetime.Cancel();
+        try { lifetime.Cancel(); }
+        catch (ObjectDisposedException) { }
     }
     private void StopPolling()
     {
@@ -373,26 +399,35 @@ internal sealed class MobileSession : IDisposable
     }
     private void Restart()
     {
-        StopPolling();
-        Wait(lifecycle.CloseAsync(terminate: true));
-        lifetime.Dispose();
-        lifetime = new();
-        pollStop.Dispose();
-        pollStop = new();
-        Invalidate();
-        started = false;
-        terminatedSent = 0;
-        Launch();
-        foreach (var (path, lines) in breakpoints) Wait(Client.RequestSetBreakpointsAsync(symbols.Bind(path, lines), Token));
-        Start();
+        lock (acquisitionGate)
+        {
+            CheckOpen();
+            StopPolling();
+            Wait(lifecycle.CloseAsync(terminate: true));
+            CheckOpen();
+            pollStop.Dispose();
+            pollStop = new();
+            Invalidate();
+            started = false;
+            Launch();
+            foreach (var (path, lines) in breakpoints) Wait(Client.RequestSetBreakpointsAsync(symbols.Bind(path, lines), Token));
+            Start();
+        }
     }
     public void Close(bool terminate)
     {
-        if (closed) return;
-        closed = true;
-        StopPolling();
-        try { if (lifecycle != null) Wait(lifecycle.CloseAsync(terminate)); }
-        finally { Invalidate(); SendTerminated(); }
+        Cancel();
+        lock (closeGate)
+        {
+            if (closed) return;
+            lock (stateGate) closed = true;
+            lock (acquisitionGate)
+            {
+                StopPolling();
+                try { if (lifecycle != null) Wait(lifecycle.CloseAsync(terminate)); }
+                finally { Invalidate(); SendTerminated(); }
+            }
+        }
     }
     private void SendTerminated()
     {

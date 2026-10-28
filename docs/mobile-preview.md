@@ -83,7 +83,14 @@ to the desktop engine.
   happens only when explicitly selected. EOF/cancellation cleans owned routes.
 - `restart` terminates the prior launch, reacquires a new endpoint, restores
   source breakpoints/exception filters and starts a fresh execution owner.
+  With the default `replaceExisting:false`/`uninstallOnDisconnect:false`,
+  the session retains its installation identity and verifies its per-installation
+  marker before redeploying its own app. This does not authorize replacing an
+  unrelated installation, including one whose ownership marker was changed.
   Changing the launch configuration during restart is explicitly unsupported.
+- Closing cancels and settles launch/redeployment before inspecting and releasing
+  installed apps, routes and clients. Cancellation is not reset by restart;
+  no later acquisition or process event is permitted after session closure.
 
 ## Typed model and feature boundary
 
@@ -91,7 +98,9 @@ to the desktop engine.
 `python3 src/DncDbg.Remote/generate_contract.py` after editing it; CI checks
 generated C# records/client methods and native operation/request guards with
 `--check`. The wire stays strictly framed/authenticated protocol v1; mobile DAP
-requires **typed model v2**, an exact provider ID and exact pinned build tuple.
+requires **typed model v3**, an exact provider ID and exact pinned build tuple.
+Model v3 replaces the lossy exception stage/type lists with typed per-stage
+rules; v2 targets are rejected instead of silently misinterpreted.
 Capabilities expose runtime/platform, runtime/DBI/DAC identities/hashes, provider,
 model version and individual features. Modules carry MVID/load generation;
 events/stops/frames carry generation/stop identity. DAP integer references are
@@ -106,8 +115,21 @@ target-native execution owner performs all `ICorDebug` execution control.
 Inspection reads primitives, bounded UTF-16 strings, zero-based
 one-dimensional arrays and instance fields whose exact module/type symbols
 are supplied. Arrays/objects use stop-scoped leases and paged children.
+Omitted or zero variables `count` requests all remaining children, not a
+100-element page. Requests exceeding the 1000-child or framed-payload safety
+limit fail explicitly (`VariableLimit`/`ResponseLimit`), never truncate.
+Floats/doubles use invariant round-trip precision and retain NaN, infinities
+and negative zero.
 Evaluation admits local/argument names, field/index paths and checked int32
 literal addition/subtraction. It does **not** execute arbitrary managed code.
+
+Exception rules independently associate optional exact CLR type conditions with
+first-chance `all` or terminal `unhandled` stages. Conditional and unconditional
+rules can be combined without forming a cross-product. Empty filters disable
+both stages. `exceptionInfo.breakMode` reports the actual stopping stage.
+`user-unhandled` requires Just My Code classification not implemented by this
+mobile provider and is explicitly rejected; desktop exception semantics are
+unchanged.
 
 Explicit limitations:
 

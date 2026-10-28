@@ -60,6 +60,7 @@ struct Primitive final : FakeRef<GenericValue> {
     HResult SetValue(void*) override { return Fail; }
 };
 struct Array final : FakeRef<ArrayValue> {
+    uint32_t count = 150;
     Primitive child{8, int32_t{0}};
     HResult QueryInterface(const Guid& id, void** result) override {
         if (std::memcmp(&id, &ArrayValueId, sizeof(id))) return Fail;
@@ -73,13 +74,13 @@ struct Array final : FakeRef<ArrayValue> {
     HResult CreateRelocBreakpoint(Unknown**) override { return Fail; }
     HResult GetElementType(uint32_t* result) override { *result = 8; return 0; }
     HResult GetRank(uint32_t* result) override { *result = 1; return 0; }
-    HResult GetCount(uint32_t* result) override { *result = 150; return 0; }
+    HResult GetCount(uint32_t* result) override { *result = count; return 0; }
     HResult GetDimensions(uint32_t, uint32_t*) override { return Fail; }
     HResult HasBaseIndicies(Bool* result) override { *result = 0; return 0; }
     HResult GetBaseIndicies(uint32_t, uint32_t*) override { return Fail; }
     HResult GetElement(uint32_t, uint32_t*, Value**) override { return Fail; }
     HResult GetElementAtPosition(uint32_t index, Value** result) override {
-        if (index >= 150) return Fail;
+        if (index >= count) return Fail;
         child.bits = index; child.AddRef(); *result = &child; return 0;
     }
 };
@@ -181,6 +182,13 @@ void VariableChecks() {
     Json result = ModelVariables({{"Handle", handle}, {"Start", 141}, {"Count", 4}});
     Check(result.size() == 4 && result[0].at("Value") == "141" && result[3].at("Value") == "144",
           "native explicit variable pages remain bounded");
+    array.count = 1001;
+    bool limited = false;
+    try { ModelVariables({{"Handle", handle}}); }
+    catch (const std::runtime_error& error) { limited = std::strcmp(error.what(), "VariableLimit") == 0; }
+    Check(limited, "an all-variables request exceeding the provider limit returns an explicit error, never a partial array");
+    Check(ModelVariables({{"Handle", handle}, {"Start", 999}, {"Count", 2}}).size() == 2,
+          "large arrays remain accessible through explicit bounded pages");
     ContinueStop();
     Check(array.refs == 1 && array.child.refs == 1, "native array inspection releases all element and array references");
 }
@@ -215,16 +223,50 @@ void ExceptionChecks() {
     std::thread owner(Run, nullptr);
     Wire wire{fd, [] {}, Clock::now() + std::chrono::seconds(5)};
     Send(wire, 1, 1, {{"Token", std::string(64, 'a')}}); wire.Read();
-    Send(wire, 2, 18, {{"Filters", {"all", "unhandled"}},
-        {"Types", {"System.ArgumentException", "System.InvalidOperationException"}}});
+    Send(wire, 2, 18, {{"Rules", Json::array({
+        {{"Filter", "all"}, {"Type", "System.ArgumentException"}},
+        {{"Filter", "unhandled"}, {"Type", "System.InvalidOperationException"}}})}});
     wire.Read();
     Enqueue(&controller, &thread, CallbackKind::ExceptionThrown);
     Send(wire, 3, 11, Json::object());
     Json response = wire.Read();
     bool caughtInvalidOperationIgnored = response.at("Error").is_null() && response.at("Body").is_array() && response.at("Body").empty();
     close(fd); owner.join();
+    cleaning = false;
     Check(caughtInvalidOperationIgnored,
           "caught first-chance InvalidOperationException does not match all:ArgumentException plus unhandled:InvalidOperationException");
+    auto callback = [&](CallbackKind stage, const char16_t* type, bool expected, const char* name) {
+        thread.exception.klass.module.metadata.name = type;
+        Enqueue(&controller, &thread, stage); Pump();
+        bool stopped = stoppedController != nullptr;
+        std::string mode = stopped ? ModelException(stopId).at("BreakMode").get<std::string>() : "";
+        if (stopped) ContinueStop();
+        Check(stopped == expected, name);
+        if (stopped) Check(mode == (stage == CallbackKind::ExceptionThrown ? "always" : "unhandled"),
+                           "exceptionInfo breakMode reflects the matched callback stage");
+    };
+    callback(CallbackKind::ExceptionThrown, u"System.ArgumentException", true, "conditional all matches its own first-chance type");
+    callback(CallbackKind::ExceptionUnhandled, u"System.ArgumentException", false, "conditional all does not enable unrelated unhandled stages");
+    callback(CallbackKind::ExceptionUnhandled, u"System.InvalidOperationException", true, "conditional unhandled matches its own terminal type");
+    ModelExceptions({{"Rules", Json::array({{{"Filter", "all"}}})}});
+    callback(CallbackKind::ExceptionThrown, u"System.InvalidOperationException", true, "unconditional all matches first-chance exceptions");
+    callback(CallbackKind::ExceptionUnhandled, u"System.InvalidOperationException", false, "all alone retains first-chance-only semantics");
+    ModelExceptions({{"Rules", Json::array({{{"Filter", "unhandled"}}})}});
+    callback(CallbackKind::ExceptionThrown, u"System.InvalidOperationException", false, "unhandled alone ignores caught first-chance exceptions");
+    callback(CallbackKind::ExceptionUnhandled, u"System.InvalidOperationException", true, "unhandled alone stops terminal exceptions");
+    ModelExceptions({{"Rules", Json::array({{{"Filter", "all"}}, {{"Filter", "unhandled"}}})}});
+    callback(CallbackKind::ExceptionThrown, u"System.ArgumentException", true, "combined unconditional filters preserve thrown stage");
+    callback(CallbackKind::ExceptionUnhandled, u"System.InvalidOperationException", true, "combined unconditional filters preserve unhandled stage");
+    bool rejected = false;
+    try { ModelExceptions({{"Rules", Json::array({{{"Filter", "user-unhandled"}}})}}); }
+    catch (const std::runtime_error& error) { rejected = std::strcmp(error.what(), "UnsupportedOperation") == 0; }
+    Check(rejected, "user-unhandled is explicitly unsupported rather than reinterpreted without Just My Code");
+    ModelExceptions({{"Rules", Json::array()}});
+    callback(CallbackKind::ExceptionThrown, u"System.ArgumentException", false, "empty filters ignore thrown exceptions");
+    callback(CallbackKind::ExceptionUnhandled, u"System.InvalidOperationException", false, "empty filters ignore unhandled exceptions");
+    Check(controller.refs == 1 && thread.refs == 1 && thread.exception.refs == 1 &&
+          thread.exception.klass.refs == 1 && thread.exception.klass.module.refs == 1 &&
+          thread.exception.klass.module.metadata.refs == 1, "exception filtering releases every callback/metadata/value reference");
 }
 }
 

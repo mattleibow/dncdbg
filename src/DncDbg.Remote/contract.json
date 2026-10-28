@@ -1,5 +1,5 @@
 {
-  "modelVersion": 2,
+  "modelVersion": 3,
   "operations": [
     ["Hello", 1, "RemoteHello", "RemoteCapabilities"],
     ["SetBreakpoints", 2, "RemoteBreakpoints", "RemoteBreakpoint[]"],
@@ -50,9 +50,10 @@
     "RemoteThread": ["int Id", "string Name"],
     "RemoteModule": ["string Id", "string Name", "string Path", "string Mvid", "long Generation"],
     "RemoteScope": ["string Name", "long Handle", "int Count"],
-    "RemoteVariables": ["long Handle", "int Start = 0", "int Count = 100", "string? Filter = null"],
+    "RemoteVariables": ["long Handle", "int Start = 0", "int Count = 0", "string? Filter = null"],
     "RemoteStep": ["long Stop", "int ThreadId", "string Kind"],
-    "RemoteExceptions": ["string[] Filters", "string[]? Types = null"],
+    "RemoteExceptionRule": ["string Filter", "string? Type = null"],
+    "RemoteExceptions": ["RemoteExceptionRule[] Rules"],
     "RemoteException": ["string Type", "string Description", "string BreakMode"]
   }
 }

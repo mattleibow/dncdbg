@@ -70,7 +70,7 @@ def tool():
 
 
 class Remote:
-    def __init__(self, state, platform, model_version=2, start_error=None):
+    def __init__(self, state, platform, model_version=3, start_error=None):
         self.listener = socket.socket()
         self.listener.bind(("127.0.0.1", 0))
         self.listener.listen()
@@ -449,6 +449,25 @@ class MobileDapTests(unittest.TestCase):
                 self.dap.request("launch", {"mobile": self.options(platform)}, success=False)
         self.assertFalse(any("install" in c for c in self.commands()))
 
+    def test_restart_rejects_lost_installation_identity_on_both_platforms(self):
+        for platform in ("android", "iosSimulator"):
+            with self.subTest(platform=platform):
+                self.dap.close()
+                (self.state / "installed").unlink(missing_ok=True)
+                self.dap = Dap(self.env)
+                self.dap.request("initialize", {"adapterID": "dncdbg"})
+                self.remote = Remote(self.state, "Android" if platform == "android" else "iOS")
+                launch = self.dap.send("launch", {"mobile": self.options(platform) | {"uninstallOnDisconnect": False}})
+                self.dap.request("configurationDone")
+                self.dap.response(launch)
+                self.dap.event("stopped")
+                marker = self.state / ("dncdbg-installation-id" if platform == "android" else "Library/dncdbg-installation-id")
+                marker.write_text("a-different-owner")
+                installs = sum("install" in c for c in self.commands())
+                self.dap.request("restart", success=False)
+                self.assertEqual(sum("install" in c for c in self.commands()), installs)
+                self.remote.close()
+
     def test_variables_omitted_and_zero_count_return_all_150(self):
         self.launch("android")
         frame = self.dap.request("stackTrace", {"threadId": 7})["stackFrames"][0]["id"]
@@ -471,6 +490,12 @@ class MobileDapTests(unittest.TestCase):
             {"Filter": "all", "Type": "System.ArgumentException"},
             {"Filter": "unhandled", "Type": "System.InvalidOperationException"}]})
         self.dap.request("setExceptionBreakpoints", {"filters": ["user-unhandled"]}, success=False)
+        self.dap.request("setExceptionBreakpoints", {"filters": ["unhandled"], "filterOptions": [
+            {"filterId": "all", "condition": "System.ArgumentException"}]})
+        body = next(body for op, body in reversed(self.remote.requests) if op == 18)
+        self.assertEqual(body["Rules"][0]["Filter"], "unhandled")
+        self.assertIsNone(body["Rules"][0].get("Type"))
+        self.assertEqual(body["Rules"][1], {"Filter": "all", "Type": "System.ArgumentException"})
 
 
 if __name__ == "__tool__":

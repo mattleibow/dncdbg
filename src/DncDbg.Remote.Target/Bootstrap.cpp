@@ -5,6 +5,8 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <charconv>
+#include <cmath>
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
@@ -12,6 +14,7 @@
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <limits>
 #include <mutex>
 #include <pthread.h>
 #include <string>
@@ -62,9 +65,10 @@ bool cleaning = false;
 std::unordered_map<int64_t, Unknown*> frames;
 Json catalog = Json::array(), mobileEvents = Json::array();
 std::string stopReason = "breakpoint";
-bool breakThrown = false, breakUnhandled = true;
-std::vector<std::string> exceptionTypes;
-bool ModelExceptionMatches(Unknown*);
+struct ExceptionRule { CallbackKind stage; std::string type; };
+std::vector<ExceptionRule> exceptionRules{{CallbackKind::ExceptionUnhandled, ""}};
+std::string exceptionBreakMode = "unhandled";
+bool ModelExceptionMatches(Unknown*, CallbackKind);
 void ModelClear();
 void ModelBind(Unknown*);
 void ModelModule(Unknown*, bool);
@@ -285,8 +289,7 @@ void Pump() {
         Ref<> object{callback.object};
         bool exception = callback.kind == CallbackKind::ExceptionThrown || callback.kind == CallbackKind::ExceptionUnhandled;
         bool shouldStop = callback.kind == CallbackKind::Breakpoint || callback.kind == CallbackKind::Step ||
-            callback.kind == CallbackKind::Pause || (exception && (callback.kind == CallbackKind::ExceptionThrown ? breakThrown : breakUnhandled) &&
-                ModelExceptionMatches(callback.object));
+            callback.kind == CallbackKind::Pause || (exception && ModelExceptionMatches(callback.object, callback.kind));
         if (shouldStop && !stoppedController && !cleaning) {
             stoppedController = callback.controller;
             stoppedThread = callback.object;
@@ -294,6 +297,7 @@ void Pump() {
             stopId = NewId();
             stopReason = exception ? "exception" : callback.kind == CallbackKind::Step ? "step" :
                 callback.kind == CallbackKind::Pause ? "pause" : "breakpoint";
+            if (exception) exceptionBreakMode = callback.kind == CallbackKind::ExceptionThrown ? "always" : "unhandled";
             ModelDeactivateStepper();
             Report("managed-breakpoint-callback");
             return;
@@ -606,21 +610,7 @@ void* Run(void*) {
                     case 15: result = ModelVariables(body); break;
                     case 16: ModelStep(body); break;
                     case 17: ModelPause(); break;
-                    case 18: {
-                        const auto filters = body.at("Filters").get<std::vector<std::string>>();
-                        if (filters.size() > 2 || std::any_of(filters.begin(), filters.end(),
-                            [](const std::string& value) { return value != "all" && value != "unhandled"; }))
-                            throw std::runtime_error("UnsupportedOperation");
-                        std::vector<std::string> types;
-                        if (body.contains("Types") && !body.at("Types").is_null()) types = body.at("Types").get<std::vector<std::string>>();
-                        if (types.size() > 32 || std::any_of(types.begin(), types.end(),
-                            [](const std::string& value) { return value.empty() || value.size() > 256; }))
-                            throw std::runtime_error("InvalidState");
-                        breakThrown = std::find(filters.begin(), filters.end(), "all") != filters.end();
-                        breakUnhandled = std::find(filters.begin(), filters.end(), "unhandled") != filters.end();
-                        exceptionTypes = std::move(types);
-                        break;
-                    }
+                    case 18: ModelExceptions(body); break;
                     case 19: result = ModelException(body.at("Id").get<int64_t>()); break;
                     default: wire.Reply(request, Json::object(), "UnsupportedOperation"); continue;
                 }

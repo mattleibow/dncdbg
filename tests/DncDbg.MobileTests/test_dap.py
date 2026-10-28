@@ -91,6 +91,8 @@ class Remote:
                          "Mvid": "0" * 32, "Generation": 1}]
         self.operations = []
         self.requests = []
+        self.stack_count = 1
+        self.stack_complete = True
         self.thread = threading.Thread(target=self.serve, daemon=True)
         self.thread.start()
 
@@ -137,9 +139,12 @@ class Remote:
                     elif op == 13:
                         result = self.modules
                     elif op == 5:
-                        result = [{"Handle": generation + 1, "Name": "Program.Main", "Source": None,
+                        rows = [{"Handle": generation + 1000 + i, "Name": f"Program.Frame{i}", "Source": None,
                                    "Line": 0, "StopId": generation, "Mvid": "0" * 32,
-                                   "MethodToken": 0x06000001, "IlOffset": 0}]
+                                   "MethodToken": 0x06000001, "IlOffset": i} for i in range(self.stack_count)]
+                        start, count = body.get("Start", 0), body.get("Count", 0)
+                        result = {"Frames": rows[start:start + count] if count else rows[start:],
+                                  "TotalFrames": len(rows), "Complete": self.stack_complete}
                     elif op == 14:
                         result = [{"Name": "Locals", "Handle": generation + 2, "Count": 4}]
                     elif op == 15:
@@ -153,7 +158,9 @@ class Remote:
                                   {"Name": "numbers", "Value": "int[150]", "Type": "int[]",
                                    "Handle": generation + 3, "IndexedVariables": 150}]
                     elif op == 6:
-                        if body["Expression"] == "answer + 1":
+                        if body["Expression"].startswith("shifted"):
+                            error = "UnsupportedArrayBounds"
+                        elif body["Expression"] == "answer + 1":
                             result = {"Value": "43", "Type": "int", "Handle": 0}
                         else:
                             error = "UnsupportedExpression"
@@ -327,6 +334,37 @@ class MobileDapTests(unittest.TestCase):
         commands = [json.loads(x) for x in (self.state / "commands.jsonl").read_text().splitlines()]
         self.assertFalse(any(c[0] == "adb" or "uninstall" in c for c in commands))
         self.assertIn(9, self.remote.operations)
+
+    def test_deep_stack_pages_preserve_truthful_totals(self):
+        self.launch("android")
+        self.remote.stack_count = 151
+        for arguments, start, count in [
+                ({}, 0, 0), ({"levels": 0}, 0, 0),
+                ({"startFrame": 128}, 128, 0), ({"startFrame": 128, "levels": 0}, 128, 0),
+                ({"startFrame": 128, "levels": 10}, 128, 10),
+                ({"startFrame": 149, "levels": 10}, 149, 10),
+                ({"startFrame": 151}, 151, 0), ({"startFrame": 200}, 200, 0)]:
+            page = self.dap.request("stackTrace", {"threadId": 7} | arguments)
+            end = min(151, start + count) if count else 151
+            self.assertEqual(page["totalFrames"], 151)
+            self.assertEqual([f["name"] for f in page["stackFrames"]],
+                             [f"Program.Frame{i}" for i in range(start, end)])
+            self.assertEqual([body for op, body in self.remote.requests if op == 5][-1],
+                             {"Id": 101, "Start": start, "Count": count})
+        for invalid in ({"startFrame": -1}, {"levels": -1}):
+            self.dap.request("stackTrace", {"threadId": 7} | invalid, success=False)
+
+    def test_incomplete_stack_is_never_reported_as_complete(self):
+        self.launch("android")
+        self.remote.stack_complete = False
+        self.dap.request("stackTrace", {"threadId": 7}, success=False)
+
+    def test_array_bounds_errors_survive_host_and_dap(self):
+        self.launch("android")
+        frame = self.dap.request("stackTrace", {"threadId": 7})["stackFrames"][0]["id"]
+        for expression in ("shifted", "shifted[0]", "shifted[5]", "shifted[149]", "shifted[150]"):
+            error = self.dap.request("evaluate", {"frameId": frame, "expression": expression}, success=False)
+            self.assertIn("UnsupportedArrayBounds", error["message"])
 
     def test_source_breakpoint_verification_events_keep_dap_identity(self):
         self.remote = Remote(self.state, "Android")

@@ -186,6 +186,34 @@ def main():
         dap.request("continue", {"threadId": step["threadId"]})
         ui.receive()
         ui.command('MAUI assert --automationId result-status Text "Result: 42"')
+        deep_line = next(i + 1 for i, text in enumerate(source.read_text().splitlines()) if "// MOBILE_DEEP_BREAKPOINT:" in text)
+        dap.request("setBreakpoints", {"source": {"path": str(source)},
+                                     "breakpoints": [{"line": line}, {"line": deep_line}]})
+        ui.send("MAUI tap --automationId deep-scenario")
+        deep = dap.event("stopped")
+        complete = dap.request("stackTrace", {"threadId": deep["threadId"]})
+        deep_frames = complete["stackFrames"]
+        check(complete["totalFrames"] == len(deep_frames) > 150 and
+              sum(f["name"].endswith("DeepScenario") for f in deep_frames) == 150 and
+              deep_frames[0]["line"] == deep_line, "real native stack reports all 150 recursive frames and truthful totalFrames")
+        names = [f["name"] for f in deep_frames]
+        for arguments, start, count in [
+                ({"levels": 0}, 0, 0), ({"startFrame": 128}, 128, 0),
+                ({"startFrame": 128, "levels": 0}, 128, 0),
+                ({"startFrame": 128, "levels": 10}, 128, 10),
+                ({"startFrame": len(names) + 1}, len(names) + 1, 0)]:
+            page = dap.request("stackTrace", {"threadId": deep["threadId"]} | arguments)
+            expected = names[start:start + count] if count else names[start:]
+            check(page["totalFrames"] == len(names) and [f["name"] for f in page["stackFrames"]] == expected,
+                  "real native stack page " + json.dumps(arguments))
+        for expression in ("shifted", "shifted[0]", "shifted[5]", "shifted[149]", "shifted[150]"):
+            error = dap.request("evaluate", {"frameId": deep_frames[0]["id"], "expression": expression}, success=False)
+            check("UnsupportedArrayBounds" in error["message"], "real lower-bound-five array rejects " + expression)
+        evidence["deepStack"] = complete
+        dap.request("continue", {"threadId": deep["threadId"]})
+        ui.receive()
+        ui.command('MAUI assert --automationId result-status Text "Deep result: 55"')
+        dap.request("setBreakpoints", {"source": {"path": str(source)}, "breakpoints": [{"line": line}]})
         dap.request("setExceptionBreakpoints", {"filters": [], "filterOptions": [
             {"filterId": "all", "condition": "System.ArgumentException"},
             {"filterId": "unhandled", "condition": "System.InvalidOperationException"}]})

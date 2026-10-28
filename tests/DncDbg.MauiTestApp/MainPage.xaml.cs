@@ -67,6 +67,21 @@ public partial class MainPage : ContentPage
 	[MethodImpl(MethodImplOptions.NoInlining | MethodImplOptions.NoOptimization)]
 	private static void ThrowScenario() => throw new InvalidOperationException("MOBILE_EXCEPTION");
 
+	private void OnDeepClicked(object? sender, EventArgs e)
+	{
+		ResultStatus.Text = $"Deep result: {DeepScenario(149)}";
+	}
+
+	[MethodImpl(MethodImplOptions.NoInlining | MethodImplOptions.NoOptimization)]
+	private static int DeepScenario(int depth)
+	{
+		if (depth > 0) return DeepScenario(depth - 1);
+		Array shifted = Array.CreateInstance(typeof(int), new[] { 150 }, new[] { 5 });
+		shifted.SetValue(55, 5);
+		GC.KeepAlive(shifted); // MOBILE_DEEP_BREAKPOINT: 150 recursive frames and nonzero array bounds.
+		return (int)shifted.GetValue(5)!;
+	}
+
 	private void OnWatchdogClicked(object? sender, EventArgs e)
 	{
 #if DNCDBG_TEST_FAULTS

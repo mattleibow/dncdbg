@@ -61,6 +61,7 @@ struct Primitive final : FakeRef<GenericValue> {
 };
 struct Array final : FakeRef<ArrayValue> {
     uint32_t count = 150;
+    uint32_t rank = 1, lower = 0, elementReads = 0;
     Primitive child{8, int32_t{0}};
     HResult QueryInterface(const Guid& id, void** result) override {
         if (std::memcmp(&id, &ArrayValueId, sizeof(id))) return Fail;
@@ -73,13 +74,16 @@ struct Array final : FakeRef<ArrayValue> {
     HResult IsValid(Bool* result) override { *result = 1; return 0; }
     HResult CreateRelocBreakpoint(Unknown**) override { return Fail; }
     HResult GetElementType(uint32_t* result) override { *result = 8; return 0; }
-    HResult GetRank(uint32_t* result) override { *result = 1; return 0; }
+    HResult GetRank(uint32_t* result) override { *result = rank; return 0; }
     HResult GetCount(uint32_t* result) override { *result = count; return 0; }
     HResult GetDimensions(uint32_t, uint32_t*) override { return Fail; }
-    HResult HasBaseIndicies(Bool* result) override { *result = 0; return 0; }
-    HResult GetBaseIndicies(uint32_t, uint32_t*) override { return Fail; }
+    HResult HasBaseIndicies(Bool* result) override { *result = lower != 0; return 0; }
+    HResult GetBaseIndicies(uint32_t size, uint32_t* result) override {
+        std::fill(result, result + size, lower); return 0;
+    }
     HResult GetElement(uint32_t, uint32_t*, Value**) override { return Fail; }
     HResult GetElementAtPosition(uint32_t index, Value** result) override {
+        ++elementReads;
         if (index >= count) return Fail;
         child.bits = index; child.AddRef(); *result = &child; return 0;
     }
@@ -93,7 +97,9 @@ struct ExceptionMetadata final : FakeRef<MetadataImport> {
     HResult EnumInterfaceImpls(void**, uint32_t, uint32_t*, uint32_t, uint32_t*) override { return Fail; }
     HResult EnumTypeRefs(void**, uint32_t*, uint32_t, uint32_t*) override { return Fail; }
     HResult FindTypeDefByName(const char16_t*, uint32_t, uint32_t*) override { return Fail; }
-    HResult GetScopeProps(char16_t*, uint32_t, uint32_t*, Guid*) override { return Fail; }
+    HResult GetScopeProps(char16_t*, uint32_t, uint32_t* count, Guid* mvid) override {
+        *count = 0; *mvid = {}; return 0;
+    }
     HResult GetModuleFromScope(uint32_t*) override { return Fail; }
     HResult GetTypeDefProps(uint32_t, char16_t* result, uint32_t capacity, uint32_t* count, uint32_t*, uint32_t*) override {
         if (capacity <= name.size()) return Fail;
@@ -135,7 +141,7 @@ struct ExceptionValue final : FakeRef<ObjectValue> {
     HResult GetClass(Class** result) override { klass.AddRef(); *result = &klass; return 0; }
     HResult GetFieldValue(Class*, uint32_t, Value**) override { return Fail; }
 };
-struct ExceptionThread final : FakeRef<Thread> {
+struct ExceptionThread : FakeRef<Thread> {
     ExceptionValue exception;
     HResult GetProcess(Controller**) override { return Fail; }
     HResult GetID(uint32_t* result) override { *result = 7; return 0; }
@@ -151,6 +157,122 @@ struct ExceptionThread final : FakeRef<Thread> {
     HResult GetActiveChain(Unknown**) override { return Fail; }
     HResult GetActiveFrame(Frame**) override { return Fail; }
 };
+struct StackFunction final : FakeRef<Function> {
+    ExceptionModule module;
+    HResult GetModule(Module** result) override { module.AddRef(); *result = &module; return 0; }
+    HResult GetClass(Unknown**) override { return Fail; }
+    HResult GetToken(uint32_t* result) override { *result = 0x06000001; return 0; }
+    HResult GetILCode(Code**) override { return Fail; }
+    HResult GetNativeCode(Code**) override { return Fail; }
+    HResult CreateBreakpoint(Breakpoint**) override { return Fail; }
+    HResult GetLocalVarSigToken(uint32_t*) override { return Fail; }
+    HResult GetCurrentVersionNumber(uint32_t*) override { return Fail; }
+};
+struct StackFrame final : FakeRef<ILFrame> {
+    StackFunction function;
+    Array array;
+    HResult QueryInterface(const Guid& id, void** result) override {
+        if (std::memcmp(&id, &ILFrameId, sizeof(id))) return Fail;
+        *result = this; AddRef(); return 0;
+    }
+    HResult GetChain(Unknown**) override { return Fail; }
+    HResult GetCode(Code**) override { return Fail; }
+    HResult GetFunction(Function** result) override { function.AddRef(); *result = &function; return 0; }
+    HResult GetFunctionToken(uint32_t* result) override { *result = 0x06000001; return 0; }
+    HResult GetStackRange(uint64_t*, uint64_t*) override { return Fail; }
+    HResult GetCaller(Frame**) override { return Fail; }
+    HResult GetCallee(Frame**) override { return Fail; }
+    HResult CreateStepper(Unknown**) override { return Fail; }
+    HResult GetIP(uint32_t* offset, uint32_t* mapping) override { *offset = 0; *mapping = 0; return 0; }
+    HResult SetIP(uint32_t) override { return Fail; }
+    HResult EnumerateLocalVariables(Unknown**) override { return Fail; }
+    HResult GetLocalVariable(uint32_t, Value** result) override { array.AddRef(); *result = &array; return 0; }
+    HResult EnumerateArguments(Unknown**) override { return Fail; }
+    HResult GetArgument(uint32_t, Value**) override { return Fail; }
+};
+template<class T, class Item> struct StackEnum final : FakeRef<T> {
+    Item* item = nullptr;
+    uint32_t count = 1, cursor = 0;
+    bool fail = false;
+    HResult Skip(uint32_t) override { return Fail; }
+    HResult Reset() override { cursor = 0; return 0; }
+    HResult Clone(Unknown**) override { return Fail; }
+    HResult GetCount(uint32_t*) override { return Fail; }
+    HResult Next(uint32_t, Item** result, uint32_t* fetched) override {
+        if (fail && cursor == 140) return Fail;
+        *fetched = cursor < count ? 1 : 0;
+        if (*fetched) { ++cursor; item->AddRef(); *result = item; }
+        return *fetched ? 0 : 1;
+    }
+};
+struct StackChain final : FakeRef<Chain> {
+    StackFrame frame;
+    StackEnum<FrameEnum, Frame> entries;
+    StackChain() { entries.item = &frame; entries.count = 150; }
+    HResult GetThread(Unknown**) override { return Fail; }
+    HResult GetStackRange(uint64_t*, uint64_t*) override { return Fail; }
+    HResult GetContext(Unknown**) override { return Fail; }
+    HResult GetCaller(Chain**) override { return Fail; }
+    HResult GetCallee(Chain**) override { return Fail; }
+    HResult GetPrevious(Chain**) override { return Fail; }
+    HResult GetNext(Chain**) override { return Fail; }
+    HResult IsManaged(Bool* result) override { *result = 1; return 0; }
+    HResult EnumerateFrames(FrameEnum** result) override { entries.Reset(); entries.AddRef(); *result = &entries; return 0; }
+    HResult GetActiveFrame(Frame**) override { return Fail; }
+    HResult GetRegisterSet(Unknown**) override { return Fail; }
+    HResult GetReason(uint32_t*) override { return Fail; }
+};
+struct StackThread final : ExceptionThread {
+    StackChain chain;
+    StackEnum<ChainEnum, Chain> chains;
+    StackThread() { chains.item = &chain; }
+    HResult EnumerateChains(Unknown** result) override { chains.Reset(); chains.AddRef(); *result = &chains; return 0; }
+};
+void StackChecks() {
+    Fake controller;
+    StackThread thread;
+    catalog = Json::array({{{"Mvid", std::string(32, '0')}, {"Methods", Json::array()}}});
+    Enqueue(&controller, &thread, CallbackKind::Breakpoint); Pump();
+    Json result = Stack();
+    Check(result.size() == 150, "native stack enumerates all 150 frames beyond the old 128-frame cap");
+    ContinueStop(); ModelCleanup();
+    Check(thread.chain.frame.refs == 1 && thread.chain.entries.refs == 1 && thread.chains.refs == 1,
+          "deep stack releases frame, chain and enumerator references");
+}
+void BoundsChecks() {
+    Fake controller;
+    StackThread thread;
+    auto& frame = thread.chain.frame;
+    frame.array.lower = 5;
+    catalog = Json::array({{{"Mvid", std::string(32, '0')}, {"Methods", Json::array({
+        {{"Token", 0x06000001}, {"Name", "DeepScenario"}, {"Points", Json::array()},
+         {"Variables", Json::array({{{"Name", "shifted"}, {"Index", 0}, {"Parameter", false}}})}}
+    })}}});
+    Enqueue(&controller, &thread, CallbackKind::Breakpoint); Pump();
+    frame.AddRef(); frames.emplace(9001, &frame);
+    for (const char* expression : {"shifted", "shifted[0]", "shifted[5]", "shifted[149]", "shifted[150]"}) {
+        bool rejected = false;
+        try { ModelEvaluate({{"Frame", 9001}, {"Expression", expression}}); }
+        catch (const std::runtime_error& error) { rejected = std::strcmp(error.what(), "UnsupportedArrayBounds") == 0; }
+        Check(rejected, "native root and every indexed expression reject lower-bound-five arrays consistently");
+    }
+    int64_t handle = Lease(&frame.array);
+    bool rejected = false;
+    try { ModelVariables({{"Handle", handle}, {"Start", 0}, {"Count", 2}}); }
+    catch (const std::runtime_error& error) { rejected = std::strcmp(error.what(), "UnsupportedArrayBounds") == 0; }
+    Check(rejected && frame.array.elementReads == 0, "native array pages reject bounds before any element read");
+    frame.array.lower = 0;
+    Check(ModelEvaluate({{"Frame", 9001}, {"Expression", "shifted[5]"}}).at("Value") == "5",
+          "native zero-based indexed evaluation remains supported");
+    frame.array.rank = 2;
+    rejected = false;
+    try { ModelEvaluate({{"Frame", 9001}, {"Expression", "shifted[0]"}}); }
+    catch (const std::runtime_error& error) { rejected = std::strcmp(error.what(), "UnsupportedArrayRank") == 0; }
+    Check(rejected, "native indexed evaluation validates rank before positional access");
+    ContinueStop(); ModelCleanup();
+    Check(frame.refs == 1 && frame.array.refs == 1 && frame.array.child.refs == 1,
+          "bounds rejection releases all frame, array and element references");
+}
 void FloatingChecks() {
     for (double input : {1e-10, 1.23456789012345, -0.0, std::numeric_limits<double>::infinity(),
                          -std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()}) {
@@ -275,12 +397,16 @@ int main(int argc, char** argv) {
         if (std::strcmp(argv[1], "--floating") == 0) FloatingChecks();
         else if (std::strcmp(argv[1], "--variables") == 0) VariableChecks();
         else if (std::strcmp(argv[1], "--exceptions") == 0) ExceptionChecks();
+        else if (std::strcmp(argv[1], "--stack") == 0) StackChecks();
+        else if (std::strcmp(argv[1], "--bounds") == 0) BoundsChecks();
         else throw std::runtime_error("Unknown test selection");
         return 0;
     }
     FloatingChecks();
     VariableChecks();
     ExceptionChecks();
+    StackChecks();
+    BoundsChecks();
     {
         char16_t text[]{'A', 0xd83d, 0xde80, 0xd800};
         Check(Utf8(text, 4) == "A\xf0\x9f\x9a\x80\xef\xbf\xbd", "UTF-16 strings preserve surrogate pairs and replace isolated surrogates");

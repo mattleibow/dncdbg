@@ -143,8 +143,8 @@ Explicit limitations:
   symbols display an explicit unavailable value, not invented children.
 - Exception stops report actual CLR type; message/property func-eval is
   unavailable. `all`/`unhandled` filters optionally accept exact CLR type names
-  through DAP `filterOptions`; wildcard, inheritance and mixed
-  conditional/unconditional filters are not implemented.
+  through DAP `filterOptions`; wildcard and inheritance matching are not
+  implemented. Conditional and unconditional rules may be mixed.
 - Breakpoint changes after attach require a stopped target. Stepping depends
   on the pinned runtime; unsupported runtime calls return errors, not successful
   no-ops. Lack of iOS func-eval does not disable read-only mobile debugging.
@@ -204,6 +204,19 @@ and exercises the exact `MOBILE_BREAKPOINT` 1/42/43 gate plus strings, array and
 object children, safe paths, all three step requests, exceptions, pause,
 restart and stopped detach. Its independent DevFlow UI lane asserts completion
 and captures a screenshot. Reports stay under ignored `build/validation/`.
+The fixture now includes 150 array elements and precision-sensitive/special
+floating-point fields. The suite requires both unpaged array forms, bounded
+explicit paging, per-stage exception conditions and restart under the default
+replacement/uninstall policies on each platform.
+
+`tests/DncDbg.MobileTests/run_faults.py` additionally gates real completed
+installs to interrupt initial deployment and restart redeployment, kills running
+and stopped targets, and verifies that the explicitly opted-in native watchdog
+exits a stalled target. See the [fixture guide](../tests/DncDbg.MauiTestApp/README.md)
+for the separate Debug-only native/managed fault-injection build flags. Normal
+helpers have no fault export; Release enables none of these experimental paths.
+Each fault scenario must leave no owned debugger/UI forward, app process or
+endpoint credential.
 The original direct-client native proofs remain separate regression gates.
 
 **Keep PR #11 draft.** Full local/CI, current-main integration, both real mobile

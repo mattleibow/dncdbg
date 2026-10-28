@@ -10,10 +10,13 @@ constexpr Guid StringValueId{0xcc7bcafd, 0x8a68, 0x11d2, {0x98, 0x3c, 0, 0, 0xf8
 constexpr Guid ArrayValueId{0x0405b0df, 0xa660, 0x11d2, {0xbd, 2, 0, 0, 0xf8, 8, 0x49, 0xbd}};
 constexpr Guid ObjectValueId{0x18ad3d6e, 0xb7d2, 0x11d2, {0xbd, 4, 0, 0, 0xf8, 8, 0x49, 0xbd}};
 struct ModelLease { Unknown* value; bool scope; Json variables; };
-struct ModelBinding { Json location; std::string source; int line; Breakpoint* breakpoint = nullptr; };
+struct ModelSourceBreakpoint { int64_t id; Json location; std::string source; int line; };
+struct ModelBinding { int64_t request; Unknown* module; int64_t generation; Breakpoint* breakpoint; Unknown* identity; };
+struct ModelModuleEntry { Module* value; Json description; };
 std::unordered_map<int64_t, ModelLease> modelLeases;
 std::map<uint32_t, Thread*> modelThreads;
-std::unordered_map<Unknown*, Json> modelModules;
+std::unordered_map<Unknown*, ModelModuleEntry> modelModules;
+std::vector<ModelSourceBreakpoint> modelBreakpoints;
 std::vector<ModelBinding> modelBindings;
 Stepper* modelStepper = nullptr;
 
@@ -90,15 +93,16 @@ void ModelDeactivateStepper() {
 void ModelDeactivateBreakpoints() {
     ModelDeactivateStepper();
     for (auto& binding : modelBindings) {
-        if (binding.breakpoint) { Require(binding.breakpoint->Activate(0)); binding.breakpoint->Release(); }
-        binding.breakpoint = nullptr;
+        Require(binding.breakpoint->Activate(0));
+        binding.breakpoint->Release();
     }
+    modelBindings.clear();
 }
 void ModelCleanup() {
-    modelBindings.clear();
+    modelBreakpoints.clear();
     for (auto& entry : modelThreads) entry.second->Release();
     modelThreads.clear();
-    for (auto& entry : modelModules) entry.first->Release();
+    for (auto& entry : modelModules) { entry.second.value->Release(); entry.first->Release(); }
     modelModules.clear();
     catalog = Json::array(); mobileEvents = Json::array();
 }
@@ -111,12 +115,37 @@ void ModelThread(Unknown* thread, bool added) {
     Event({{"Kind", added ? "thread" : "threadExited"}, {"Generation", NewId()},
         {"Thread", {{"Id", id}, {"Name", "Managed thread " + std::to_string(id)}}}});
 }
+bool ModelVerified(int64_t request) {
+    return std::any_of(modelBindings.begin(), modelBindings.end(),
+        [request](const auto& binding) { return binding.request == request; });
+}
+Json ModelBreakpoint(const ModelSourceBreakpoint& request) {
+    return {{"Line", request.line}, {"Verified", ModelVerified(request.id)}, {"Source", request.source}};
+}
+void ModelBreakpointChanged(const ModelSourceBreakpoint& request) {
+    Event({{"Kind", "breakpoint"}, {"Generation", NewId()}, {"Breakpoint", ModelBreakpoint(request)}});
+}
 void ModelModule(Unknown* value, bool added) {
-    auto found = modelModules.find(value);
+    Ref<> identity;
+    Require(value->QueryInterface(UnknownId, reinterpret_cast<void**>(&identity.value)));
+    auto found = modelModules.find(identity.value);
     if (!added) {
         if (found != modelModules.end()) {
-            Event({{"Kind", "moduleRemoved"}, {"Generation", NewId()}, {"Module", found->second}});
+            std::vector<int64_t> affected;
+            for (auto it = modelBindings.begin(); it != modelBindings.end();) {
+                if (it->module != found->first || it->generation != found->second.description.at("Generation")) { ++it; continue; }
+                affected.push_back(it->request);
+                // Unload has already neutered these COM objects. Invalidate/release,
+                // but never call Activate on a breakpoint from the unloaded module.
+                it->breakpoint->Release();
+                it = modelBindings.erase(it);
+            }
+            Event({{"Kind", "moduleRemoved"}, {"Generation", NewId()}, {"Module", found->second.description}});
+            found->second.value->Release();
             found->first->Release(); modelModules.erase(found);
+            for (auto& request : modelBreakpoints)
+                if (std::find(affected.begin(), affected.end(), request.id) != affected.end() && !ModelVerified(request.id))
+                    ModelBreakpointChanged(request);
         }
         return;
     }
@@ -130,25 +159,49 @@ void ModelModule(Unknown* value, bool added) {
     Json module{{"Id", std::to_string(generation)}, {"Name", name.substr(name.find_last_of("/\\") + 1)},
         {"Path", name}, {"Mvid", ModuleMvid(static_cast<Module*>(value))}, {"Generation", generation}};
     value->AddRef();
-    modelModules.emplace(value, module);
+    modelModules.emplace(identity.value, ModelModuleEntry{static_cast<Module*>(value), module});
+    identity.value = nullptr;
     Event({{"Kind", "module"}, {"Generation", generation}, {"Module", module}});
 }
 void ModelBind(Unknown* module) {
-    if (modelBindings.empty()) return;
-    std::string mvid = ModuleMvid(static_cast<Module*>(module));
-    for (auto& binding : modelBindings) {
-        if (binding.breakpoint || binding.location.at("Mvid") != mvid) continue;
+    if (modelBreakpoints.empty()) return;
+    Ref<> identity;
+    Require(module->QueryInterface(UnknownId, reinterpret_cast<void**>(&identity.value)));
+    auto loaded = modelModules.find(identity.value);
+    if (loaded == modelModules.end()) return;
+    int64_t generation = loaded->second.description.at("Generation");
+    for (auto& request : modelBreakpoints) {
+        if (request.location.at("Mvid") != loaded->second.description.at("Mvid") ||
+            std::any_of(modelBindings.begin(), modelBindings.end(), [&](const auto& binding) {
+                return binding.request == request.id && binding.module == identity.value && binding.generation == generation;
+            })) continue;
+        if (modelBindings.size() >= 4096) throw std::runtime_error("BreakpointBindingLimit");
+        bool verified = ModelVerified(request.id);
         Ref<Function> function;
         Ref<Code> code;
         Ref<Breakpoint> breakpoint;
-        Require(static_cast<Module*>(module)->GetFunctionFromToken(binding.location.at("MethodToken").get<uint32_t>(), &function.value));
+        Ref<> breakpointIdentity;
+        Require(loaded->second.value->GetFunctionFromToken(request.location.at("MethodToken").get<uint32_t>(), &function.value));
         Require(function.value->GetILCode(&code.value));
-        Require(code.value->CreateBreakpoint(binding.location.at("IlOffset").get<uint32_t>(), &breakpoint.value));
+        Require(code.value->CreateBreakpoint(request.location.at("IlOffset").get<uint32_t>(), &breakpoint.value));
+        Require(breakpoint.value->QueryInterface(UnknownId, reinterpret_cast<void**>(&breakpointIdentity.value)));
         Require(breakpoint.value->Activate(1));
-        binding.breakpoint = breakpoint.value; breakpoint.value = nullptr;
-        Event({{"Kind", "breakpoint"}, {"Generation", NewId()},
-            {"Breakpoint", {{"Line", binding.line}, {"Verified", true}, {"Source", binding.source}}}});
+        modelBindings.push_back({request.id, identity.value, generation, breakpoint.value, breakpointIdentity.value});
+        breakpoint.value = nullptr;
+        if (!verified) ModelBreakpointChanged(request);
     }
+}
+Json ModelBreakpointHits(Unknown* breakpoint) {
+    Json hits = Json::array();
+    if (!breakpoint) return hits;
+    Ref<> identity;
+    if (breakpoint->QueryInterface(UnknownId, reinterpret_cast<void**>(&identity.value)) < 0 || !identity.value) return hits;
+    for (auto& binding : modelBindings) if (binding.identity == identity.value) {
+        auto module = modelModules.find(binding.module);
+        if (module == modelModules.end() || module->second.description.at("Generation") != binding.generation) continue;
+        for (auto& request : modelBreakpoints) if (request.id == binding.request) hits.push_back(ModelBreakpoint(request));
+    }
+    return hits;
 }
 Json ModelSetBreakpoints(const Json& request) {
     if (debug && !stoppedController) throw std::runtime_error("TargetMustBeStopped");
@@ -171,17 +224,25 @@ Json ModelSetBreakpoints(const Json& request) {
                         matches = true;
         if (!matches) throw std::runtime_error("SymbolIdentityMismatch");
     }
-    for (auto it = modelBindings.begin(); it != modelBindings.end();) {
+    size_t other = std::count_if(modelBreakpoints.begin(), modelBreakpoints.end(),
+        [&](const auto& entry) { return entry.source != source; });
+    if (other + lines.size() > 1024) throw std::runtime_error("BreakpointLimit");
+    for (auto it = modelBreakpoints.begin(); it != modelBreakpoints.end();) {
         if (it->source != source) { ++it; continue; }
-        if (it->breakpoint) { Require(it->breakpoint->Activate(0)); it->breakpoint->Release(); }
-        it = modelBindings.erase(it);
+        for (auto binding = modelBindings.begin(); binding != modelBindings.end();) {
+            if (binding->request != it->id) { ++binding; continue; }
+            Require(binding->breakpoint->Activate(0)); binding->breakpoint->Release();
+            binding = modelBindings.erase(binding);
+        }
+        it = modelBreakpoints.erase(it);
     }
-    if (modelBindings.size() + lines.size() > 1024) throw std::runtime_error("BreakpointLimit");
-    for (size_t i = 0; i < lines.size(); ++i) modelBindings.push_back({locations[i], source, lines[i].get<int>(), nullptr});
-    for (auto& module : modelModules) ModelBind(module.first);
+    mobileEvents.erase(std::remove_if(mobileEvents.begin(), mobileEvents.end(), [&](const auto& event) {
+        return event.at("Kind") == "breakpoint" && event.at("Breakpoint").at("Source") == source;
+    }), mobileEvents.end());
+    for (size_t i = 0; i < lines.size(); ++i) modelBreakpoints.push_back({NewId(), locations[i], source, lines[i].get<int>()});
+    for (auto& module : modelModules) ModelBind(module.second.value);
     Json result = Json::array();
-    for (auto& binding : modelBindings) if (binding.source == source)
-        result.push_back({{"Line", binding.line}, {"Verified", binding.breakpoint != nullptr}, {"Source", binding.source}});
+    for (auto& request : modelBreakpoints) if (request.source == source) result.push_back(ModelBreakpoint(request));
     return result;
 }
 Json ModelStackFrame(Frame* frame, uint32_t token, uint32_t offset, int64_t handle) {
@@ -513,7 +574,7 @@ Json ModelEvaluate(const Json& request) {
 Json StopDescription() {
     if (!stoppedThread || !stopId) throw std::runtime_error("InvalidState");
     uint32_t thread = 0; Require(static_cast<Thread*>(stoppedThread)->GetID(&thread));
-    return {{"Id", stopId}, {"Reason", stopReason}, {"ThreadId", thread}};
+    return {{"Id", stopId}, {"Reason", stopReason}, {"ThreadId", thread}, {"HitBreakpoints", stopBreakpoints}};
 }
 Json ModelPoll() {
     Pump();
@@ -561,7 +622,7 @@ void ModelPause() {
         if (entry.second->GetActiveFrame(&active.value) >= 0 && active.value) {
             stoppedThread = entry.second; stoppedThread->AddRef();
             stoppedController = process; stoppedController->AddRef();
-            stopId = NewId(); stopReason = "pause"; stopReported = false;
+            stopId = NewId(); stopReason = "pause"; stopReported = false; stopBreakpoints = Json::array();
             ModelDeactivateStepper(); return;
         }
     }

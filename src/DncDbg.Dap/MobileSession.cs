@@ -147,7 +147,12 @@ internal sealed class MobileSession : IDisposable
                                 handles.Clear();
                                 stop = item.Stop;
                                 connection.SendEvent("stopped", new StoppedEventBody
-                                { Reason = item.Stop.Reason, ThreadId = item.Stop.ThreadId });
+                                {
+                                    Reason = item.Stop.Reason, ThreadId = item.Stop.ThreadId,
+                                    HitBreakpointIds = item.Stop.HitBreakpoints is { Length: > 0 } hits
+                                        ? hits.Where(IsRequestedBreakpoint).Select(b => breakpointIds[(b.Source!, b.Line)]).Distinct().ToArray()
+                                        : null,
+                                });
                             }
                             break;
                         case "thread" when item.Thread != null:
@@ -160,7 +165,9 @@ internal sealed class MobileSession : IDisposable
                             connection.SendEvent("module", new { reason = item.Kind == "module" ? "new" : "removed", module = Module(item.Module) });
                             break;
                         case "breakpoint" when item.Breakpoint != null:
-                            connection.SendEvent("breakpoint", new { reason = "changed", breakpoint = Breakpoint(item.Breakpoint) });
+                            lock (stateGate)
+                                if (IsRequestedBreakpoint(item.Breakpoint))
+                                    connection.SendEvent("breakpoint", new { reason = "changed", breakpoint = Breakpoint(item.Breakpoint) });
                             break;
                         case "exited":
                             if (item.ExitCode is { } exitCode)
@@ -206,8 +213,12 @@ internal sealed class MobileSession : IDisposable
     }
     private object Module(RemoteModule module) => new
     {
-        id = module.Id, name = module.Name, path = module.Path, version = module.Mvid, symbolStatus = "Portable PDB catalog",
+        id = module.Id, name = module.Name, path = module.Path, version = module.Mvid,
+        symbolStatus = symbols.Modules.Any(m => m.Mvid == module.Mvid) ? "Portable PDB catalog" : "Symbols unavailable",
     };
+    private bool IsRequestedBreakpoint(RemoteBreakpoint breakpoint) => breakpoint.Source is { } source &&
+        breakpoints.TryGetValue(source, out var lines) && lines.Contains(breakpoint.Line) &&
+        breakpointIds.ContainsKey((source, breakpoint.Line));
     private DncDbg.Protocol.Breakpoint Breakpoint(RemoteBreakpoint breakpoint, string? source = null)
     {
         string path = source ?? breakpoint.Source ?? throw new InvalidDataException("A mobile breakpoint update is missing its source identity.");
@@ -253,7 +264,7 @@ internal sealed class MobileSession : IDisposable
                 int[] lines = (args.Breakpoints ?? []).Select(b => fromClientLine(b.Line)).ToArray();
                 RemoteBreakpoints bound = symbols.Bind(path, lines);
                 var result = Wait(Client.RequestSetBreakpointsAsync(bound, Token));
-                breakpoints[path] = lines;
+                breakpoints[bound.Source] = lines;
                 return new { breakpoints = result.Select(b => Breakpoint(b, bound.Source)).ToArray() };
             }
             case "setExceptionBreakpoints":

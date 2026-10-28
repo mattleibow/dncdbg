@@ -226,6 +226,8 @@ void ModuleReloadChecks() {
     handler.UnloadModule(&controller, &module); Pump();
     Check(module.function.code.created[0].refs == 1, "module unload releases its native breakpoint without retaining a stale binding");
     Check(module.function.code.created[0].deactivations == 0, "module unload never calls a neutered native breakpoint");
+    Check(mobileEvents.back().at("Kind") == "breakpoint" && !mobileEvents.back().at("Breakpoint").at("Verified").get<bool>(),
+          "last matching module unload truthfully marks the retained source request pending");
     handler.LoadModule(&controller, &module); Pump();
     Check(module.function.code.created.size() == 2, "same module identity reloaded receives the existing source breakpoint");
     Json last;
@@ -238,11 +240,19 @@ void ModuleReloadChecks() {
 }
 void ModuleContextChecks() {
     Fake controller;
+    ExceptionThread thread;
     BreakpointModule first, second;
     Json request = BreakpointRequest();
     handler.LoadModule(&controller, &first); handler.LoadModule(&controller, &second); Pump();
     Check(ModelSetBreakpoints(request)[0].at("Verified") && first.function.code.created.size() == 1 &&
           second.function.code.created.size() == 1, "two already-loaded instances with the same MVID each get a native breakpoint");
+    for (auto* module : {&first, &second}) {
+        handler.Breakpoint(&controller, &thread, &module->function.code.created[0]); Pump();
+        Check(StopDescription().at("HitBreakpoints")[0].at("Source") == "fixture.cs" &&
+              StopDescription().at("HitBreakpoints")[0].at("Line") == 42,
+              "both simultaneous module instances report the same source-request stop identity");
+        ContinueStop();
+    }
     handler.LoadModule(&controller, &first); Pump();
     Check(first.function.code.created.size() == 1 && modelModules.size() == 2,
           "duplicate load callbacks create neither duplicate module events nor native bindings");
@@ -250,6 +260,10 @@ void ModuleContextChecks() {
     handler.UnloadModule(&controller, &first); handler.UnloadModule(&controller, &first); Pump();
     Check(first.function.code.created[0].refs == 1 && second.function.code.created[0].refs == 2,
           "unloading one context releases only that context's binding");
+    handler.Breakpoint(&controller, &thread, &second.function.code.created[0]); Pump();
+    Check(stoppedController && StopDescription().at("HitBreakpoints")[0].at("Line") == 42,
+          "the surviving context still stops after its sibling unloads");
+    ContinueStop();
     Check(mobileEvents.size() == before + 1 && mobileEvents.back().at("Kind") == "moduleRemoved",
           "unload leaves the surviving request verified and duplicate unload emits no stale event");
     handler.LoadModule(&controller, &first); Pump();
@@ -365,7 +379,7 @@ void StackChecks() {
     Fake controller;
     StackThread thread;
     catalog = Json::array({{{"Mvid", std::string(32, '0')}, {"Methods", Json::array()}}});
-    Enqueue(&controller, &thread, CallbackKind::Breakpoint); Pump();
+    Enqueue(&controller, &thread, CallbackKind::Pause); Pump();
     for (Json request : {Json::object(), Json{{"Count", 0}}, Json{{"Start", 128}},
                          Json{{"Start", 128}, {"Count", 0}}, Json{{"Start", 128}, {"Count", 10}},
                          Json{{"Start", 149}, {"Count", 10}}, Json{{"Start", 150}}, Json{{"Start", 200}}}) {
@@ -413,7 +427,7 @@ void BoundsChecks() {
         {{"Token", 0x06000001}, {"Name", "DeepScenario"}, {"Points", Json::array()},
          {"Variables", Json::array({{{"Name", "shifted"}, {"Index", 0}, {"Parameter", false}}})}}
     })}}});
-    Enqueue(&controller, &thread, CallbackKind::Breakpoint); Pump();
+    Enqueue(&controller, &thread, CallbackKind::Pause); Pump();
     frame.AddRef(); frames.emplace(9001, &frame);
     for (const char* expression : {"shifted", "shifted[0]", "shifted[5]", "shifted[149]", "shifted[150]"}) {
         bool rejected = false;

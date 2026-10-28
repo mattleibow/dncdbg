@@ -76,7 +76,7 @@ def tool():
 
 
 class Remote:
-    def __init__(self, state, platform, model_version=4, start_error=None):
+    def __init__(self, state, platform, model_version=5, start_error=None):
         self.listener = socket.socket()
         self.listener.bind(("127.0.0.1", 0))
         self.listener.listen()

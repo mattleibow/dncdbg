@@ -43,7 +43,7 @@ std::atomic<bool> testStallOwner{false};
 std::mutex queueMutex, reportMutex;
 std::condition_variable queueReady;
 enum class CallbackKind { Other, Breakpoint, Step, Pause, ExceptionThrown, ExceptionUnhandled, ThreadAdded, ThreadRemoved, Module, ModuleRemoved, Domain };
-struct Callback { Controller* controller; Unknown* object; CallbackKind kind; };
+struct Callback { Controller* controller; Unknown* object; CallbackKind kind; Unknown* breakpoint; };
 std::deque<Callback> callbacks;
 Controller* callbackProcess = nullptr;
 std::atomic<bool> exited{false};
@@ -69,6 +69,7 @@ bool stopReported = false;
 bool cleaning = false;
 std::unordered_map<int64_t, Unknown*> frames;
 Json catalog = Json::array(), mobileEvents = Json::array();
+Json stopBreakpoints = Json::array();
 std::string stopReason = "breakpoint";
 struct ExceptionRule { CallbackKind stage; std::string type; };
 std::vector<ExceptionRule> exceptionRules{{CallbackKind::ExceptionUnhandled, ""}};
@@ -82,6 +83,8 @@ void ModelDeactivateStepper();
 Json ModelStackFrame(Frame*, uint32_t, uint32_t, int64_t);
 Json ModelFullStack(const Json& request);
 Json ModelEvaluate(const Json&);
+Json ModelBreakpointHits(Unknown*);
+Json StopDescription();
 constexpr Guid ILFrameId{0x03e26311, 0x4f76, 0x11d3, {0x88, 0xc6, 0, 0x60, 0x97, 0x94, 0x54, 0x18}};
 constexpr Guid GenericValueId{0xcc7bcaf8, 0x8a68, 0x11d2, {0x98, 0x3c, 0, 0, 0xf8, 8, 0x34, 0x2d}};
 constexpr Guid MetadataId{0x7dac8207, 0xd3ae, 0x4c75, {0x9b, 0x67, 0x92, 0x80, 0x1a, 0x49, 0x7d, 0x44}};
@@ -114,7 +117,8 @@ bool PlatformAllowed() {
 #endif
 }
 
-HResult Enqueue(Controller* controller, Unknown* object = nullptr, CallbackKind kind = CallbackKind::Other) {
+HResult Enqueue(Controller* controller, Unknown* object = nullptr, CallbackKind kind = CallbackKind::Other,
+    Unknown* breakpoint = nullptr) {
     std::lock_guard<std::mutex> guard(queueMutex);
     if (!controller) controller = callbackProcess;
     if (!controller || callbacks.size() >= 256) {
@@ -124,7 +128,8 @@ HResult Enqueue(Controller* controller, Unknown* object = nullptr, CallbackKind 
     }
     controller->AddRef();
     if (object) object->AddRef();
-    callbacks.push_back({controller, object, kind});
+    if (breakpoint) breakpoint->AddRef();
+    callbacks.push_back({controller, object, kind, breakpoint});
     callbackCount.fetch_add(1);
     queueReady.notify_one();
     return 0;
@@ -148,7 +153,9 @@ public:
     }
     uint32_t AddRef() override { return references.fetch_add(1) + 1; }
     uint32_t Release() override { return references.fetch_sub(1) - 1; }
-    HResult Breakpoint(Controller* c, Unknown* thread, Unknown*) override { return Enqueue(c, thread, CallbackKind::Breakpoint); }
+    HResult Breakpoint(Controller* c, Unknown* thread, Unknown* breakpoint) override {
+        return Enqueue(c, thread, CallbackKind::Breakpoint, breakpoint);
+    }
     HResult StepComplete(Controller* c, Unknown* t, Unknown*, uint32_t) override { return Enqueue(c, t, CallbackKind::Step); }
     HResult Break(Controller* c, Unknown* t) override { return Enqueue(c, t, CallbackKind::Pause); }
     HResult Exception(Controller* c, Unknown* t, Bool unhandled) override {
@@ -235,6 +242,7 @@ void ContinueStop() {
     stoppedController = nullptr;
     stopId = 0;
     stopReported = false;
+    stopBreakpoints = Json::array();
     ClearFrames();
     if (stoppedThread) { stoppedThread->Release(); stoppedThread = nullptr; }
     HResult hr = owner->Continue(0);
@@ -298,14 +306,18 @@ void Pump() {
         }
         Ref<Controller> controller{callback.controller};
         Ref<> object{callback.object};
+        Ref<> breakpoint{callback.breakpoint};
         bool exception = callback.kind == CallbackKind::ExceptionThrown || callback.kind == CallbackKind::ExceptionUnhandled;
-        bool shouldStop = callback.kind == CallbackKind::Breakpoint || callback.kind == CallbackKind::Step ||
+        Json hits = callback.kind == CallbackKind::Breakpoint && !catalog.empty() && !cleaning ?
+            ModelBreakpointHits(callback.breakpoint) : Json::array();
+        bool shouldStop = (callback.kind == CallbackKind::Breakpoint && (catalog.empty() || !hits.empty())) || callback.kind == CallbackKind::Step ||
             callback.kind == CallbackKind::Pause || (exception && ModelExceptionMatches(callback.object, callback.kind));
         if (shouldStop && !stoppedController && !cleaning) {
             stoppedController = callback.controller;
             stoppedThread = callback.object;
             controller.value = nullptr; object.value = nullptr;
             stopId = NewId();
+            stopBreakpoints = std::move(hits);
             stopReason = exception ? "exception" : callback.kind == CallbackKind::Step ? "step" :
                 callback.kind == CallbackKind::Pause ? "pause" : "breakpoint";
             if (exception) exceptionBreakMode = callback.kind == CallbackKind::ExceptionThrown ? "always" : "unhandled";
@@ -444,6 +456,7 @@ void Cleanup() {
         for (auto& callback : callbacks) {
             callback.controller->Release();
             if (callback.object) callback.object->Release();
+            if (callback.breakpoint) callback.breakpoint->Release();
         }
         callbacks.clear();
         if (callbackProcess) { callbackProcess->Release(); callbackProcess = nullptr; }
@@ -535,9 +548,7 @@ void* Run(void*) {
                             usleep(1000);
                         }
                         {
-                            uint32_t thread = 0;
-                            Require(static_cast<Thread*>(stoppedThread)->GetID(&thread));
-                            result = {{"Id", stopId}, {"Reason", stopReason}, {"ThreadId", thread}};
+                            result = StopDescription();
                             stopReported = true;
                         }
                         break;
@@ -577,7 +588,7 @@ void* Run(void*) {
                         break;
                     case 13:
                         result = Json::array();
-                        for (auto& module : modelModules) result.push_back(module.second);
+                        for (auto& module : modelModules) result.push_back(module.second.description);
                         break;
                     case 14: result = ModelScopes(body.at("Id").get<int64_t>()); break;
                     case 15: result = ModelVariables(body); break;

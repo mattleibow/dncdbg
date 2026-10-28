@@ -23,7 +23,7 @@ enum class Operation {
     Exceptions = 18,
     ExceptionInfo = 19,
 };
-constexpr int ModelVersion = 4;
+constexpr int ModelVersion = 5;
 inline bool ContractInteger(const Json& value, int64_t minimum, int64_t maximum) {
     if (!value.is_number_integer()) return false;
     if (value.is_number_unsigned()) { uint64_t number = value.get<uint64_t>();
@@ -167,6 +167,12 @@ inline void Validate_RemoteStop(const Json& body) {
     if (!(ContractInteger(body.at("Id"), (-9223372036854775807LL - 1), 9223372036854775807LL))) throw std::runtime_error("MalformedPayload");
     if (!(body.at("Reason").is_string())) throw std::runtime_error("MalformedPayload");
     if (!(ContractInteger(body.at("ThreadId"), -2147483648LL, 2147483647LL))) throw std::runtime_error("MalformedPayload");
+    if (body.contains("HitBreakpoints") && !body.at("HitBreakpoints").is_null()) {
+        if (!body.at("HitBreakpoints").is_array()) throw std::runtime_error("MalformedPayload");
+        for (const auto& element : body.at("HitBreakpoints")) {
+            Validate_RemoteBreakpoint(element);
+        }
+    }
 }
 inline void Validate_RemoteStackRequest(const Json& body) {
     if (!body.is_object()) throw std::runtime_error("MalformedPayload");

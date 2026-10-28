@@ -26,6 +26,17 @@ Use `--platform android`, the exact emulator serial, and its built signed APK
 and assets for Android. The runner always terminates/uninstalls its fixture
 and removes only its own UI mapping, including on failure.
 
+The private Debug fixture also embeds the small `DncDbg.ReloadFixture` PE without
+referencing/loading it in the default context. `reload-load`, `reload-run`, and
+`reload-unload` load its bytes into independent collectible `AssemblyLoadContext`
+instances, invoke its non-inlined `ReloadScenario.Run`, and force collection of
+the first context. The actual-adapter suite catalogs the matching PE/PDB,
+requires two simultaneous same-MVID/different-generation modules to each hit
+the original source breakpoint, unloads one while the other still hits, unloads
+the last to return verification to pending, then reloads and hits again with the
+same DAP ID. Native contracts additionally cover late/stale callbacks, repeated
+load/unload notifications and exact-once COM reference release.
+
 `tests/DncDbg.MobileTests/run_faults.py` takes the same arguments. It gates a
 **real completed install** before the adapter can launch, then terminates during
 initial deployment and restart redeployment. It also uses uncatchable SIGKILL

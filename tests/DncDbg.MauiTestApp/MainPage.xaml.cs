@@ -1,15 +1,20 @@
 ﻿using System.Runtime.CompilerServices;
+using System.Runtime.Loader;
 
 namespace DncDbg.MauiTestApp;
 
 public partial class MainPage : ContentPage
 {
 	int count = 0;
+	readonly List<AssemblyLoadContext> reloadContexts = [];
 
 	public MainPage()
 	{
 		InitializeComponent();
 		RuntimeStatus.Text = ExperimentalStartup.Status;
+#if DNCDBG_PRIVATE_BOOTSTRAP
+		ReloadControls.IsVisible = true;
+#endif
 #if DNCDBG_TEST_FAULTS
 		WatchdogScenario.IsVisible = true;
 #endif
@@ -87,6 +92,45 @@ public partial class MainPage : ContentPage
 #if DNCDBG_TEST_FAULTS
 		PrivateStartup.StallOwner();
 #endif
+	}
+
+	private void OnReloadLoadClicked(object? sender, EventArgs e)
+	{
+		using Stream assembly = typeof(MainPage).Assembly.GetManifestResourceStream("DncDbg.ReloadFixture.dll")!;
+		var context = new AssemblyLoadContext("mobile-reload-" + Guid.NewGuid(), isCollectible: true);
+		context.LoadFromStream(assembly);
+		reloadContexts.Add(context);
+		ReloadStatus.Text = $"Contexts: {reloadContexts.Count}";
+	}
+
+	private void OnReloadRunClicked(object? sender, EventArgs e)
+	{
+		int result = 0;
+		foreach (var context in reloadContexts)
+			result += (int)context.Assemblies.Single().GetType("ReloadScenario")!.GetMethod("Run")!.Invoke(null, [1])!;
+		ReloadStatus.Text = $"Reload result: {result} from {reloadContexts.Count}";
+	}
+
+	[MethodImpl(MethodImplOptions.NoInlining)]
+	private WeakReference UnloadFirstContext()
+	{
+		var context = reloadContexts[0];
+		reloadContexts.RemoveAt(0);
+		var weak = new WeakReference(context);
+		context.Unload();
+		return weak;
+	}
+
+	private void OnReloadUnloadClicked(object? sender, EventArgs e)
+	{
+		WeakReference context = UnloadFirstContext();
+		for (int i = 0; i < 50 && context.IsAlive; ++i)
+		{
+			GC.Collect();
+			GC.WaitForPendingFinalizers();
+			GC.Collect();
+		}
+		ReloadStatus.Text = $"Contexts: {reloadContexts.Count}; collected: {!context.IsAlive}";
 	}
 
 	private sealed class ScenarioObject

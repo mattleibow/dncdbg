@@ -70,6 +70,7 @@ def main():
     assets.mkdir(exist_ok=True)
     for extension in ("dll", "pdb"):
         shutil.copyfile(args.assets / ("DncDbg.MauiTestApp." + extension), assets / ("DncDbg.MauiTestApp." + extension))
+        shutil.copyfile(args.assets / ("DncDbg.ReloadFixture." + extension), assets / ("DncDbg.ReloadFixture." + extension))
     adb = str(Path.home() / "Library/Android/sdk/platform-tools/adb")
     env = {**os.environ, "PATH": str(Path(adb).parent) + os.pathsep + os.environ["PATH"],
            "DNCDBG_LOG_DIR": str(args.output.resolve())}
@@ -116,6 +117,11 @@ def main():
             "replaceExisting": False, "uninstallOnDisconnect": False, "startupTimeoutSeconds": 90}})
         breakpoint = dap.request("setBreakpoints", {"source": {"path": str(source)},
                                                   "breakpoints": [{"line": line}, {"line": deep_line}]})["breakpoints"][0]
+        reload_source = ROOT / "tests/DncDbg.ReloadFixture/ReloadScenario.cs"
+        reload_line = next(i + 1 for i, text in enumerate(reload_source.read_text().splitlines()) if "// MOBILE_RELOAD_BREAKPOINT:" in text)
+        reload_bp = dap.request("setBreakpoints", {"source": {"path": str(reload_source)},
+                                                  "breakpoints": [{"line": reload_line}]})["breakpoints"][0]
+        check(not reload_bp["verified"], "collectible source breakpoint is pending before any instance loads")
         dap.request("setExceptionBreakpoints", {"filters": []})
         dap.request("configurationDone")
         dap.response(launch)
@@ -143,6 +149,7 @@ def main():
         event, frame = stack()
         check(event["reason"] == "breakpoint" and frame["name"].endswith("MainPage.ManagedScenario") and
               frame["source"]["path"] == str(source) and frame["line"] == line, "exact MOBILE_BREAKPOINT through dncdbg-dap")
+        check(event.get("hitBreakpointIds") == [breakpoint["id"]], "native binding stop reports stable DAP source breakpoint ID")
         thread = event["threadId"]
         scope = dap.request("scopes", {"frameId": frame["id"]})["scopes"][0]["variablesReference"]
         variables = dap.request("variables", {"variablesReference": scope})["variables"]
@@ -218,6 +225,63 @@ def main():
         dap.request("continue", {"threadId": deep["threadId"]})
         ui.receive()
         ui.command('MAUI assert --automationId result-status Text "Deep result: 55"')
+        def loaded_modules():
+            return [m for m in dap.request("modules")["modules"] if "DncDbg.ReloadFixture" in m["name"]]
+
+        def run_contexts(count):
+            ui.send("MAUI tap --automationId reload-run")
+            for _ in range(count):
+                hit, frame = stack()
+                check(hit["reason"] == "breakpoint" and hit.get("hitBreakpointIds") == [reload_bp["id"]] and
+                      frame["source"]["path"] == str(reload_source) and frame["line"] == reload_line,
+                      "each collectible context stops at the original DAP source breakpoint")
+                check(dap.request("evaluate", {"frameId": frame["id"], "expression": "answer + 1"})["result"] == "43",
+                      "collectible context executes the actual 1/42/43 method")
+                dap.request("continue", {"threadId": hit["threadId"]})
+            ui.receive()
+            ui.command(f'MAUI assert --automationId reload-status Text "Reload result: {42 * count} from {count}"')
+
+        def unload_context(remaining):
+            ui.command("MAUI tap --automationId reload-unload")
+            ui.command(f'MAUI assert --automationId reload-status Text "Contexts: {remaining}; collected: True"')
+            deadline = time.monotonic() + 10
+            while len(loaded_modules()) != remaining:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("Collectible module unload was not reported.")
+                time.sleep(0.01)
+            check(True, "runtime unload removes exactly one module instance")
+
+        ui.command("MAUI tap --automationId reload-load")
+        changed = dap.event("breakpoint")["breakpoint"]
+        check(changed["id"] == reload_bp["id"] and changed["verified"], "first collectible load verifies the existing request")
+        first = loaded_modules()
+        check(len(first) == 1, "first collectible instance appears in native module snapshot")
+        run_contexts(1)
+        ui.command("MAUI tap --automationId reload-load")
+        both = loaded_modules()
+        check(len(both) == 2 and len({m["version"] for m in both}) == 1 and len({m["id"] for m in both}) == 2,
+              "two simultaneous load contexts share the PE MVID but have distinct native module generations")
+        run_contexts(2)
+        unload_context(1)
+        surviving = loaded_modules()
+        check(len(surviving) == 1 and surviving[0]["id"] != first[0]["id"],
+              "unloading the first context preserves only the second instance")
+        run_contexts(1)
+        unload_context(0)
+        changed = dap.event("breakpoint")["breakpoint"]
+        check(changed["id"] == reload_bp["id"] and not changed["verified"], "last unload truthfully returns the same source request to pending")
+        ui.command("MAUI tap --automationId reload-load")
+        changed = dap.event("breakpoint")["breakpoint"]
+        check(changed["id"] == reload_bp["id"] and changed["verified"], "later reload rebinds without changing DAP identity")
+        reloaded = loaded_modules()
+        check(len(reloaded) == 1 and reloaded[0]["id"] not in {m["id"] for m in both},
+              "reloaded module has a fresh native load generation")
+        run_contexts(1)
+        unload_context(0)
+        changed = dap.event("breakpoint")["breakpoint"]
+        check(changed["id"] == reload_bp["id"] and not changed["verified"], "final collectible unload invalidates the last binding")
+        evidence["collectibleModules"] = {"first": first, "both": both, "surviving": surviving, "reloaded": reloaded,
+                                          "breakpoint": reload_bp}
         dap.request("setExceptionBreakpoints", {"filters": [], "filterOptions": [
             {"filterId": "all", "condition": "System.ArgumentException"},
             {"filterId": "unhandled", "condition": "System.InvalidOperationException"}]})

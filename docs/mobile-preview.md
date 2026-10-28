@@ -45,7 +45,16 @@ checked. Symbol catalogs are uploaded in bounded chunks; the authenticated
 256-KiB frame limit is unchanged. Missing/ambiguous sequence points and changed
 source files are errors, never invented verified breakpoints.
 Source breakpoints keep their DAP ID/source identity when later module-load
-events verify them and when a restart restores them.
+events verify them, across collectible assembly unload/reload, and when a
+restart restores them. A source request is separate from its native bindings:
+every loaded module instance with the matching MVID receives its own binding,
+owned by that instance's COM identity and load generation. Unloading a module
+releases only its bindings (without invoking neutered breakpoint objects).
+Verification remains true while any matching instance survives; the last unload
+returns the request to pending, and later loads rebind it. Stops identify the
+source request through DAP `hitBreakpointIds`, not a transient native binding.
+Late callbacks from removed/replaced bindings are continued without reporting a
+stale stop; duplicate module callbacks do not create duplicate bindings/events.
 
 The app must opt in to and package the target debugger, DBI and DAC, as the
 [MAUI fixture](../tests/DncDbg.MauiTestApp/README.md) does. This does not inject
@@ -109,7 +118,9 @@ always describes the full snapshot, including for an empty out-of-range page.
 `python3 src/DncDbg.Remote/generate_contract.py` after editing it; CI checks
 generated C# records/client methods and native operation/request guards with
 `--check`. The wire stays strictly framed/authenticated protocol v1; mobile DAP
-requires **typed model v4**, an exact provider ID and exact pinned build tuple.
+requires **typed model v5**, an exact provider ID and exact pinned build tuple.
+Model v5 carries source identities in `RemoteStop.HitBreakpoints`; older helpers
+are rejected and must be rebuilt with the adapter.
 Model v3 replaces the lossy exception stage/type lists with typed per-stage
 rules; v2 targets are rejected instead of silently misinterpreted.
 Capabilities expose runtime/platform, runtime/DBI/DAC identities/hashes, provider,
@@ -236,7 +247,8 @@ merge is authorized. Historical proof results in the architecture document
 must not be treated as evidence for newly added preview features.
 ## Inspection completeness and array shape
 
-The private inspection contract is **typed-model v4**; older helpers are refused.
+The private inspection contract introduced in v4 is retained in **typed-model v5**;
+older helpers are refused.
 `Stack` takes `RemoteStackRequest(Id, Start=0, Count=0)` and returns
 `RemoteStackPage(Frames, TotalFrames, Complete)`. Omitted/zero count means all
 remaining managed IL frames; positive counts select only that page. Every

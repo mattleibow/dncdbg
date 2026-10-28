@@ -26,7 +26,7 @@ public enum RemoteOperation
     ExceptionInfo = 19,
 }
 
-public static class RemoteContract { public const int ModelVersion = 4; }
+public static class RemoteContract { public const int ModelVersion = 5; }
 
 public sealed record RemoteHello(string Token);
 public sealed record RemoteCapabilities(string Runtime, string Platform, bool ManagedDebugging, string? Blocker, string? Bootstrap = null, PrivateBootstrapIdentity? SupportedBuild = null, string? Scope = null, int ModelVersion = 0, string? Provider = null, string[]? Features = null);
@@ -35,7 +35,7 @@ public sealed record RemoteBreakpoints(string Source, int[] Lines, RemoteManaged
 public sealed record RemoteManagedLocation(string Mvid, int MethodToken, int IlOffset, string Method, RemoteManagedVariable[] Variables);
 public sealed record RemoteManagedVariable(string Name, int Index, bool Parameter, int StartOffset = 0, int EndOffset = 2147483647);
 public sealed record RemoteBreakpoint(int Line, bool Verified, string? Message = null, string? Source = null);
-public sealed record RemoteStop(long Id, string Reason, int ThreadId);
+public sealed record RemoteStop(long Id, string Reason, int ThreadId, RemoteBreakpoint[]? HitBreakpoints = null);
 public sealed record RemoteStackRequest(long Id, int Start = 0, int Count = 0);
 public sealed record RemoteStackPage(RemoteFrame[] Frames, int TotalFrames, bool Complete);
 public sealed record RemoteFrame(long Handle, string Name, string? Source, int Line, long StopId = 0, string? Mvid = null, int MethodToken = 0, int IlOffset = 0);

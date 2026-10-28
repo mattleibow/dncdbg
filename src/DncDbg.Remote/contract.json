@@ -1,5 +1,5 @@
 {
-  "modelVersion": 4,
+  "modelVersion": 5,
   "operations": [
     ["Hello", 1, "RemoteHello", "RemoteCapabilities"],
     ["SetBreakpoints", 2, "RemoteBreakpoints", "RemoteBreakpoint[]"],
@@ -33,7 +33,7 @@
     "RemoteManagedLocation": ["string Mvid", "int MethodToken", "int IlOffset", "string Method", "RemoteManagedVariable[] Variables"],
     "RemoteManagedVariable": ["string Name", "int Index", "bool Parameter", "int StartOffset = 0", "int EndOffset = 2147483647"],
     "RemoteBreakpoint": ["int Line", "bool Verified", "string? Message = null", "string? Source = null"],
-    "RemoteStop": ["long Id", "string Reason", "int ThreadId"],
+    "RemoteStop": ["long Id", "string Reason", "int ThreadId", "RemoteBreakpoint[]? HitBreakpoints = null"],
     "RemoteStackRequest": ["long Id", "int Start = 0", "int Count = 0"],
     "RemoteStackPage": ["RemoteFrame[] Frames", "int TotalFrames", "bool Complete"],
     "RemoteFrame": ["long Handle", "string Name", "string? Source", "int Line", "long StopId = 0", "string? Mvid = null", "int MethodToken = 0", "int IlOffset = 0"],

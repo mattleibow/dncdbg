@@ -74,13 +74,14 @@ def daemon(state, mode):
                         mappings[:] = [row for row in mappings if row[:2] != [args[1], local]]
                     mappings.append([args[1], local, args[-1]])
                     result = str(endpoint["Port"]) if allocation else ""
-                    if mode == "hold-" + stage:
-                        (state / "daemon-committed.json").write_text(json.dumps(
-                            request | {"port": endpoint["Port"], "stage": stage}))
                     error = mode == "error-" + stage
                     if mode == "malformed-allocation" and allocation:
                         result = "not-a-port"
                 save()
+                if mode == "hold-" + stage and (allocation or rebind):
+                    replacement = state / "daemon-committed.new"
+                    replacement.write_text(json.dumps(request | {"port": endpoint["Port"], "stage": stage}))
+                    replacement.replace(state / "daemon-committed.json")
             if mode == "hold-" + stage and (allocation or rebind):
                 # The daemon has committed, but the client cannot learn the port.
                 # Cancellation kills the CLI, not this independently owned daemon.

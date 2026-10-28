@@ -76,6 +76,13 @@
 	<ItemGroup Condition="'$(Configuration)' == 'Debug' And '$(EnableExperimentalRemoteDebugging)' == 'true'">
 		<ProjectReference Include="../../src/DncDbg.Remote/DncDbg.Remote.csproj" />
 	</ItemGroup>
+	<ItemGroup Condition="'$(Configuration)' == 'Debug' And '$(EnableExperimentalRemoteDebugging)' == 'true' And '$(EnableExperimentalPrivateBootstrap)' == 'true'">
+		<ProjectReference Include="../DncDbg.ReloadFixture/DncDbg.ReloadFixture.csproj" ReferenceOutputAssembly="false"
+		                  GlobalPropertiesToRemove="RuntimeIdentifier;RuntimeIdentifiers;TargetFrameworks" />
+		<EmbeddedResource Include="../DncDbg.ReloadFixture/bin/$(Configuration)/net10.0/DncDbg.ReloadFixture.dll" LogicalName="DncDbg.ReloadFixture.dll" />
+		<None Include="../DncDbg.ReloadFixture/bin/$(Configuration)/net10.0/DncDbg.ReloadFixture.dll" Link="DncDbg.ReloadFixture.dll" CopyToOutputDirectory="PreserveNewest" />
+		<None Include="../DncDbg.ReloadFixture/bin/$(Configuration)/net10.0/DncDbg.ReloadFixture.pdb" Link="DncDbg.ReloadFixture.pdb" CopyToOutputDirectory="PreserveNewest" />
+	</ItemGroup>
 	<ItemGroup Condition="'$(Configuration)' == 'Debug' And '$(EnableExperimentalPrivateBootstrap)' == 'true'">
 		<MauiAsset Include="../../src/licenses/JaneySprings-clrdbg.LICENSE" LogicalName="licenses/JaneySprings-clrdbg.LICENSE" />
 		<MauiAsset Include="../../src/licenses/nlohmann-json.LICENSE" LogicalName="licenses/nlohmann-json.LICENSE" />

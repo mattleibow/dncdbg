@@ -2,6 +2,8 @@
 #include "../../src/DncDbg.Remote.Target/Bootstrap.cpp"
 #include <thread>
 #include <iostream>
+#include <cmath>
+#include <limits>
 
 namespace {
 int checks = 0;
@@ -28,6 +30,85 @@ struct Fake final : Controller {
     HResult CanCommitChanges(uint32_t, Unknown**, Unknown**) override { return 0; }
     HResult CommitChanges(uint32_t, Unknown**, Unknown**) override { return 0; }
 };
+template<class T> struct FakeRef : T {
+    uint32_t refs = 1;
+    HResult QueryInterface(const Guid&, void**) override { return Fail; }
+    uint32_t AddRef() override { return ++refs; }
+    uint32_t Release() override { return --refs; }
+};
+struct Primitive final : FakeRef<GenericValue> {
+    uint32_t type, size;
+    uint64_t bits = 0;
+    template<class T> Primitive(uint32_t type, T value) : type(type), size(sizeof(T)) { std::memcpy(&bits, &value, sizeof(T)); }
+    HResult QueryInterface(const Guid& id, void** result) override {
+        if (std::memcmp(&id, &GenericValueId, sizeof(id))) return Fail;
+        *result = this; AddRef(); return 0;
+    }
+    HResult GetType(uint32_t* result) override { *result = type; return 0; }
+    HResult GetSize(uint32_t* result) override { *result = size; return 0; }
+    HResult GetAddress(uint64_t*) override { return Fail; }
+    HResult CreateBreakpoint(Unknown**) override { return Fail; }
+    HResult GetValue(void* result) override { std::memcpy(result, &bits, size); return 0; }
+    HResult SetValue(void*) override { return Fail; }
+};
+struct Array final : FakeRef<ArrayValue> {
+    Primitive child{8, int32_t{0}};
+    HResult QueryInterface(const Guid& id, void** result) override {
+        if (std::memcmp(&id, &ArrayValueId, sizeof(id))) return Fail;
+        *result = this; AddRef(); return 0;
+    }
+    HResult GetType(uint32_t* result) override { *result = 0x1d; return 0; }
+    HResult GetSize(uint32_t* result) override { *result = 8; return 0; }
+    HResult GetAddress(uint64_t*) override { return Fail; }
+    HResult CreateBreakpoint(Unknown**) override { return Fail; }
+    HResult IsValid(Bool* result) override { *result = 1; return 0; }
+    HResult CreateRelocBreakpoint(Unknown**) override { return Fail; }
+    HResult GetElementType(uint32_t* result) override { *result = 8; return 0; }
+    HResult GetRank(uint32_t* result) override { *result = 1; return 0; }
+    HResult GetCount(uint32_t* result) override { *result = 150; return 0; }
+    HResult GetDimensions(uint32_t, uint32_t*) override { return Fail; }
+    HResult HasBaseIndicies(Bool* result) override { *result = 0; return 0; }
+    HResult GetBaseIndicies(uint32_t, uint32_t*) override { return Fail; }
+    HResult GetElement(uint32_t, uint32_t*, Value**) override { return Fail; }
+    HResult GetElementAtPosition(uint32_t index, Value** result) override {
+        if (index >= 150) return Fail;
+        child.bits = index; child.AddRef(); *result = &child; return 0;
+    }
+};
+void FloatingChecks() {
+    for (double input : {1e-10, 1.23456789012345, -0.0, std::numeric_limits<double>::infinity(),
+                         -std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()}) {
+        Primitive value{13, input};
+        std::string text = Describe(&value).at("Value");
+        double actual = std::stod(text);
+        Check(std::isnan(input) ? std::isnan(actual) : actual == input && std::signbit(actual) == std::signbit(input),
+              "native double formatting round-trips magnitude, precision, NaN, infinity and signed zero");
+    }
+    for (float input : {1e-10f, 1.2345678f, -0.0f, std::numeric_limits<float>::infinity(),
+                        -std::numeric_limits<float>::infinity(), std::numeric_limits<float>::quiet_NaN()}) {
+        Primitive value{12, input};
+        std::string text = Describe(&value).at("Value");
+        float actual = std::stof(text);
+        Check(std::isnan(input) ? std::isnan(actual) : actual == input && std::signbit(actual) == std::signbit(input),
+              "native float formatting round-trips magnitude, precision, NaN, infinity and signed zero");
+    }
+}
+void VariableChecks() {
+    Fake controller, thread;
+    Array array;
+    Enqueue(&controller, &thread, CallbackKind::Breakpoint); Pump();
+    int64_t handle = Lease(&array);
+    for (Json request : {Json{{"Handle", handle}}, Json{{"Handle", handle}, {"Count", 0}}}) {
+        Json result = ModelVariables(request);
+        Check(result.size() == 150 && result[149].at("Value") == "149",
+              "native omitted/zero variable count returns every element of a 150-element array");
+    }
+    Json result = ModelVariables({{"Handle", handle}, {"Start", 141}, {"Count", 4}});
+    Check(result.size() == 4 && result[0].at("Value") == "141" && result[3].at("Value") == "144",
+          "native explicit variable pages remain bounded");
+    ContinueStop();
+    Check(array.refs == 1 && array.child.refs == 1, "native array inspection releases all element and array references");
+}
 int Connect() {
     listener = socket(AF_INET, SOCK_STREAM, 0);
     sockaddr_in address{};
@@ -52,7 +133,15 @@ void Send(Wire& wire, int64_t sequence, int operation, Json body, int version = 
 }
 }
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc == 2) {
+        if (std::strcmp(argv[1], "--floating") == 0) FloatingChecks();
+        else if (std::strcmp(argv[1], "--variables") == 0) VariableChecks();
+        else throw std::runtime_error("Unknown test selection");
+        return 0;
+    }
+    FloatingChecks();
+    VariableChecks();
     {
         char16_t text[]{'A', 0xd83d, 0xde80, 0xd800};
         Check(Utf8(text, 4) == "A\xf0\x9f\x9a\x80\xef\xbf\xbd", "UTF-16 strings preserve surrogate pairs and replace isolated surrogates");

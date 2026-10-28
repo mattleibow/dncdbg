@@ -34,7 +34,15 @@ def tool():
     with (state / "commands.jsonl").open("a") as log:
         log.write(json.dumps([os.environ["DNCDBG_FAKE_TOOL"], *args]) + "\n")
     if "install" in args:
+        if (state / "block-install").exists():
+            (state / "install-blocked").touch()
+            while not (state / "release-install").exists():
+                time.sleep(0.01)
         (state / "installed").touch()
+    if "uninstall" in args:
+        (state / "installed").unlink(missing_ok=True)
+    if "tee" in args:
+        (state / Path(args[-1]).name).write_text(sys.stdin.read())
     if "launch" in args or ("start" in args and "--es" in args):
         endpoint = json.loads((state / "endpoint.json").read_text())
         endpoint["SessionId"] = os.environ.get("SIMCTL_CHILD_DNCDBG_SESSION_ID") or args[-1]
@@ -43,7 +51,11 @@ def tool():
     if "forward" in args and "--remove" not in args:
         print(json.loads((state / "endpoint.json").read_text())["Port"])
     elif "cat" in args:
-        print((state / "endpoint.json").read_text())
+        path = state / ("endpoint.json" if args[-1].endswith("dncdbg-remote.json") else Path(args[-1]).name)
+        if path.exists():
+            print(path.read_text())
+    elif "path" in args and (state / "installed").exists():
+        print("package:/data/app/com.dncdbg.mobiletests/base.apk")
     elif "get_app_container" in args:
         if (state / "installed").exists():
             print(state)
@@ -70,6 +82,7 @@ class Remote:
         self.model_version = model_version
         self.start_error = start_error
         self.operations = []
+        self.requests = []
         self.thread = threading.Thread(target=self.serve, daemon=True)
         self.thread.start()
 
@@ -86,6 +99,7 @@ class Remote:
                     request = json.loads(stream.read(size))
                     op, body = request["Operation"], request["Body"]
                     self.operations.append(op)
+                    self.requests.append((op, body))
                     error, result = None, {}
                     if op == 1:
                         identity = IDENTITIES[self.platform]
@@ -122,10 +136,15 @@ class Remote:
                     elif op == 14:
                         result = [{"Name": "Locals", "Handle": generation + 2, "Count": 4}]
                     elif op == 15:
-                        result = [{"Name": "answer", "Value": "42", "Type": "int", "Handle": 0},
+                        if body["Handle"] == generation + 3:
+                            start, count = body.get("Start", 0), body.get("Count", 100)
+                            result = [{"Name": f"[{i}]", "Value": str(i), "Type": "int", "Handle": 0}
+                                      for i in range(start, min(150, start + count) if count else 150)]
+                        else:
+                            result = [{"Name": "answer", "Value": "42", "Type": "int", "Handle": 0},
                                   {"Name": "message", "Value": '"mobile"', "Type": "string", "Handle": 0},
-                                  {"Name": "numbers", "Value": "int[2]", "Type": "int[]",
-                                   "Handle": generation + 3, "IndexedVariables": 2}]
+                                  {"Name": "numbers", "Value": "int[150]", "Type": "int[]",
+                                   "Handle": generation + 3, "IndexedVariables": 150}]
                     elif op == 6:
                         if body["Expression"] == "answer + 1":
                             result = {"Value": "43", "Type": "int", "Handle": 0}
@@ -265,7 +284,7 @@ class MobileDapTests(unittest.TestCase):
         values = self.dap.request("variables", {"variablesReference": scope})["variables"]
         self.assertEqual(values[0]["value"], "42")
         self.assertEqual(values[1]["value"], '"mobile"')
-        self.assertEqual(values[2]["indexedVariables"], 2)
+        self.assertEqual(values[2]["indexedVariables"], 150)
         self.assertEqual(self.dap.request("evaluate", {"frameId": frame, "expression": "answer + 1"})["result"], "43")
         self.dap.request("evaluate", {"frameId": frame, "expression": "Dangerous()"}, success=False)
         self.dap.request("next", {"threadId": 7})
@@ -352,6 +371,106 @@ class MobileDapTests(unittest.TestCase):
         self.dap.close()
         commands = [json.loads(x) for x in (self.state / "commands.jsonl").read_text().splitlines()]
         self.assertTrue(any("forward" in c and "--remove" in c for c in commands))
+
+    def commands(self):
+        return [json.loads(x) for x in (self.state / "commands.jsonl").read_text().splitlines()]
+
+    def wait_for_install(self):
+        deadline = time.monotonic() + 5
+        while not (self.state / "install-blocked").exists():
+            if time.monotonic() > deadline:
+                self.fail("Install did not reach the blocking device command.")
+            time.sleep(0.01)
+
+    def terminate_during_install(self, platform, restart=False):
+        if restart:
+            self.launch(platform)
+            self.dap.event("process")
+            self.old_remote = self.remote
+        self.remote = Remote(self.state, "Android" if platform == "android" else "iOS")
+        (self.state / "block-install").touch()
+        acquisition = self.dap.send("restart") if restart else self.dap.send("launch", {"mobile": self.options(platform)})
+        self.wait_for_install()
+        command_count = len(self.commands())
+        before = time.monotonic()
+        self.dap.request("terminate")
+        (self.state / "release-install").touch()
+        if not restart:
+            self.dap.send("configurationDone")
+        self.dap.event("terminated")
+        self.dap.response(acquisition, success=False)
+        self.assertLess(time.monotonic() - before, 5)
+        self.dap.close()
+        later = self.commands()[command_count:]
+        self.assertFalse(any("launch" in c or ("start" in c and "--es" in c) for c in later), later)
+        self.assertFalse(any("forward" in c and "--remove" not in c for c in later), later)
+        self.assertEqual(self.remote.operations, [])
+        self.assertFalse(any(m.get("event") == "process" for m in self.dap.history))
+        while not self.dap.messages.empty():
+            self.assertNotEqual(self.dap.messages.get().get("event"), "process")
+
+    def test_android_terminate_during_install(self):
+        self.terminate_during_install("android")
+
+    def test_ios_terminate_during_install(self):
+        self.terminate_during_install("iosSimulator")
+
+    def test_android_terminate_during_restart_redeployment(self):
+        self.terminate_during_install("android", restart=True)
+
+    def test_ios_terminate_during_restart_redeployment(self):
+        self.terminate_during_install("iosSimulator", restart=True)
+
+    def default_restart(self, platform):
+        self.remote = Remote(self.state, "Android" if platform == "android" else "iOS")
+        launch = self.dap.send("launch", {"mobile": self.options(platform) | {
+            "replaceExisting": False, "uninstallOnDisconnect": False}})
+        self.dap.request("configurationDone")
+        self.dap.response(launch)
+        self.dap.event("stopped")
+        self.old_remote = self.remote
+        self.remote = Remote(self.state, "Android" if platform == "android" else "iOS")
+        self.dap.request("restart")
+        self.dap.event("stopped")
+        self.dap.request("disconnect")
+        self.assertEqual(sum("install" in c for c in self.commands()), 2)
+        self.assertFalse(any("uninstall" in c for c in self.commands()))
+
+    def test_android_restart_with_default_installation_policy(self):
+        self.default_restart("android")
+
+    def test_ios_restart_with_default_installation_policy(self):
+        self.default_restart("iosSimulator")
+
+    def test_unrelated_installation_is_not_replaced(self):
+        for platform in ("android", "iosSimulator"):
+            with self.subTest(platform=platform):
+                (self.state / "installed").touch()
+                self.dap.request("launch", {"mobile": self.options(platform)}, success=False)
+        self.assertFalse(any("install" in c for c in self.commands()))
+
+    def test_variables_omitted_and_zero_count_return_all_150(self):
+        self.launch("android")
+        frame = self.dap.request("stackTrace", {"threadId": 7})["stackFrames"][0]["id"]
+        scope = self.dap.request("scopes", {"frameId": frame})["scopes"][0]["variablesReference"]
+        array = self.dap.request("variables", {"variablesReference": scope})["variables"][2]["variablesReference"]
+        for page in ({}, {"count": 0}):
+            with self.subTest(page=page):
+                values = self.dap.request("variables", {"variablesReference": array} | page)["variables"]
+                self.assertEqual([v["value"] for v in values], [str(i) for i in range(150)])
+        page = self.dap.request("variables", {"variablesReference": array, "start": 141, "count": 4})["variables"]
+        self.assertEqual([v["value"] for v in page], ["141", "142", "143", "144"])
+
+    def test_exception_filter_conditions_remain_associated_with_stages(self):
+        self.launch("android")
+        self.dap.request("setExceptionBreakpoints", {"filters": [], "filterOptions": [
+            {"filterId": "all", "condition": "System.ArgumentException"},
+            {"filterId": "unhandled", "condition": "System.InvalidOperationException"}]})
+        body = next(body for op, body in reversed(self.remote.requests) if op == 18)
+        self.assertEqual(body, {"Rules": [
+            {"Filter": "all", "Type": "System.ArgumentException"},
+            {"Filter": "unhandled", "Type": "System.InvalidOperationException"}]})
+        self.dap.request("setExceptionBreakpoints", {"filters": ["user-unhandled"]}, success=False)
 
 
 if __name__ == "__tool__":

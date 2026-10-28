@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Actual stdio DAP with explicitly fake device tools/remote runtime; not mobile runtime proof."""
+"""Portable actual-adapter contracts with fake device tools/runtime; not mobile proof."""
 import json
 import os
 from pathlib import Path

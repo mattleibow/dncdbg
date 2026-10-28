@@ -1,5 +1,18 @@
 # Mobile experimental fixture
 
+## Required test interface
+
+Use the [single .NET console entrypoint](../DncDbg.MobileTests/README.md) for all
+current proof. It builds the fixture, creates/boots a dedicated device, executes
+full DAP/DevFlow/fault/direct-client suites, restores ordinary artifacts and
+always cleans up the device. Portable host contracts are in
+`tests/DncDbg.RemoteTests` and the solution, **not** `test-suite/Test*`.
+
+The commands further below describe **internal/legacy diagnostic helpers** and
+historical experiments, not additional required user invocations. In particular,
+manual device/broker lifecycle and fault-build flags are now owned by the
+top-level runner. Historical results cannot replace exact-head mobile CI.
+
 The adapter-owned launch and extended inspection/stepping/exception/restart
 gate is documented in [Mobile DAP preview](../../docs/mobile-preview.md).
 The direct-client proofs below remain separate regression gates; their
@@ -15,16 +28,15 @@ pages and truthful totals; they inspect the shifted array root and evaluate
 indices 0/5/149/150, all requiring `UnsupportedArrayBounds` rather than a value:
 
 ```sh
-python3 tests/DncDbg.MobileTests/run_device.py \
-  --platform iosSimulator --device YOUR_DEDICATED_SIMULATOR_UDID \
-  --app tests/DncDbg.MauiTestApp/bin/Debug/net11.0-ios/iossimulator-arm64/DncDbg.MauiTestApp.app \
-  --assets tests/DncDbg.MauiTestApp/bin/Debug/net11.0-ios/iossimulator-arm64 \
-  --output build/validation/review-final/complete-ios
+dotnet run --project tests/DncDbg.MobileTests -c Release -- \
+  --platform ios --xcode-dir /Applications/Xcode_26.6.app/Contents/Developer \
+  --output build/validation/mobile-ios-RUN
 ```
 
-Use `--platform android`, the exact emulator serial, and its built signed APK
-and assets for Android. The runner always terminates/uninstalls its fixture
-and removes only its own UI mapping, including on failure.
+Use `--platform android` with an explicit `ANDROID_HOME` for Android.
+The top-level runner chooses its own dedicated device/AVD and artifact paths.
+It always terminates/uninstalls its fixture and removes only owned mappings,
+including on failure.
 
 The private Debug fixture also embeds the small `DncDbg.ReloadFixture` PE without
 referencing/loading it in the default context. `reload-load`, `reload-run`, and
@@ -37,7 +49,7 @@ the last to return verification to pending, then reloads and hits again with the
 same DAP ID. Native contracts additionally cover late/stale callbacks, repeated
 load/unload notifications and exact-once COM reference release.
 
-`tests/DncDbg.MobileTests/run_faults.py` takes the same arguments. It gates a
+The internal `run_faults.py` helper is called automatically. It gates a
 **real completed install** before the adapter can launch, then terminates during
 initial deployment and restart redeployment. It also uses uncatchable SIGKILL
 to simulate abrupt crashes of real running and stopped targets and verifies
@@ -125,9 +137,7 @@ engine/DAP integration. MIT attribution is retained in
 Portable/native negative checks (neither is mobile proof):
 
 ```sh
-dotnet run --project tests/DncDbg.RemoteTests -c Release
-python3 src/DncDbg.Remote.Target/build.py --test-host
-python3 tests/DncDbg.MauiTestApp/test_validate.py
+dotnet run --project tests/DncDbg.MobileTests -c Release -- --platform contracts
 ```
 
 The POSIX mobile runner builds the host helper once, then invokes its DLL

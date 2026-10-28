@@ -214,14 +214,15 @@ Verified references (2026-10-28):
 Host-only contracts (explicit fake device tools/runtime, not mobile proof):
 
 ```sh
-dotnet build DncDbg.slnx -c Release
-python3 src/DncDbg.Remote/generate_contract.py --check
-python3 tests/DncDbg.MobileTests/test_dap.py
-python3 src/DncDbg.Remote.Target/build.py --test-host
+dotnet run --project tests/DncDbg.MobileTests -c Release -- --platform contracts
 ```
 
-Real devices use `tests/DncDbg.MobileTests/run_device.py --help`: it launches
-the actual adapter, leaves deployment/debugger forwarding to the adapter,
+Real runtime proof uses the **same console entrypoint** with `--platform ios`
+or `--platform android`; see the [mobile runner guide](../tests/DncDbg.MobileTests/README.md)
+for exact prerequisites, provisioning, one-command invocations and CI blockers.
+It creates and owns its dedicated device, builds/inspects Release isolation,
+builds the Debug fixture, launches the actual adapter, leaves
+deployment/debugger forwarding to the adapter,
 and exercises the exact `MOBILE_BREAKPOINT` 1/42/43 gate plus strings, array and
 object children, safe paths, all three step requests, exceptions, pause,
 restart and stopped detach. Its independent DevFlow UI lane asserts completion
@@ -231,15 +232,24 @@ floating-point fields. The suite requires both unpaged array forms, bounded
 explicit paging, per-stage exception conditions and restart under the default
 replacement/uninstall policies on each platform.
 
-`tests/DncDbg.MobileTests/run_faults.py` additionally gates real completed
+The entrypoint also calls its internal fault helper to gate real completed
 installs to interrupt initial deployment and restart redeployment, kills running
 and stopped targets, and verifies that the explicitly opted-in native watchdog
 exits a stalled target. See the [fixture guide](../tests/DncDbg.MauiTestApp/README.md)
-for the separate Debug-only native/managed fault-injection build flags. Normal
+for the Debug-only native/managed fault-injection boundary. The entrypoint owns
+those build flags and always restores/reruns the ordinary helper/package. Normal
 helpers have no fault export; Release enables none of these experimental paths.
 Each fault scenario must leave no owned debugger/UI forward, app process or
 endpoint credential.
-The original direct-client native proofs remain separate regression gates.
+The original direct-client continue/stopped-disconnect proofs remain required
+additional regressions and are called by the same entrypoint.
+
+Portable contracts live under `tests/DncDbg.RemoteTests`, built by the normal
+solution; mobile is not an upstream native parity project. Nothing is added to
+`test-suite/Test*` auto-discovery. `Mobile proof` triggers both required named
+mobile checks on PRs to `main`. Hosted iOS is pinned; the arm64-only Android job
+requires the documented isolated self-hosted label. A queued/unprovisioned job
+or unavailable Xcode/image is a blocker, not proof from generic CI.
 
 **Keep PR #11 draft.** Full local/CI, current-main integration, both real mobile
 gates and full independent review are required before merge. No automatic

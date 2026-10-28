@@ -11,7 +11,9 @@ import sys
 import threading
 import time
 import unittest
+from unittest.mock import Mock, patch
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "DncDbg.MauiTestApp"))
 import validate
 
 
@@ -55,6 +57,32 @@ def waiting_parent(destination):
 
 @unittest.skipUnless(os.name == "posix", "The simulator/emulator runner requires POSIX process groups")
 class ProcessOwnershipTests(unittest.TestCase):
+    def test_disappeared_group_eperm_requires_independent_absence_check(self):
+        process = Mock(pid=123456)
+        with patch.object(validate.os, "killpg", side_effect=PermissionError(1, "Operation not permitted")), \
+                patch.object(validate.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, " 12\n 34\n", "")) as snapshot:
+            validate.stop_owned(process)
+        snapshot.assert_called_with(["ps", "-axo", "pgid="], check=True, capture_output=True, text=True, timeout=5)
+        self.assertEqual(snapshot.call_count, 2)
+        process.wait.assert_called_once_with(timeout=1)
+
+    def test_live_group_eperm_is_not_ignored(self):
+        process = Mock(pid=123456)
+        with patch.object(validate.os, "killpg", side_effect=PermissionError(1, "Operation not permitted")), \
+                patch.object(validate.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "123456\n", "")):
+            with self.assertRaises(PermissionError):
+                validate.stop_owned(process)
+
+    def test_group_liveness_uses_ps_not_permission_sensitive_signal_zero(self):
+        process = Mock(pid=123456)
+        with patch.object(validate.os, "killpg") as send, \
+                patch.object(validate.subprocess, "run", side_effect=[
+                    subprocess.CompletedProcess([], 0, "123456\n", ""),
+                    subprocess.CompletedProcess([], 0, "", ""),
+                    subprocess.CompletedProcess([], 0, "", "")]):
+            validate.stop_owned(process)
+        send.assert_called_once_with(123456, signal.SIGTERM)
+
     def test_timeout_removes_parent_child_and_listener_within_five_seconds(self):
         directory = validate.ROOT / "build/validation/process-ownership" / f"{os.getpid()}-{time.time_ns()}"
         directory.mkdir(parents=True)

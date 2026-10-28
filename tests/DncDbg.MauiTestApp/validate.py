@@ -12,6 +12,8 @@ import sys
 import time
 import zipfile
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "DncDbg.MobileTests"))
+from mobile_tools import adb_path
 
 ROOT = Path(__file__).resolve().parents[2]
 APP = "com.dncdbg.mobiletests"
@@ -26,12 +28,26 @@ def start_owned(*args, **kwargs):
 
 
 def stop_owned(process):
+    def group_exists():
+        process.poll()
+        groups = subprocess.run(["ps", "-axo", "pgid="], check=True, capture_output=True,
+                                text=True, timeout=5).stdout.split()
+        return str(process.pid) in groups
+
     def signal_group(value):
+        if value == 0:
+            return group_exists()
         try:
             os.killpg(process.pid, value)
             return True
         except ProcessLookupError:
             return False
+        except PermissionError:
+            # macOS can return EPERM rather than ESRCH for a group that just vanished.
+            # Never suppress it while ps still observes any member of the owned group.
+            if not group_exists():
+                return False
+            raise
 
     # The leader may already have exited while its debugger/CLI child is alive.
     if signal_group(signal.SIGTERM):
@@ -106,6 +122,7 @@ def main():
                         help="Opt into exact-build-pinned, version-fragile target-native private DBI startup")
     parser.add_argument("--private-disconnect", action="store_true",
                         help="Drop the authenticated native session while stopped, instead of continuing explicitly")
+    parser.add_argument("--output", type=Path, help="Run-owned evidence directory (used by the top-level mobile suite)")
     args = parser.parse_args()
     if args.platform == "android" and not args.device.startswith("emulator-"):
         parser.error("Physical Android devices are intentionally not supported")
@@ -124,9 +141,11 @@ def main():
     EVIDENCE = ROOT / ("build/validation/mobile/private-bootstrap" if args.private_bootstrap else f"build/validation/mobile/net11-{args.runtime}")
     if args.private_disconnect:
         EVIDENCE /= "disconnect"
+    if args.output:
+        EVIDENCE = args.output.resolve()
     EVIDENCE.mkdir(parents=True, exist_ok=True)
     prefix = args.platform
-    adb = str(Path(os.environ.get("ANDROID_HOME", str(Path.home() / "Library/Android/sdk"))) / "platform-tools/adb")
+    adb = adb_path() if prefix == "android" else None
     forwards = []
     added_reverse = False
     installed = False
@@ -184,7 +203,7 @@ def main():
         rid = "iossimulator-arm64" if prefix == "ios" else "android-arm64"
         properties = [f"-p:RuntimeIdentifier={rid}", "-p:EnableExperimentalRemoteDebugging=true"]
         if args.private_bootstrap:
-            run("python3", "src/DncDbg.Remote.Target/build.py", rid, env=env, log=f"{prefix}-native-build.log")
+            run(sys.executable, "src/DncDbg.Remote.Target/build.py", rid, env=env, log=f"{prefix}-native-build.log")
             properties.append("-p:EnableExperimentalPrivateBootstrap=true")
         if args.diagnostic_trace or args.shared_debugger_ipc:
             parent = ROOT / "build/i"

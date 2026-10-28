@@ -1,0 +1,115 @@
+name: Mobile proof
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ios:
+    name: Mobile iOS simulator (pinned)
+    runs-on: macos-26
+    timeout-minutes: 50
+    env:
+      DOTNET_INSTALL_DIR: ${{ github.workspace }}/build/mobile-sdk
+      DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE: "true"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            10.0.401
+            11.0.100-rc.1.26425.128
+      - name: Install exact workload and DevFlow CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/mobile-tools build/workload-scratch
+          cd tests/DncDbg.MauiTestApp
+          dotnet workload install maui-ios --version 11.0.100-rc.1.26460.1 --temp-dir ../../build/workload-scratch
+          cd ../..
+          dotnet tool install Microsoft.Maui.Cli --version 0.1.0-preview.12.26421.1 --tool-path build/mobile-tools
+          echo "$PWD/build/mobile-tools" >> "$GITHUB_PATH"
+      - name: Build, provision and prove exact iOS simulator tuple
+        run: >-
+          dotnet run --project tests/DncDbg.MobileTests -c Release --
+          --platform ios --xcode-dir /Applications/Xcode_26.6.app/Contents/Developer
+          --output build/validation/mobile-ci/ios
+      - name: Recover owned simulator and processes even after cancellation
+        if: always()
+        timeout-minutes: 3
+        run: >-
+          dotnet run --project tests/DncDbg.MobileTests -c Release --no-build --
+          --platform ios --xcode-dir /Applications/Xcode_26.6.app/Contents/Developer
+          --output build/validation/mobile-ci/ios --cleanup
+      - name: Upload bounded iOS evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobile-ios-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/validation/mobile-ci/ios/evidence/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 6
+
+  android:
+    name: Mobile Android emulator (pinned)
+    # Hosted macOS cannot nest Hypervisor.framework; x64 Linux KVM cannot run this arm64 ABI.
+    # This required job deliberately stays queued until an isolated, ephemeral Apple Silicon runner exists.
+    runs-on: [self-hosted, macOS, ARM64, dncdbg-android-arm64-api37-rc1]
+    timeout-minutes: 50
+    env:
+      DOTNET_INSTALL_DIR: ${{ github.workspace }}/build/mobile-sdk
+      DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE: "true"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            10.0.401
+            11.0.100-rc.1.26425.128
+      - name: Install exact workload and DevFlow CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${ANDROID_HOME:?Ephemeral runner must expose its pinned Android SDK}"
+          mkdir -p build/mobile-tools build/workload-scratch
+          cd tests/DncDbg.MauiTestApp
+          dotnet workload install maui-android --version 11.0.100-rc.1.26460.1 --temp-dir ../../build/workload-scratch
+          cd ../..
+          dotnet tool install Microsoft.Maui.Cli --version 0.1.0-preview.12.26421.1 --tool-path build/mobile-tools
+          echo "$PWD/build/mobile-tools" >> "$GITHUB_PATH"
+      - name: Build, provision and prove exact Android arm64 emulator tuple
+        run: >-
+          dotnet run --project tests/DncDbg.MobileTests -c Release --
+          --platform android --output build/validation/mobile-ci/android
+      - name: Recover owned emulator, forwards and processes even after cancellation
+        if: always()
+        timeout-minutes: 3
+        run: >-
+          dotnet run --project tests/DncDbg.MobileTests -c Release --no-build --
+          --platform android --output build/validation/mobile-ci/android --cleanup
+      - name: Upload bounded Android evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobile-android-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/validation/mobile-ci/android/evidence/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 6

@@ -13,14 +13,16 @@ import struct
 import threading
 import time
 
+from mobile_tools import adb_path, tool_environment
 from test_dap import Dap, ROOT
 
 
 class Ui:
     def __init__(self, port, output):
+        self.errors = (output / "devflow-stderr.log").open("a")
         self.process = subprocess.Popen(["maui", "devflow", "--agent-port", str(port), "batch"],
                                         cwd=ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                        stderr=subprocess.PIPE, text=True)
+                                        stderr=self.errors, text=True)
         self.responses = queue.Queue()
         self.log = (output / "devflow.jsonl").open("a")
         threading.Thread(target=self.read, daemon=True).start()
@@ -53,7 +55,7 @@ class Ui:
             self.process.kill()
             self.process.wait()
         self.process.stdout.close()
-        self.process.stderr.close()
+        self.errors.close()
         self.log.close()
 
 
@@ -71,9 +73,8 @@ def main():
     for extension in ("dll", "pdb"):
         shutil.copyfile(args.assets / ("DncDbg.MauiTestApp." + extension), assets / ("DncDbg.MauiTestApp." + extension))
         shutil.copyfile(args.assets / ("DncDbg.ReloadFixture." + extension), assets / ("DncDbg.ReloadFixture." + extension))
-    adb = str(Path.home() / "Library/Android/sdk/platform-tools/adb")
-    env = {**os.environ, "PATH": str(Path(adb).parent) + os.pathsep + os.environ["PATH"],
-           "DNCDBG_LOG_DIR": str(args.output.resolve())}
+    adb = adb_path() if args.platform == "android" else None
+    env = tool_environment(args.platform) | {"DNCDBG_LOG_DIR": str(args.output.resolve())}
     dap = Dap(env, timeout=120)
     ui = None
     ui_port = None

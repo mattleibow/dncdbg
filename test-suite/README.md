@@ -1,5 +1,13 @@
 # How to launch tests locally
 
+`Test*/Test*.csproj` is the upstream-compatible native/managed parity contract.
+Do not add device orchestration or private-runtime mobile tests to that
+auto-discovered set. Portable remote contracts live in
+[`tests/DncDbg.RemoteTests`](../tests/DncDbg.RemoteTests/README.md), built by
+`DncDbg.slnx`; the [mobile entrypoint](../tests/DncDbg.MobileTests/README.md)
+owns separate simulator/emulator DAP, DevFlow and fault proof. Neither replaces
+or relaxes this parity suite.
+
 Use PowerShell 7 (`pwsh`) on Windows, Linux, and macOS. From the repository root:
 
 ```powershell

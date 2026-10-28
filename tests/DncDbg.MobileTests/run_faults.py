@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 
+from mobile_tools import adb_path, tool_environment
 from run_device import Ui
 from test_dap import Dap, ROOT
 
@@ -26,9 +27,9 @@ def main():
     args = parser.parse_args()
     args.output = args.output.resolve()
     args.output.mkdir(parents=True, exist_ok=True)
-    adb = str(Path.home() / "Library/Android/sdk/platform-tools/adb")
+    adb = adb_path() if args.platform == "android" else None
     xcrun = shutil.which("xcrun")
-    base_env = {**os.environ, "PATH": str(Path(adb).parent) + os.pathsep + os.environ["PATH"]}
+    base_env = tool_environment(args.platform)
     options = {
         "platform": args.platform, "deviceId": args.device, "applicationId": APP,
         "appPath": str(args.app.resolve()), "assetsPath": str(args.assets.resolve()),

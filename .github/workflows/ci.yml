@@ -57,6 +57,13 @@ jobs:
       - name: Publish adapter
         run: dotnet publish src/DncDbg.Dap --configuration Release --no-build --output bin --nologo
 
+      - name: Assert desktop artifacts exclude the experimental native target
+        shell: pwsh
+        run: |
+          $python = if ($IsWindows) { "python" } else { "python3" }
+          & $python tests/DncDbg.RemoteTests/assert_artifacts.py bin src/DncDbg.Dap/bin/Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Check experimental remote transport and desktop breakpoint proof
         shell: pwsh
         run: |
@@ -65,11 +72,16 @@ jobs:
 
       - name: Check native target ownership contracts (no mobile runtime)
         if: runner.os != 'Windows'
-        run: |
-          python3 tests/DncDbg.MauiTestApp/test_validate.py
-          python3 src/DncDbg.Remote/generate_contract.py --check
-          python3 tests/DncDbg.MobileTests/test_dap.py
-          python3 src/DncDbg.Remote.Target/build.py --test-host
+        run: dotnet run --project tests/DncDbg.MobileTests --configuration Release --no-build -- --platform contracts --output build/validation/mobile-contracts
+
+      - name: Upload portable mobile contract evidence
+        if: always() && runner.os != 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobile-contracts-${{ matrix.rid }}
+          path: build/validation/mobile-contracts/evidence/
+          retention-days: 7
+          if-no-files-found: error
 
       - name: Run smoke and acceptance tests
         shell: pwsh
@@ -155,6 +167,9 @@ jobs:
 
       - name: Publish adapter
         run: dotnet publish src/DncDbg.Dap --configuration Release --output bin --nologo
+
+      - name: Assert desktop package isolation
+        run: python3 tests/DncDbg.RemoteTests/assert_artifacts.py bin
 
       - name: Install VS Code test dependencies
         run: npm ci --prefix tests/DncDbg.VsCodeTests

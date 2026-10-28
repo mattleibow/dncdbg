@@ -17,6 +17,9 @@ The engine uses ClrDebug and the public CLR debugging APIs directly. It does not
 wrap another debugger executable. Native CLR debugging libraries and the Windows
 PDB reader remain runtime dependencies supplied through NuGet and the target
 runtime; no C++ compiler, CMake build, or vendored native source is required.
+The separate, opt-in **Debug mobile fixture** is the sole exception: its private
+target provider uses native startup/ICorDebug code, never shipped in ordinary
+desktop adapter artifacts. Normal DNCDbg remains C#.
 
 ## Build and publish
 
@@ -91,6 +94,18 @@ simulator/Android emulator** builds. It is not general supported mobile
 debugging and makes no physical-device claim. The separately built
 [MAUI fixture](tests/DncDbg.MauiTestApp/README.md) remains on a local .NET 11
 SDK pin; the debugger and ordinary desktop launch remain on .NET 10.
+Use the [single mobile test entrypoint](tests/DncDbg.MobileTests/README.md):
+
+```sh
+dotnet run --project tests/DncDbg.MobileTests -c Release -- --platform contracts
+# Real iOS/Android runs use the same command with --platform ios/android; see prerequisites.
+```
+
+Portable remote/contract projects belong in `tests/` and `DncDbg.slnx`, like
+SmokeTests and DockerTests. Mobile orchestration is not an upstream native
+parity project and is deliberately outside `test-suite/Test*` auto-discovery.
+The separate `Mobile proof` PR workflow requires actual pinned runtime suites;
+generic desktop CI and fake contracts do not prove mobile debugging.
 Runtime capabilities explicitly exclude func-eval and other unsupported
 operations. See the [preview guide](docs/mobile-preview.md) for configuration,
 limitations and current merge gates, and the [historical proof](docs/experimental-mobile-debugging.md)

@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import platform
 import subprocess
 import urllib.request
 
@@ -13,9 +14,12 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("rid", nargs="?", choices=["iossimulator-arm64", "android-arm64"])
 parser.add_argument("--test-host", action="store_true", help="Run native contract fakes without loading a runtime or DBI")
 parser.add_argument("--test-faults", action="store_true", help="Explicit fixture-only watchdog fault injection; excluded from normal helpers")
+parser.add_argument("--configuration", choices=["Debug", "Release"], default="Debug")
 args = parser.parse_args()
 if not args.rid and not args.test_host:
     parser.error("Choose a target RID or --test-host")
+if args.rid and args.configuration != "Debug":
+    parser.error("The experimental target-native provider is Debug-fixture-only, never a Release artifact")
 out = ROOT / "build/native-private" / ("host-tests" if args.test_host else args.rid)
 out.mkdir(parents=True, exist_ok=True)
 deps = ROOT / "build/native-private/deps"
@@ -48,8 +52,14 @@ if args.rid == "iossimulator-arm64":
     command = ["xcrun", "clang++", *common, "-target", "arm64-apple-ios15.0-simulator",
                "-isysroot", sdk, "-c", "-o", str(obj)]
 else:
-    ndk = Path(os.environ.get("ANDROID_NDK_HOME", str(Path.home() / "Library/Android/sdk/ndk/29.0.14206865")))
-    compiler = ndk / "toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android24-clang++"
+    sdk = os.environ.get("ANDROID_HOME") or os.environ.get("ANDROID_SDK_ROOT")
+    if not sdk:
+        raise SystemExit("Set ANDROID_HOME to the installed Android SDK.")
+    ndk = Path(sdk) / "ndk/29.0.14206865"
+    host = {"Darwin": "darwin-x86_64", "Linux": "linux-x86_64"}.get(platform.system())
+    if host is None:
+        raise SystemExit("Native mobile helpers require macOS or Linux.")
+    compiler = ndk / f"toolchains/llvm/prebuilt/{host}/bin/aarch64-linux-android24-clang++"
     library = out / "libdncdbg_target.so"
     command = [str(compiler), *common, "-shared", "-static-libstdc++", "-ldl", "-o", str(library)]
 subprocess.run(command, cwd=ROOT, check=True)

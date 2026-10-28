@@ -84,6 +84,9 @@
 	<PropertyGroup Condition="'$(Configuration)' == 'Debug' And '$(EnableExperimentalRemoteDebugging)' == 'true' And '$(EnableExperimentalPrivateBootstrap)' == 'true'">
 		<DefineConstants>$(DefineConstants);DNCDBG_PRIVATE_BOOTSTRAP</DefineConstants>
 	</PropertyGroup>
+	<PropertyGroup Condition="'$(Configuration)' == 'Debug' And '$(EnableExperimentalRemoteDebugging)' == 'true' And '$(EnableExperimentalPrivateBootstrap)' == 'true' And '$(EnableExperimentalTestFaults)' == 'true'">
+		<DefineConstants>$(DefineConstants);DNCDBG_TEST_FAULTS</DefineConstants>
+	</PropertyGroup>
 	<ItemGroup Condition="'$(Configuration)' == 'Debug' And '$(EnableExperimentalRemoteDebugging)' == 'true' And '$(EnableExperimentalPrivateBootstrap)' == 'true' And '$(RuntimeIdentifier)' == 'iossimulator-arm64'">
 		<NativeReference Include="../../build/native-private/iossimulator-arm64/libdncdbg_target.a" Kind="Static" ForceLoad="true" IsCxx="true" SmartLink="false" />
 	</ItemGroup>

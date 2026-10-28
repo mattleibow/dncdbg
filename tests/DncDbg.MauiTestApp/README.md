@@ -5,6 +5,43 @@ gate is documented in [Mobile DAP preview](../../docs/mobile-preview.md).
 The direct-client proofs below remain separate regression gates; their
 historical results do not prove the newer DAP surface.
 
+The fresh actual-adapter suites also check default-policy restart, all 150 array
+children (omitted/zero count), bounded explicit pages, round-trip floats/doubles,
+special floating-point values, and combined stage/type exception filters:
+
+```sh
+python3 tests/DncDbg.MobileTests/run_device.py \
+  --platform iosSimulator --device YOUR_DEDICATED_SIMULATOR_UDID \
+  --app tests/DncDbg.MauiTestApp/bin/Debug/net11.0-ios/iossimulator-arm64/DncDbg.MauiTestApp.app \
+  --assets tests/DncDbg.MauiTestApp/bin/Debug/net11.0-ios/iossimulator-arm64 \
+  --output build/validation/review-final/complete-ios
+```
+
+Use `--platform android`, the exact emulator serial, and its built signed APK
+and assets for Android. The runner always terminates/uninstalls its fixture
+and removes only its own UI mapping, including on failure.
+
+`tests/DncDbg.MobileTests/run_faults.py` takes the same arguments. It gates a
+**real completed install** before the adapter can launch, then terminates during
+initial deployment and restart redeployment. It also crashes real running and
+stopped targets and verifies DAP/endpoint/forward cleanup. Its watchdog scenario
+requires explicit test-only builds:
+
+```sh
+python3 src/DncDbg.Remote.Target/build.py iossimulator-arm64 --test-faults
+# From this fixture directory, build with the usual private/remote opt-ins plus:
+# -p:EnableExperimentalTestFaults=true
+```
+
+Repeat with `android-arm64` for Android. Both the native `DNCDBG_TEST_FAULTS`
+macro and the managed Debug-only property are required. The extra fixture
+button asks the native owner to stall; the actual 20-second watchdog must exit
+the app, and the adapter must clean its route/credentials within 35 seconds.
+The fault export is absent from ordinary native helpers, and the button/import
+are inactive without the managed opt-in. Release excludes both, even when
+all experimental properties are supplied. Fault injection is not a DAP operation
+and does not broaden the remote protocol.
+
 Standard `dotnet new maui` app, now targeting `net11.0-ios` and
 `net11.0-android`. This is a
 **experimental debugger test fixture, not general mobile debugger support**. See the

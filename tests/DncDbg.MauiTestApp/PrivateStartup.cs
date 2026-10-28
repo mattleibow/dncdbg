@@ -82,6 +82,9 @@ internal static class PrivateStartup
     };
 
     public static void Cancel() => Native.Cancel();
+#if DNCDBG_TEST_FAULTS
+    public static void StallOwner() => Native.StallOwner();
+#endif
 
     private static class Native
     {
@@ -102,6 +105,10 @@ internal static class PrivateStartup
         internal static extern int Status();
         [DllImport(Library, EntryPoint = "dncdbg_cancel")]
         internal static extern void Cancel();
+#if DNCDBG_TEST_FAULTS
+        [DllImport(Library, EntryPoint = "dncdbg_test_stall_owner")]
+        internal static extern void StallOwner();
+#endif
     }
 }
 #endif

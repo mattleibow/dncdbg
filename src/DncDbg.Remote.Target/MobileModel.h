@@ -253,11 +253,11 @@ Json ObjectSymbols(ObjectValue* object, Ref<Class>& klass) {
 template<class T> std::string FloatingText(T value) {
     if (std::isnan(value)) return "NaN";
     if (std::isinf(value)) return std::signbit(value) ? "-Infinity" : "Infinity";
-    char buffer[128];
-    auto result = std::to_chars(buffer, buffer + sizeof(buffer), value, std::chars_format::general,
-                               std::numeric_limits<T>::max_digits10);
-    if (result.ec != std::errc{}) throw std::runtime_error("ValueFormattingFailed");
-    return std::string(buffer, result.ptr);
+    std::ostringstream text;
+    text.imbue(std::locale::classic());
+    text << std::setprecision(std::numeric_limits<T>::max_digits10) << value;
+    if (!text) throw std::runtime_error("ValueFormattingFailed");
+    return text.str();
 }
 Json Describe(Value* original, const std::string& name = "") {
     Ref<Value> value;

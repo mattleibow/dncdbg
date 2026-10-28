@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("rid", nargs="?", choices=["iossimulator-arm64", "android-arm64"])
 parser.add_argument("--test-host", action="store_true", help="Run native contract fakes without loading a runtime or DBI")
+parser.add_argument("--test-faults", action="store_true", help="Explicit fixture-only watchdog fault injection; excluded from normal helpers")
 args = parser.parse_args()
 if not args.rid and not args.test_host:
     parser.error("Choose a target RID or --test-host")
@@ -28,6 +29,8 @@ if hashlib.sha256(header.read_bytes()).hexdigest() != dependency["sha256"]:
     raise SystemExit("Pinned JSON dependency hash mismatch; refusing to compile.")
 common = ["-std=c++17", "-O1", "-g", "-fPIC", "-fvisibility=hidden",
           "-Wall", "-Wextra", "-Werror", "-I", str(deps), str(Path(__file__).parent / "Bootstrap.cpp")]
+if args.test_faults:
+    common.insert(0, "-DDNCDBG_TEST_FAULTS")
 if args.test_host:
     import sys
     test = out / "native-contracts"

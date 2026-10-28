@@ -5,7 +5,6 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
-#include <charconv>
 #include <cmath>
 #include <condition_variable>
 #include <cstdio>
@@ -15,9 +14,12 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <limits>
+#include <iomanip>
+#include <locale>
 #include <mutex>
 #include <pthread.h>
 #include <string>
+#include <sstream>
 #include <unordered_map>
 #include <unistd.h>
 #ifdef __APPLE__
@@ -35,6 +37,9 @@ constexpr HResult Fail = static_cast<HResult>(0x80004005);
 std::atomic<int> state{0};
 std::atomic<bool> ownerFinished{false};
 std::atomic<bool> cancel{false};
+#ifdef DNCDBG_TEST_FAULTS
+std::atomic<bool> testStallOwner{false};
+#endif
 std::mutex queueMutex, reportMutex;
 std::condition_variable queueReady;
 enum class CallbackKind { Other, Breakpoint, Step, Pause, ExceptionThrown, ExceptionUnhandled, ThreadAdded, ThreadRemoved, Module, ModuleRemoved, Domain };
@@ -275,6 +280,12 @@ void BindModule(Unknown* module) {
 
 void Pump() {
     heartbeat.store(Milliseconds());
+#ifdef DNCDBG_TEST_FAULTS
+    if (testStallOwner.exchange(false)) {
+        Report("test-owner-stall");
+        for (;;) usleep(100000);
+    }
+#endif
     if (cancel.load()) throw std::runtime_error("Canceled");
     if (exited.load()) return;
     for (int i = 0; i < 256; ++i) {
@@ -651,6 +662,10 @@ void* Watchdog(void*) {
     return nullptr;
 }
 }
+
+#ifdef DNCDBG_TEST_FAULTS
+EXPORT void dncdbg_test_stall_owner() { testStallOwner.store(true); }
+#endif
 
 EXPORT const char* dncdbg_runtime_path() {
     if (!PlatformAllowed()) return nullptr;

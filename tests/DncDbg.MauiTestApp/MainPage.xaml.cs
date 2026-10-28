@@ -10,6 +10,9 @@ public partial class MainPage : ContentPage
 	{
 		InitializeComponent();
 		RuntimeStatus.Text = ExperimentalStartup.Status;
+#if DNCDBG_TEST_FAULTS
+		WatchdogScenario.IsVisible = true;
+#endif
 	}
 
 	private void OnCounterClicked(object? sender, EventArgs e)
@@ -39,7 +42,9 @@ public partial class MainPage : ContentPage
 	private static int PrepareScenario(int input, out string message, out int[] numbers, out ScenarioObject sample)
 	{
 		message = "mobile \ud83d\ude80";
-		numbers = [input, input + 41];
+		numbers = Enumerable.Range(0, 150).ToArray();
+		numbers[0] = input;
+		numbers[1] = input + 41;
 		sample = new ScenarioObject { Number = input + 41, Message = message };
 		return input + 41;
 	}
@@ -62,9 +67,23 @@ public partial class MainPage : ContentPage
 	[MethodImpl(MethodImplOptions.NoInlining | MethodImplOptions.NoOptimization)]
 	private static void ThrowScenario() => throw new InvalidOperationException("MOBILE_EXCEPTION");
 
+	private void OnWatchdogClicked(object? sender, EventArgs e)
+	{
+#if DNCDBG_TEST_FAULTS
+		PrivateStartup.StallOwner();
+#endif
+	}
+
 	private sealed class ScenarioObject
 	{
 		public int Number;
 		public string Message = "";
+		public float SmallFloat = 1e-10f;
+		public double SmallDouble = 1e-10;
+		public double PreciseDouble = 1.23456789012345;
+		public double NegativeZero = -0.0;
+		public double NotANumber = double.NaN;
+		public double PositiveInfinity = double.PositiveInfinity;
+		public double NegativeInfinity = double.NegativeInfinity;
 	}
 }

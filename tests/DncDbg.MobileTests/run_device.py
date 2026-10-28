@@ -3,11 +3,13 @@
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import queue
 import shutil
 import subprocess
+import struct
 import threading
 import time
 
@@ -110,7 +112,7 @@ def main():
             "platform": args.platform, "appPath": str(args.app.resolve()), "applicationId": "com.dncdbg.mobiletests",
             "deviceId": args.device, "assetsPath": str(assets.resolve()),
             "runtimeIdentifier": "android-arm64" if args.platform == "android" else "iossimulator-arm64",
-            "uninstallOnDisconnect": True, "startupTimeoutSeconds": 90}})
+            "replaceExisting": False, "uninstallOnDisconnect": False, "startupTimeoutSeconds": 90}})
         breakpoint = dap.request("setBreakpoints", {"source": {"path": str(source)}, "breakpoints": [{"line": line}]})["breakpoints"][0]
         dap.request("setExceptionBreakpoints", {"filters": []})
         dap.request("configurationDone")
@@ -149,8 +151,23 @@ def main():
         array = dap.request("variables", {"variablesReference": locals_by_name["numbers"]["variablesReference"],
                                           "start": 0, "count": 2})["variables"]
         check([v["value"] for v in array] == ["1", "42"], "DAP array children")
+        for page in ({}, {"count": 0}):
+            all_values = dap.request("variables", {"variablesReference": locals_by_name["numbers"]["variablesReference"]} | page)["variables"]
+            check(len(all_values) == 150 and [int(v["value"]) for v in all_values] == [1, 42, *range(2, 150)],
+                  "DAP 150-element array, " + ("omitted count" if not page else "count zero"))
+        page = dap.request("variables", {"variablesReference": locals_by_name["numbers"]["variablesReference"],
+                                         "start": 141, "count": 4})["variables"]
+        check([int(v["value"]) for v in page] == list(range(141, 145)), "DAP explicit array page remains bounded")
         fields = dap.request("variables", {"variablesReference": locals_by_name["sample"]["variablesReference"]})["variables"]
         check(any(v["name"] == "Number" and v["value"] == "42" for v in fields), "DAP object fields")
+        field_values = {v["name"]: v["value"] for v in fields}
+        check(struct.pack("<f", float(field_values["SmallFloat"])) == struct.pack("<f", 1e-10),
+              "DAP float 1e-10 round-trips")
+        check(float(field_values["SmallDouble"]) == 1e-10 and float(field_values["PreciseDouble"]) == 1.23456789012345,
+              "DAP double magnitude and precision round-trip")
+        check(float(field_values["NegativeZero"]) == 0 and math.copysign(1, float(field_values["NegativeZero"])) == -1 and
+              math.isnan(float(field_values["NotANumber"])) and float(field_values["PositiveInfinity"]) == math.inf and
+              float(field_values["NegativeInfinity"]) == -math.inf, "DAP NaN, infinities and negative zero retain semantics")
         for expression, expected in [("answer + 1", "43"), ("numbers[1]", "42"), ("sample.Number", "42")]:
             check(dap.request("evaluate", {"frameId": frame["id"], "expression": expression})["result"] == expected,
                   "safe DAP evaluate " + expression)
@@ -169,6 +186,16 @@ def main():
         dap.request("continue", {"threadId": step["threadId"]})
         ui.receive()
         ui.command('MAUI assert --automationId result-status Text "Result: 42"')
+        dap.request("setExceptionBreakpoints", {"filters": [], "filterOptions": [
+            {"filterId": "all", "condition": "System.ArgumentException"},
+            {"filterId": "unhandled", "condition": "System.InvalidOperationException"}]})
+        ui.command("MAUI tap --automationId throw-scenario")
+        ui.command('MAUI assert --automationId result-status Text "Exception handled"')
+        while not dap.messages.empty():
+            dap.history.append(dap.messages.get_nowait())
+        check(not any(m.get("event") == "stopped" for m in dap.history),
+              "combined stage/type filters ignore caught first-chance InvalidOperationException")
+        dap.request("setExceptionBreakpoints", {"filters": ["user-unhandled"]}, success=False)
         dap.request("setExceptionBreakpoints", {"filters": [], "filterOptions": [
             {"filterId": "all", "condition": "System.InvalidOperationException"}]})
         ui.send("MAUI tap --automationId throw-scenario")
@@ -200,6 +227,7 @@ def main():
         check(len(dap.request("threads")["threads"]) > 0 and dap.request("modules")["totalModules"] > 0,
               "DAP real thread/module snapshots")
         dap.request("restart")
+        check(True, "default replaceExisting=false/uninstallOnDisconnect=false restarts its own installation")
         restored = dap.event("breakpoint")["breakpoint"]
         check(restored["id"] == breakpoint["id"] and restored["verified"], "DAP breakpoint ID remains stable across restart")
         # iOS gets a fresh DevFlow assignment after restart; Android keeps a UI-only mapping to its fixed fallback.

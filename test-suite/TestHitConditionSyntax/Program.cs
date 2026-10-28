@@ -63,7 +63,7 @@ namespace DbgTest.Script
 {
 partial class Context
 {
-    public void CheckHitConditionSyntax(string caller_trace)
+    public void CheckHitConditionSyntax(string callerTrace)
     {
         string[] names = { "bare", "equal", "greater_equal", "modulo" };
         string[] conditions = { "5", "==5", ">=5", "%5" };
@@ -72,53 +72,53 @@ partial class Context
         // Collect every case before comparing, so one syntax difference cannot mask the others.
         for (int stops = 0; ; stops++)
         {
-            Assert.True(stops <= 28, caller_trace);
-            Assert.True(DAPDebugger.IsEventReceived(json =>
+            Assert.True(stops <= 28, callerTrace);
+            Assert.True(m_dapDebugger.IsEventReceived(json =>
             {
-                if (!DAPDebugger.IsResponseContainProperty(json, "event", "stopped"))
+                if (!m_dapDebugger.IsResponseContainProperty(json, "event", "stopped"))
                     return false;
                 var stopped = JsonConvert.DeserializeObject<StoppedEvent>(json)!;
-                Assert.Equal("breakpoint", stopped.body.reason, caller_trace);
-                Assert.True(stopped.body.threadId.HasValue, caller_trace);
-                threadId = stopped.body.threadId!.Value;
+                Assert.Equal("breakpoint", stopped.body.reason, callerTrace);
+                Assert.True(stopped.body.threadId.HasValue, callerTrace);
+                m_threadId = stopped.body.threadId!.Value;
                 return true;
-            }), caller_trace);
+            }), callerTrace);
 
             var stackRequest = new StackTraceRequest();
-            stackRequest.arguments.threadId = threadId;
+            stackRequest.arguments.threadId = m_threadId;
             stackRequest.arguments.levels = 1;
-            var stackResult = DAPDebugger.Request(stackRequest);
-            Assert.True(stackResult.Success, caller_trace);
+            var stackResult = m_dapDebugger.Request(stackRequest);
+            Assert.True(stackResult.Success, callerTrace);
             var frame = JsonConvert.DeserializeObject<StackTraceResponse>(stackResult.ResponseStr)!.body.stackFrames[0];
-            Assert.Equal(ControlInfo.SourceFilesPath, frame.source.path, caller_trace);
+            Assert.Equal(m_controlInfo.SourceFilesPath, frame.source.path, callerTrace);
 
-            if (frame.line == ((LineBreakpoint)ControlInfo.Breakpoints["end"]).NumLine)
+            if (frame.line == ((LineBreakpoint)m_controlInfo.Breakpoints["end"]).NumLine)
                 break;
 
             int index = -1;
             for (int j = 0; j < names.Length; j++)
             {
-                if (frame.line == ((LineBreakpoint)ControlInfo.Breakpoints[names[j]]).NumLine)
+                if (frame.line == ((LineBreakpoint)m_controlInfo.Breakpoints[names[j]]).NumLine)
                     index = j;
             }
-            Assert.True(index >= 0, caller_trace);
+            Assert.True(index >= 0, callerTrace);
 
             var evaluateRequest = new EvaluateRequest();
             evaluateRequest.arguments.frameId = frame.id;
             evaluateRequest.arguments.expression = "i";
-            var evaluateResult = DAPDebugger.Request(evaluateRequest);
-            Assert.True(evaluateResult.Success, caller_trace);
+            var evaluateResult = m_dapDebugger.Request(evaluateRequest);
+            Assert.True(evaluateResult.Success, callerTrace);
             hits[index].Add(JsonConvert.DeserializeObject<EvaluateResponse>(evaluateResult.ResponseStr)!.body.result);
-            Continue(caller_trace);
+            Continue(callerTrace);
         }
 
         var actual = new List<string>();
         for (int j = 0; j < conditions.Length; j++)
         {
             int errors = 0;
-            while (DAPDebugger.IsNotStopEventReceived(json =>
+            while (m_dapDebugger.IsNotStopEventReceived(json =>
             {
-                if (!DAPDebugger.IsResponseContainProperty(json, "event", "output"))
+                if (!m_dapDebugger.IsResponseContainProperty(json, "event", "output"))
                     return false;
                 var output = JsonConvert.DeserializeObject<OutputEvent>(json)!;
                 return output.body.category == "stderr" &&
@@ -136,10 +136,10 @@ partial class Context
                           "==5: hits=5; removal errors=0\n" +
                           ">=5: hits=5,6,7; removal errors=0\n" +
                           "%5: hits=5; removal errors=0";
-        Assert.Equal(expected, string.Join("\n", actual), caller_trace);
+        Assert.Equal(expected, string.Join("\n", actual), callerTrace);
     }
 
-    public void CheckHitConditionRequests(string caller_trace)
+    public void CheckHitConditionRequests(string callerTrace)
     {
         string[] valid = { "", " ", "0", "1", "4294967295", "<0", "<=0", "==0", ">0", ">=0",
             "<4294967295", "<=4294967295", "==4294967295", ">4294967295", ">=4294967295",
@@ -150,29 +150,29 @@ partial class Context
             "2\0", "2\0x" };
         foreach (string condition in valid)
         {
-            Assert.True(DAPDebugger.Request(SourceRequest(condition)).Success, caller_trace + ": " + condition);
-            Assert.True(DAPDebugger.Request(FunctionRequest(condition)).Success, caller_trace + ": " + condition);
+            Assert.True(m_dapDebugger.Request(SourceRequest(condition)).Success, callerTrace + ": " + condition);
+            Assert.True(m_dapDebugger.Request(FunctionRequest(condition)).Success, callerTrace + ": " + condition);
         }
         foreach (string condition in invalid)
         {
-            CheckRejected(DAPDebugger.Request(SourceRequest(condition)), condition);
-            CheckRejected(DAPDebugger.Request(FunctionRequest(condition)), condition);
+            CheckRejected(m_dapDebugger.Request(SourceRequest(condition)), condition);
+            CheckRejected(m_dapDebugger.Request(FunctionRequest(condition)), condition);
         }
-        Assert.True(DAPDebugger.Request(new SetBreakpointsRequest
+        Assert.True(m_dapDebugger.Request(new SetBreakpointsRequest
         {
-            arguments = new SetBreakpointsArguments { source = new Source { path = ControlInfo.SourceFilesPath } }
-        }).Success, caller_trace);
-        Assert.True(DAPDebugger.Request(new SetFunctionBreakpointsRequest()).Success, caller_trace);
+            arguments = new SetBreakpointsArguments { source = new Source { path = m_controlInfo.SourceFilesPath } }
+        }).Success, callerTrace);
+        Assert.True(m_dapDebugger.Request(new SetFunctionBreakpointsRequest()).Success, callerTrace);
 
         SetBreakpointsRequest SourceRequest(string condition) => new()
         {
             arguments = new SetBreakpointsArguments
             {
-                source = new Source { path = ControlInfo.SourceFilesPath },
+                source = new Source { path = m_controlInfo.SourceFilesPath },
                 breakpoints = new List<SourceBreakpoint>
                 {
-                    new(((LineBreakpoint)ControlInfo.Breakpoints["bare"]).NumLine, HitCondition: "2"),
-                    new(((LineBreakpoint)ControlInfo.Breakpoints["equal"]).NumLine, HitCondition: condition),
+                    new(((LineBreakpoint)m_controlInfo.Breakpoints["bare"]).NumLine, hitCondition: "2"),
+                    new(((LineBreakpoint)m_controlInfo.Breakpoints["equal"]).NumLine, hitCondition: condition),
                 },
             },
         };
@@ -182,19 +182,19 @@ partial class Context
             {
                 breakpoints = new List<FunctionBreakpoint>
                 {
-                    new("TestHitConditionSyntax.Program.Main", HitCondition: "2"),
-                    new("TestHitConditionSyntax.Program.Main", HitCondition: condition),
+                    new("TestHitConditionSyntax.Program.Main", hitCondition: "2"),
+                    new("TestHitConditionSyntax.Program.Main", hitCondition: condition),
                 },
             },
         };
         void CheckRejected(DAPResult result, string condition)
         {
-            Assert.False(result.Success, caller_trace + ": " + condition);
-            string message = DAPDebugger.GetResponsePropertyValue(result.ResponseStr, "message")?.ToString() ?? "";
+            Assert.False(result.Success, callerTrace + ": " + condition);
+            string message = m_dapDebugger.GetResponsePropertyValue(result.ResponseStr, "message")?.ToString() ?? "";
             Assert.Equal(condition.Replace(" ", "") == "%0"
                 ? "Invalid hit condition: N must be greater than 0 for %N"
                 : "Invalid hit condition. Supported hit conditions: <N, <=N, ==N, >N, N or >=N, and %N, where N is an integer within the range 0 - 4294967295",
-                message, caller_trace + ": " + condition);
+                message, callerTrace + ": " + condition);
         }
     }
 }

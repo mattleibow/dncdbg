@@ -19,7 +19,7 @@ class Program
                 Context.AddExceptionBreakpointFilterAll();
                 Context.SetExceptionBreakpoints(@"__FILE__:__LINE__");
                 Context.ConfigurationDone(@"__FILE__:__LINE__");
-                Context.Launch(@"__FILE__:__LINE__", JMC: true);
+                Context.Launch(@"__FILE__:__LINE__", jmc: true);
                 Context.WasEntryPointHit(@"__FILE__:__LINE__");
                 Context.Continue(@"__FILE__:__LINE__");
             });
@@ -36,7 +36,7 @@ class Program
             {
                 Context Context = (Context)context;
                 Context.WasExceptionBreakpointHit(@"__FILE__:__LINE__", "point1", "CLR", "always", "System.InvalidOperationException");
-                Context.TestInnerExceptionMessages(@"__FILE__:__LINE__", ExpectedFirst: "level 62", ExpectedLast: "level 31");
+                Context.TestInnerExceptionMessages(@"__FILE__:__LINE__", expectedFirst: "level 62", expectedLast: "level 31");
                 Context.CheckInnerExceptionCount(@"__FILE__:__LINE__", 32);
                 Context.Continue(@"__FILE__:__LINE__");
             });
@@ -57,28 +57,28 @@ namespace DbgTest.Script
 {
 partial class Context
 {
-    public void CheckInnerExceptionCount(string caller_trace, int expected)
+    public void CheckInnerExceptionCount(string callerTrace, int expected)
     {
         var request = new ExceptionInfoRequest();
-        request.arguments.threadId = threadId;
-        var result = DAPDebugger.Request(request);
-        Assert.True(result.Success, caller_trace);
+        request.arguments.threadId = m_threadId;
+        var result = m_dapDebugger.Request(request);
+        Assert.True(result.Success, callerTrace);
         var response = JsonConvert.DeserializeObject<ExceptionInfoResponse>(result.ResponseStr, ExceptionInfoJsonSettings)!;
-        Assert.Equal("always", response.body.breakMode, caller_trace);
+        Assert.Equal("always", response.body.breakMode, callerTrace);
         ExceptionDetails node = response.body.details!;
         for (int depth = 0; ; depth++)
         {
-            Assert.Equal("System.InvalidOperationException", node.fullTypeName, caller_trace);
-            Assert.Equal(depth == 64 ? "innermost" : "level " + (63 - depth), node.message, caller_trace);
+            Assert.Equal("System.InvalidOperationException", node.fullTypeName, callerTrace);
+            Assert.Equal(depth == 64 ? "innermost" : "level " + (63 - depth), node.message, callerTrace);
             int children = node.innerException?.Count ?? 0;
-            Assert.Equal(depth == expected ? 0 : 1, children, caller_trace);
+            Assert.Equal(depth == expected ? 0 : 1, children, callerTrace);
             if (depth == expected)
                 break;
             node = node.innerException![0];
         }
     }
 
-    public void CheckInnerExceptionConfiguration(string caller_trace)
+    public void CheckInnerExceptionConfiguration(string callerTrace)
     {
         var cases = new (string? Limit, int Expected, bool Attach)[]
         {
@@ -105,26 +105,26 @@ partial class Context
         };
         foreach (var scenario in cases)
         {
-            Initialize(caller_trace);
+            Initialize(callerTrace);
             if (scenario.Limit != null)
                 AddEnvMapEntry("DNCDBG_INNER_EXCEPTION_WALK_LIMIT", scenario.Limit);
             AddExceptionBreakpointFilterAll();
-            SetExceptionBreakpoints(caller_trace);
-            ConfigurationDone(caller_trace);
+            SetExceptionBreakpoints(callerTrace);
+            ConfigurationDone(callerTrace);
             if (scenario.Attach)
-                StartTargetAndAttach(caller_trace, StartSuspend: true, StopAtEntry: true);
+                StartTargetAndAttach(callerTrace, startSuspend: true, stopAtEntry: true);
             else
-                Launch(caller_trace, JMC: true);
-            WasEntryPointHit(caller_trace);
-            Continue(caller_trace);
-            WasExceptionBreakpointHit(caller_trace, "point1", "CLR", "always", "System.InvalidOperationException");
+                Launch(callerTrace, jmc: true);
+            WasEntryPointHit(callerTrace);
+            Continue(callerTrace);
+            WasExceptionBreakpointHit(callerTrace, "point1", "CLR", "always", "System.InvalidOperationException");
             if (scenario.Limit == "50")
-                TestInnerExceptionMessages(caller_trace, ExpectedFirst: "level 62", ExpectedLast: "level 13");
+                TestInnerExceptionMessages(callerTrace, expectedFirst: "level 62", expectedLast: "level 13");
             if (scenario.Limit == "100")
-                TestInnerExceptionMessages(caller_trace, ExpectedFirst: "level 62", ExpectedLast: "innermost");
-            CheckInnerExceptionCount(caller_trace, scenario.Expected);
-            Continue(caller_trace);
-            WasExit(caller_trace);
+                TestInnerExceptionMessages(callerTrace, expectedFirst: "level 62", expectedLast: "innermost");
+            CheckInnerExceptionCount(callerTrace, scenario.Expected);
+            Continue(callerTrace);
+            WasExit(callerTrace);
         }
     }
 }

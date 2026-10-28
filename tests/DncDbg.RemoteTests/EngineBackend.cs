@@ -1,4 +1,5 @@
 using System.Threading.Channels;
+using System.Diagnostics;
 using DncDbg.Engine;
 using DncDbg.Remote;
 
@@ -12,8 +13,10 @@ internal sealed class EngineBackend(string program, string resultPath) : IRemote
     private bool subscribed;
     private bool disposed;
     private bool started;
-    private long nextStop;
+    private static long nextStop;
     private RemoteStop? currentStop;
+    private Process? target;
+    private volatile bool targetExited;
     public int ProcessId { get; private set; }
     public RemoteCapabilities Capabilities { get; } = new(".NET desktop / public ICorDebug", "Desktop proof only", true, null);
 
@@ -31,9 +34,15 @@ internal sealed class EngineBackend(string program, string resultPath) : IRemote
             throw new InvalidOperationException("Already started.");
         started = true;
         engine.Stopped += OnStopped;
+        engine.Exited += OnExited;
         subscribed = true;
         try { engine.Launch(new LaunchOptions { Program = program, Args = [resultPath] }); }
-        finally { ProcessId = engine.ProcessId; }
+        finally
+        {
+            ProcessId = engine.ProcessId;
+            if (ProcessId > 0)
+                target = Process.GetProcessById(ProcessId);
+        }
         engine.ConfigurationDone();
         return ValueTask.CompletedTask;
     }
@@ -44,12 +53,22 @@ internal sealed class EngineBackend(string program, string resultPath) : IRemote
             engine.Continue();
     }
 
+    private void OnExited(int code)
+    {
+        targetExited = true;
+        stops.Writer.TryComplete();
+    }
+
     public async ValueTask<RemoteStop> WaitForStopAsync(CancellationToken cancellationToken)
     {
         if (currentStop != null)
             throw new InvalidOperationException("Continue the outstanding callback before requesting another.");
-        StopInfo stop = await stops.Reader.ReadAsync(cancellationToken);
-        currentStop = new(++nextStop, stop.Reason, stop.ThreadId);
+        RequireTarget();
+        StopInfo stop;
+        try { stop = await stops.Reader.ReadAsync(cancellationToken); }
+        catch (ChannelClosedException) { throw new InvalidOperationException("The target exited without another stop."); }
+        RequireTarget();
+        currentStop = new(Interlocked.Increment(ref nextStop), stop.Reason, stop.ThreadId);
         return currentStop;
     }
 
@@ -63,6 +82,7 @@ internal sealed class EngineBackend(string program, string resultPath) : IRemote
 
     public ValueTask<RemoteValue> EvaluateAsync(RemoteEvaluation request, CancellationToken cancellationToken)
     {
+        RequireTarget();
         if (currentStop == null)
             throw new InvalidOperationException("No callback owns a stop.");
         int frame = frames.Get(request.Frame);
@@ -92,8 +112,19 @@ internal sealed class EngineBackend(string program, string resultPath) : IRemote
 
     private void RequireStop(long stop)
     {
+        RequireTarget();
         if (currentStop?.Id != stop)
             throw new InvalidOperationException("Unknown or already continued callback.");
+    }
+
+    private void RequireTarget()
+    {
+        if (targetExited || target is { HasExited: true })
+        {
+            currentStop = null;
+            frames.Invalidate();
+            throw new InvalidOperationException("The target exited; all stops and frame handles are invalid.");
+        }
     }
 
     public ValueTask DisposeAsync()
@@ -102,10 +133,13 @@ internal sealed class EngineBackend(string program, string resultPath) : IRemote
             return ValueTask.CompletedTask;
         disposed = true;
         if (subscribed)
+        {
             engine.Stopped -= OnStopped;
+            engine.Exited -= OnExited;
+        }
         frames.Dispose();
         try { engine.Detach(); }
-        finally { engine.Dispose(); }
+        finally { engine.Dispose(); target?.Dispose(); }
         return ValueTask.CompletedTask;
     }
 }

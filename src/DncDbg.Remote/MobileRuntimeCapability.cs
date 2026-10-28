@@ -11,15 +11,16 @@ public static class MobileRuntimeCapability
         string platform = OperatingSystem.IsIOS() ? "iOS" : OperatingSystem.IsAndroid() ? "Android" : "Desktop";
         string blocker = runtime == RemoteRuntimeKind.Mono
             ? "Mono uses the soft-debugger protocol, not ICorDebug. No public ICorDebug device backend is installed."
-            : "No validated public in-process ICorDebug startup provider is installed. Private DBI exports are not permitted.";
+            : "No validated in-process ICorDebug execution backend is installed. Private DBI startup requires a separate explicit experimental opt-in and exact build validation.";
         return new($"{RuntimeInformation.FrameworkDescription} ({runtime})", platform, false, blocker);
     }
 
-    public static IRemoteDebugBackend CreateUnavailableBackend(RemoteRuntimeKind runtime = RemoteRuntimeKind.Unspecified) => new UnavailableBackend(runtime);
+    public static IRemoteDebugBackend CreateUnavailableBackend(RemoteRuntimeKind runtime = RemoteRuntimeKind.Unspecified,
+        RemoteCapabilities? capabilities = null) => new UnavailableBackend(runtime, capabilities);
 
-    private sealed class UnavailableBackend(RemoteRuntimeKind runtime) : IRemoteDebugBackend
+    private sealed class UnavailableBackend(RemoteRuntimeKind runtime, RemoteCapabilities? capabilities) : IRemoteDebugBackend
     {
-        public RemoteCapabilities Capabilities { get; } = Detect(runtime);
+        public RemoteCapabilities Capabilities { get; } = capabilities ?? Detect(runtime);
         private PlatformNotSupportedException Unavailable() => new(Capabilities.Blocker);
         public ValueTask<RemoteBreakpoint[]> SetBreakpointsAsync(RemoteBreakpoints request, CancellationToken cancellationToken) => throw Unavailable();
         public ValueTask StartAsync(CancellationToken cancellationToken) => throw Unavailable();

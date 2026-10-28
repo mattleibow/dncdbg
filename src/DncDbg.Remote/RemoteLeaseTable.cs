@@ -7,6 +7,7 @@ namespace DncDbg.Remote;
 public sealed class RemoteLeaseTable<T>(Action<T> release) : IDisposable where T : notnull
 {
     private readonly Dictionary<long, T> leases = [];
+    private readonly long generation = RemoteLeaseGeneration.Next();
     private long next;
     private bool disposed;
     public int Count => leases.Count;
@@ -17,9 +18,23 @@ public sealed class RemoteLeaseTable<T>(Action<T> release) : IDisposable where T
         ObjectDisposedException.ThrowIf(disposed, this);
         if (leases.Count >= 4096)
             throw new InvalidOperationException("Remote handle limit exceeded.");
-        long id = checked(++next);
+        if (next == uint.MaxValue)
+            throw new InvalidOperationException("Remote handle generation exhausted.");
+        long id = generation | ++next;
         leases.Add(id, value);
         return id;
+    }
+
+    internal static class RemoteLeaseGeneration
+    {
+        private static long next;
+        internal static long Next()
+        {
+            long generation = Interlocked.Increment(ref next);
+            if (generation > int.MaxValue)
+                throw new InvalidOperationException("Remote session generation exhausted.");
+            return generation << 32;
+        }
     }
 
     public T Get(long id) => !disposed && leases.TryGetValue(id, out T? value)

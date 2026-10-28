@@ -10,10 +10,21 @@ using DncDbg.Remote;
 using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(60));
 CancellationToken token = deadline.Token;
 int passed = 0;
+if (args is ["--mobile-proof", var mobileDescriptor, var mobileSource, var mobileAssembly, var mobilePdb, var mobileAgentPort, var mobileMode])
+{
+    await MobileBreakpointProof.RunAsync(mobileDescriptor, mobileSource, mobileAssembly, mobilePdb, mobileAgentPort,
+        mobileMode == "disconnect", token);
+    return;
+}
 
 if (args is ["--load-probe", var nativeLibrary])
 {
     Environment.ExitCode = StartupProbe.LoadLibrary(nativeLibrary);
+    return;
+}
+if (args is ["--image-probe", var imagePath, var imagePlatform])
+{
+    Console.WriteLine(JsonSerializer.Serialize(NativeImageIdentity.Read(imagePath, imagePlatform)));
     return;
 }
 if (args is ["--startup-probe", var targetPid, var runtimePath, var startupReport])
@@ -63,11 +74,16 @@ if (args is ["--mobile", var descriptor])
 await TestFramesAsync();
 TestOwnership();
 TestMachOUuid();
+PrivateBootstrapChecks.Run(Check);
 await TestAgentAsync();
 await TestCancellationAsync();
 await TestCorrelationAsync();
+await TestStaleSessionAsync();
 if (args is ["--desktop", var fixture, var source, var results])
+{
     await TestDesktopAsync(Path.GetFullPath(fixture), Path.GetFullPath(source), Path.GetFullPath(results));
+    await TestDesktopDeathAsync(Path.GetFullPath(fixture), Path.GetFullPath(source), Path.GetFullPath(results));
+}
 else if (args.Length != 0)
     throw new ArgumentException("Use no arguments, --mobile descriptor.json, --attach-probe pid, --load-probe library, --startup-probe pid runtime report [--libraries directory], or --desktop fixture.dll source.cs result-directory.");
 Console.WriteLine($"Passed {passed} experimental remote checks.");
@@ -256,6 +272,27 @@ async Task TestCorrelationAsync()
     finally { listener.Stop(); }
 }
 
+async Task TestStaleSessionAsync()
+{
+    await using var oldAgent = new RemoteAgent(true);
+    await using var agent = new RemoteAgent(true);
+    await RejectAsync(async () =>
+    {
+        await using var _ = await RemoteDebugClient.ConnectAsync(agent.Endpoint with { Token = oldAgent.Endpoint.Token }, token);
+    }, "AuthenticationFailed");
+    Check(true, "previous startup token cannot authenticate a new agent");
+    using var socket = new TcpClient();
+    await socket.ConnectAsync(IPAddress.Loopback, agent.Endpoint.Port, token);
+    await RemoteProtocol.WriteAsync(socket.GetStream(), new(1, 1, RemoteOperation.Hello,
+        RemoteProtocol.Pack(new RemoteHello(agent.Endpoint.Token))), token);
+    _ = await RemoteProtocol.ReadAsync(socket.GetStream(), token);
+    await RemoteProtocol.WriteAsync(socket.GetStream(), new(1, 1, RemoteOperation.Start,
+        RemoteProtocol.Pack(new RemoteEmpty())), token);
+    await ThrowsAsync<EndOfStreamException>(async () =>
+    {
+        _ = await RemoteProtocol.ReadAsync(socket.GetStream(), token);
+    }, "replayed sequence closes connection before execution");
+}
 async Task TestDesktopAsync(string fixture, string source, string results)
 {
     Directory.CreateDirectory(results);
@@ -289,6 +326,7 @@ async Task TestDesktopAsync(string fixture, string source, string results)
                     await RejectAsync(() => client.ContinueAsync(stop.Id, token), "InvalidState");
                     await RejectAsync(() => client.EvaluateAsync(stack[^1].Handle, "answer", token), "InvalidState");
                 }
+
             }
             await agent.DisposeAsync();
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
@@ -321,4 +359,25 @@ async Task TestDesktopAsync(string fixture, string source, string results)
             }
         }
     }
+}
+
+async Task TestDesktopDeathAsync(string fixture, string source, string results)
+{
+    int line = File.ReadAllLines(source).Select((text, index) => (text, index))
+        .Single(x => x.text.Contains("// REMOTE_BREAKPOINT", StringComparison.Ordinal)).index + 1;
+    EngineBackend? backend = null;
+    await using var agent = new RemoteAgent(true, () => backend = new EngineBackend(fixture, Path.Combine(results, "crash.txt")));
+    await using RemoteDebugClient client = await RemoteDebugClient.ConnectAsync(agent.Endpoint, token);
+    await client.SetBreakpointsAsync(source, [line], token);
+    await client.StartAsync(token);
+    RemoteStop stop = await client.WaitForStopAsync(token);
+    RemoteFrame frame = (await client.StackAsync(stop.Id, token))[0];
+    using Process process = Process.GetProcessById(backend!.ProcessId);
+    process.Kill();
+    await process.WaitForExitAsync(token);
+    await RejectAsync(async () => { _ = await client.StackAsync(stop.Id, token); }, "InvalidState");
+    await RejectAsync(() => client.ContinueAsync(stop.Id, token), "InvalidState");
+    await RejectAsync(async () => { _ = await client.EvaluateAsync(frame.Handle, "answer", token); }, "InvalidState");
+    await agent.DisposeAsync();
+    Check(true, "abrupt target death invalidates stop/handles and cleans up within deadline");
 }

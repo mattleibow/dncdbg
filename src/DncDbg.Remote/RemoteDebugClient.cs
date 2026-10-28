@@ -33,6 +33,8 @@ public sealed class RemoteDebugClient : IAsyncDisposable
 
     public Task<RemoteBreakpoint[]> SetBreakpointsAsync(string source, int[] lines, CancellationToken token) =>
         CallAsync<RemoteBreakpoints, RemoteBreakpoint[]>(RemoteOperation.SetBreakpoints, new(source, lines), token);
+    public Task<RemoteBreakpoint[]> SetBreakpointsAsync(RemoteBreakpoints request, CancellationToken token) =>
+        CallAsync<RemoteBreakpoints, RemoteBreakpoint[]>(RemoteOperation.SetBreakpoints, request, token);
     public Task<RemoteEmpty> StartAsync(CancellationToken token) => CallAsync<RemoteEmpty, RemoteEmpty>(RemoteOperation.Start, new(), token);
     public Task<RemoteStop> WaitForStopAsync(CancellationToken token) => CallAsync<RemoteEmpty, RemoteStop>(RemoteOperation.WaitForStop, new(), token);
     public Task<RemoteFrame[]> StackAsync(long stop, CancellationToken token) => CallAsync<RemoteId, RemoteFrame[]>(RemoteOperation.Stack, new(stop), token);

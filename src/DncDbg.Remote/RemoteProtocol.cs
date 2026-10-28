@@ -19,9 +19,12 @@ public enum RemoteOperation
 
 public sealed record RemoteEnvelope(int Version, long Sequence, RemoteOperation Operation, JsonElement Body, string? Error = null);
 public sealed record RemoteHello(string Token);
-public sealed record RemoteCapabilities(string Runtime, string Platform, bool ManagedDebugging, string? Blocker);
+public sealed record RemoteCapabilities(string Runtime, string Platform, bool ManagedDebugging, string? Blocker,
+    string? Bootstrap = null, PrivateBootstrapIdentity? SupportedBuild = null, string? Scope = null);
 public sealed record RemoteEndpoint(int Port, string Token);
-public sealed record RemoteBreakpoints(string Source, int[] Lines);
+public sealed record RemoteBreakpoints(string Source, int[] Lines, RemoteManagedLocation? Location = null);
+public sealed record RemoteManagedLocation(string Mvid, int MethodToken, int IlOffset, string Method, RemoteManagedVariable[] Variables);
+public sealed record RemoteManagedVariable(string Name, int Index, bool Parameter);
 public sealed record RemoteBreakpoint(int Line, bool Verified);
 public sealed record RemoteStop(long Id, string Reason, int ThreadId);
 public sealed record RemoteFrame(long Handle, string Name, string? Source, int Line);
@@ -34,8 +37,10 @@ public sealed record RemoteEmpty;
 [JsonSerializable(typeof(RemoteEnvelope))]
 [JsonSerializable(typeof(RemoteHello))]
 [JsonSerializable(typeof(RemoteCapabilities))]
+[JsonSerializable(typeof(PrivateBootstrapIdentity))]
 [JsonSerializable(typeof(RemoteEndpoint))]
 [JsonSerializable(typeof(RemoteBreakpoints))]
+[JsonSerializable(typeof(RemoteManagedLocation))]
 [JsonSerializable(typeof(RemoteBreakpoint[]))]
 [JsonSerializable(typeof(RemoteStop))]
 [JsonSerializable(typeof(RemoteFrame[]))]

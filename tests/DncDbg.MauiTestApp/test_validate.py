@@ -8,6 +8,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 import unittest
 
@@ -80,6 +81,47 @@ class ProcessOwnershipTests(unittest.TestCase):
                 if alive(pid):
                     os.kill(pid, signal.SIGKILL)
             shutil.rmtree(directory)
+
+
+class ListenerOwnershipTests(unittest.TestCase):
+    def test_direct_closed_listener(self):
+        with socket.socket() as reserve:
+            reserve.bind(("127.0.0.1", 0))
+            port = reserve.getsockname()[1]
+        self.assertTrue(validate.native_listener_closed(port, forwarded=False))
+
+    def test_direct_open_listener(self):
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen()
+            self.assertFalse(validate.native_listener_closed(listener.getsockname()[1], forwarded=False))
+
+    def test_adb_forward_accepts_then_eof_when_target_listener_is_closed(self):
+        self.check_forward(closed=True)
+
+    def test_adb_forward_accepts_but_remains_connected_when_target_listener_is_open(self):
+        self.check_forward(closed=False)
+
+    def check_forward(self, closed):
+        done = threading.Event()
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen()
+            listener.settimeout(3)
+
+            def forward():
+                with listener.accept()[0]:
+                    if not closed:
+                        done.wait(timeout=3)
+
+            proxy = threading.Thread(target=forward)
+            proxy.start()
+            try:
+                self.assertEqual(validate.native_listener_closed(listener.getsockname()[1], forwarded=True), closed)
+            finally:
+                done.set()
+                proxy.join(timeout=3)
+                self.assertFalse(proxy.is_alive())
 
 
 if __name__ == "__main__":

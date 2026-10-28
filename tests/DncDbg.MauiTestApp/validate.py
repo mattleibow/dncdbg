@@ -66,6 +66,21 @@ def run(*args, env=None, check=True, input=None, timeout=180, log=None, cwd=ROOT
     return result
 
 
+def native_listener_closed(port, forwarded):
+    with socket.socket() as verify:
+        verify.settimeout(1)
+        if verify.connect_ex(("127.0.0.1", port)) != 0:
+            return True
+        if forwarded:
+            # ADB still accepts on the host after the target listener closes,
+            # then signals target connection refusal with EOF.
+            try:
+                return verify.recv(1) == b""
+            except socket.timeout:
+                return False
+        return False
+
+
 def main():
     global EVIDENCE
     parser = argparse.ArgumentParser(description=__doc__)
@@ -355,10 +370,8 @@ def main():
                     if not any(row["Phase"] == "cleanup-detach-return" and row["HResult"] == "0x00000000" for row in phases):
                         raise RuntimeError("The native owner finished without successful target detach")
                     native_cleanup = "owner finished, callback/frame leases released, listener closed, DBI terminated"
-                    with socket.socket() as verify:
-                        verify.settimeout(1)
-                        if verify.connect_ex(("127.0.0.1", endpoint["Port"])) == 0:
-                            raise RuntimeError("Native listener remained open after cleanup")
+                    if not native_listener_closed(endpoint["Port"], forwarded=prefix == "android"):
+                        raise RuntimeError("Native listener remained open after cleanup")
                     break
                 if time.monotonic() >= cleanup_deadline:
                     raise RuntimeError("Native owner did not prove bounded cleanup; inspect its preserved phase log")

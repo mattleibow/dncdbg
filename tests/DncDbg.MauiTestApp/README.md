@@ -71,6 +71,15 @@ own a fresh process group; timeout, error and normal completion terminate any
 remaining descendants, with bounded SIGTERM/SIGKILL escalation. The host-only
 regression spawns a waiting parent/child and TCP listener, forces a timeout and
 requires both PIDs and the listener gone within five seconds.
+Start the shared DevFlow broker before the runner (`maui devflow broker start`).
+A broker auto-started by a short-lived probe belongs to that probe's group and
+is intentionally cleaned up with its other descendants. An existing broker
+outside those groups is not terminated.
+
+Android listener cleanup additionally requires EOF through the ADB forward:
+ADB keeps accepting host TCP connections after the device listener closes, so
+host `connect()` alone cannot establish that the native listener is still open.
+After verification the runner removes only its owned forward.
 
 Authenticated native JSON payload errors fail closed: the owner closes the
 connection immediately (EOF, not an uncorrelated or missing reply), consumes an

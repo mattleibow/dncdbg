@@ -109,7 +109,7 @@ always describes the full snapshot, including for an empty out-of-range page.
 `python3 src/DncDbg.Remote/generate_contract.py` after editing it; CI checks
 generated C# records/client methods and native operation/request guards with
 `--check`. The wire stays strictly framed/authenticated protocol v1; mobile DAP
-requires **typed model v3**, an exact provider ID and exact pinned build tuple.
+requires **typed model v4**, an exact provider ID and exact pinned build tuple.
 Model v3 replaces the lossy exception stage/type lists with typed per-stage
 rules; v2 targets are rejected instead of silently misinterpreted.
 Capabilities expose runtime/platform, runtime/DBI/DAC identities/hashes, provider,

@@ -93,6 +93,7 @@ class Remote:
         self.requests = []
         self.stack_count = 1
         self.stack_complete = True
+        self.stack_omit_last = False
         self.thread = threading.Thread(target=self.serve, daemon=True)
         self.thread.start()
 
@@ -145,6 +146,8 @@ class Remote:
                         start, count = body.get("Start", 0), body.get("Count", 0)
                         result = {"Frames": rows[start:start + count] if count else rows[start:],
                                   "TotalFrames": len(rows), "Complete": self.stack_complete}
+                        if self.stack_omit_last:
+                            result["Frames"] = result["Frames"][:-1]
                     elif op == 14:
                         result = [{"Name": "Locals", "Handle": generation + 2, "Count": 4}]
                     elif op == 15:
@@ -357,6 +360,9 @@ class MobileDapTests(unittest.TestCase):
     def test_incomplete_stack_is_never_reported_as_complete(self):
         self.launch("android")
         self.remote.stack_complete = False
+        self.dap.request("stackTrace", {"threadId": 7}, success=False)
+        self.remote.stack_complete = True
+        self.remote.stack_omit_last = True
         self.dap.request("stackTrace", {"threadId": 7}, success=False)
 
     def test_array_bounds_errors_survive_host_and_dap(self):

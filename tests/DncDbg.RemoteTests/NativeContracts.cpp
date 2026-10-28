@@ -4,6 +4,7 @@
 #include <iostream>
 #include <cmath>
 #include <limits>
+#include <type_traits>
 
 namespace {
 int checks = 0;
@@ -171,6 +172,7 @@ struct StackFunction final : FakeRef<Function> {
 struct StackFrame final : FakeRef<ILFrame> {
     StackFunction function;
     Array array;
+    uint32_t offset = 0;
     HResult QueryInterface(const Guid& id, void** result) override {
         if (std::memcmp(&id, &ILFrameId, sizeof(id))) return Fail;
         *result = this; AddRef(); return 0;
@@ -183,7 +185,7 @@ struct StackFrame final : FakeRef<ILFrame> {
     HResult GetCaller(Frame**) override { return Fail; }
     HResult GetCallee(Frame**) override { return Fail; }
     HResult CreateStepper(Unknown**) override { return Fail; }
-    HResult GetIP(uint32_t* offset, uint32_t* mapping) override { *offset = 0; *mapping = 0; return 0; }
+    HResult GetIP(uint32_t* result, uint32_t* mapping) override { *result = offset; *mapping = 0; return 0; }
     HResult SetIP(uint32_t) override { return Fail; }
     HResult EnumerateLocalVariables(Unknown**) override { return Fail; }
     HResult GetLocalVariable(uint32_t, Value** result) override { array.AddRef(); *result = &array; return 0; }
@@ -201,7 +203,10 @@ template<class T, class Item> struct StackEnum final : FakeRef<T> {
     HResult Next(uint32_t, Item** result, uint32_t* fetched) override {
         if (fail && cursor == 140) return Fail;
         *fetched = cursor < count ? 1 : 0;
-        if (*fetched) { ++cursor; item->AddRef(); *result = item; }
+        if (*fetched) {
+            if constexpr (std::is_same_v<Item, Frame>) static_cast<StackFrame*>(item)->offset = cursor;
+            ++cursor; item->AddRef(); *result = item;
+        }
         return *fetched ? 0 : 1;
     }
 };
@@ -239,7 +244,8 @@ void StackChecks() {
         Json result = Stack(request);
         int remaining = std::max(0, 150 - request.value("Start", 0)), count = request.value("Count", 0);
         Check(result.at("TotalFrames") == 150 && result.at("Complete") == true &&
-              result.at("Frames").size() == static_cast<size_t>(count ? std::min(count, remaining) : remaining),
+              result.at("Frames").size() == static_cast<size_t>(count ? std::min(count, remaining) : remaining) &&
+              (result.at("Frames").empty() || result.at("Frames")[0].at("IlOffset") == request.value("Start", 0)),
               "native omitted/zero/explicit deep stack pages enumerate beyond 128 with truthful totals");
     }
     size_t before = frames.size();

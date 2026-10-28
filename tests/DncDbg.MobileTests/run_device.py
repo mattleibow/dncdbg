@@ -196,6 +196,8 @@ def main():
         check(complete["totalFrames"] == len(deep_frames) > 150 and
               sum(f["name"].endswith("DeepScenario") for f in deep_frames) == 150 and
               deep_frames[0]["line"] == deep_line, "real native stack reports all 150 recursive frames and truthful totalFrames")
+        check(dap.request("evaluate", {"frameId": deep_frames[128]["id"], "expression": "depth"})["result"] == "128",
+              "frame 128 resolves to the actual recursive caller depth 128")
         names = [f["name"] for f in deep_frames]
         for arguments, start, count in [
                 ({"levels": 0}, 0, 0), ({"startFrame": 128}, 128, 0),
@@ -206,6 +208,9 @@ def main():
             expected = names[start:start + count] if count else names[start:]
             check(page["totalFrames"] == len(names) and [f["name"] for f in page["stackFrames"]] == expected,
                   "real native stack page " + json.dumps(arguments))
+            if start == 128:
+                check(dap.request("evaluate", {"frameId": page["stackFrames"][0]["id"], "expression": "depth"})["result"] == "128",
+                      "paged frame identity resolves to recursive caller depth 128")
         for expression in ("shifted", "shifted[0]", "shifted[5]", "shifted[149]", "shifted[150]"):
             error = dap.request("evaluate", {"frameId": deep_frames[0]["id"], "expression": expression}, success=False)
             check("UnsupportedArrayBounds" in error["error"]["format"], "real lower-bound-five array rejects " + expression)

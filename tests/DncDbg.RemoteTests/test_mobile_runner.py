@@ -64,6 +64,15 @@ class MobileRunnerTests(unittest.TestCase):
                 self.assertEqual(run.call_count, 1)
                 self.assertEqual(run.call_args.args[0][-2:], ["agent", "status"])
 
+    def test_ios_ui_uses_validated_broker_route_not_requested_build_port(self):
+        from run_device import ios_ui_port
+        registration = {"port": 10223, "processId": 42, "platform": "iOS", "sessionId": "ownedrun"}
+        self.assertEqual(ios_ui_port(registration, 42, "ownedrun"), 10223)
+        for field, value in (("processId", 43), ("platform", "Android"), ("sessionId", "another"),
+                             ("port", 0), ("port", 65536)):
+            with self.subTest(field=field), self.assertRaises(AssertionError):
+                ios_ui_port(registration | {field: value}, 42, "ownedrun")
+
     def test_rejects_output_outside_checkout_build(self):
         with self.assertRaisesRegex(RuntimeError, "build/"):
             Suite(Namespace(platform="android", output=ROOT, xcode_dir=None))

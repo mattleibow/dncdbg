@@ -102,7 +102,9 @@ Android **9223 is explicitly DevFlow UI-only**; broker reverse 19223 is also
 UI-only. The Android suite records broker failure separately and requires the
 explicit-port UI assertions/screenshots; it never relabels fallback as discovery
 success. No debugger fixed port, global forward removal or device wipe.
-The iOS UI port and DevFlow build session are run-scoped. Before querying or
+The iOS UI port is assigned by the broker (the requested build port is not a
+runtime guarantee); the broker's platform, process ID and run-scoped build
+session must all match before its route is admitted. Before querying or
 mutating any UI, both DAP/fault helpers verify exact package, platform and native
 process ID. A reachable unrelated agent/ADB port is an error, never a fallback
 UI target.

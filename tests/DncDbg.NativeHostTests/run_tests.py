@@ -113,7 +113,8 @@ class Proof:
         self.run(*command)
         self.adapter = self.bin / "release-adapter/dncdbg-dap.dll"
         self.run("dotnet", "publish", ROOT / "src/DncDbg.Dap", "-c", "Release",
-                 "-p:EnableExperimentalRemoteTestHooks=true", "-o", self.adapter.parent, "--nologo", "-v:q")
+                 "-p:EnableExperimentalRemoteTestHooks=true", "--artifacts-path", self.output / "release-compilation",
+                 "-o", self.adapter.parent, "--nologo", "-v:q")
         self.run(sys.executable, "tests/DncDbg.RemoteTests/assert_artifacts.py", self.adapter.parent)
         self.run("dotnet", "publish", ROOT / "src/DncDbg.Dap", "-c", "Debug",
                  "-p:EnableExperimentalRemoteTestHooks=true", "--artifacts-path", self.output / "compilation",
@@ -390,7 +391,7 @@ class Proof:
         total = 0
         for path in sorted(self.output.rglob("*")):
             relative = path.relative_to(self.output)
-            if not path.is_file() or any(p in relative.parts for p in ("evidence", "compilation", "fault-adapter", "bin", "scratch")):
+            if not path.is_file() or any(p in relative.parts for p in ("evidence", "compilation", "release-compilation", "fault-adapter", "bin", "scratch")):
                 continue
             if path.name.startswith("endpoint") or path.suffix not in (".log", ".json", ".jsonl"):
                 continue

@@ -716,10 +716,10 @@ int main(int argc, char** argv) {
         }
         close(fd); owner.join();
         malformedBounded &= bounded && completedBeforeClientClose;
-        Check(controller.continues == (stopped ? 1 : 0) && controller.stops == 1 && controller.detaches == 1 &&
+        Check(controller.continues == 0 && controller.stops == (stopped ? 0 : 1) && controller.detaches == 1 &&
             controller.refs == 1 && thread.refs == 1 && frame.refs == 1 && value.refs == 1 && frames.empty() && modelLeases.empty() && !process &&
             !stoppedController && !stoppedThread && listener == -1 && ownerFinished.load(),
-            stopped ? "malformed stopped typed request cleans/continues/detaches exactly once" :
+            stopped ? "malformed stopped typed request detaches without a resume/restop race" :
                       "malformed idle typed request cleans/detaches exactly once");
         std::cout << (bounded && completedBeforeClientClose ? "PASS" : "FAIL")
                   << ": malformed " << (stopped ? "stopped" : "idle") << " operation " << malformedOperation << " terminates within 1s\n";

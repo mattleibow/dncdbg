@@ -427,7 +427,8 @@ void StartDebugging() {
 void Cleanup() {
     cleaning = true;
     cancel.store(false);
-    if (stoppedController) ContinueStop();
+    bool detachStopped = process && stoppedController && !exited.load();
+    if (stoppedController && !detachStopped) ContinueStop();
     ClearFrames();
     ModelDeactivateBreakpoints();
     if (functionBreakpoint) {
@@ -437,15 +438,23 @@ void Cleanup() {
         functionBreakpoint = nullptr;
     }
     if (process && !exited.load()) {
-        // Drain callbacks exactly once before the explicit cleanup stop/detach.
-        Pump();
-        HResult hr = process->Stop(5000);
-        Report("cleanup-stop-return", hr);
-        Require(hr);
-        hr = process->Detach();
+        if (!detachStopped) {
+            Pump();
+            HResult hr = process->Stop(5000);
+            Report("cleanup-stop-return", hr);
+            Require(hr);
+        }
+        // Detach itself resumes an outstanding stop. Continuing first opens a
+        // callback-delivery race between the subsequent Stop and Detach.
+        HResult hr = process->Detach();
         Report("cleanup-detach-return", hr);
         Require(hr);
     }
+    if (stoppedController) { stoppedController->Release(); stoppedController = nullptr; }
+    if (stoppedThread) { stoppedThread->Release(); stoppedThread = nullptr; }
+    stopId = 0;
+    stopReported = false;
+    stopBreakpoints = Json::array();
     if (process) { process->Release(); process = nullptr; }
     ModelCleanup();
     if (ownsInitialize) {

@@ -11,7 +11,7 @@ import sys
 import time
 
 from mobile_tools import adb_path, tool_environment
-from run_device import Ui, verify_ui
+from run_device import Ui, verify_ui, ios_ui_port
 from test_dap import Dap, ROOT
 
 APP = "com.dncdbg.mobiletests"
@@ -26,6 +26,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--ui-port", type=int, default=9223)
     parser.add_argument("--runtime-identifier", choices=["iossimulator-arm64", "android-arm64", "android-x64"])
+    parser.add_argument("--ui-session")
     args = parser.parse_args()
     args.output = args.output.resolve()
     args.output.mkdir(parents=True, exist_ok=True)
@@ -150,8 +151,7 @@ def main():
                 if args.platform == "android":
                     ui_port = int(device("forward", "--no-rebind", "tcp:0", "tcp:9223").stdout)
                 else:
-                    assert json.loads(wait.stdout)["port"] == args.ui_port, "Fault UI broker selected a different port"
-                    ui_port = args.ui_port
+                    ui_port = ios_ui_port(json.loads(wait.stdout), pid, args.ui_session)
                 report["uiIdentity"] = verify_ui(ui_port, args.platform, pid)
                 ui = Ui(ui_port, output)
                 ui.command("MAUI tree --depth 15")

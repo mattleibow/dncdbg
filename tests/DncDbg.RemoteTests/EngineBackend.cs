@@ -33,6 +33,7 @@ internal sealed class EngineBackend(string program, string resultPath) : IRemote
         if (started)
             throw new InvalidOperationException("Already started.");
         started = true;
+        engine.Log += message => Console.WriteLine("[desktop-fixture] " + message);
         engine.Stopped += OnStopped;
         engine.Exited += OnExited;
         subscribed = true;

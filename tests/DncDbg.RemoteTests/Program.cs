@@ -371,8 +371,10 @@ async Task TestDesktopAsync(string fixture, string source, string results)
             }
             catch (ArgumentException) { }
             Check(true, "owned debuggee exits without being killed");
-            Check(File.Exists(resultPath) && File.ReadAllText(resultPath) == "42",
-                dropWhileStopped ? "disconnect relinquishes callback stop" : "continue executes debuggee to completion");
+            string actual = File.Exists(resultPath) ? File.ReadAllText(resultPath) : "<missing>";
+            Check(actual == "42",
+                (dropWhileStopped ? "disconnect relinquishes callback stop" : "continue executes debuggee to completion") +
+                $" (result={JsonSerializer.Serialize(actual)})");
         }
         finally
         {

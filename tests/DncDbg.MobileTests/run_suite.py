@@ -137,7 +137,7 @@ class Suite:
         self.save()
 
     def boot(self):
-        name = "dncdbg-" + uuid.uuid4().hex
+        name = "dncdbg" + uuid.uuid4().hex
         self.state["name"] = name
         with socket.socket() as reserve:
             reserve.bind(("127.0.0.1", 0))
@@ -250,6 +250,7 @@ class Suite:
                  "iosSimulator" if self.args.platform == "ios" else "android", "--device", self.state["device"],
                  "--app", app, "--assets", assets, "--output", self.output / name,
                  "--ui-port", str(self.state["uiPort"]),
+                 "--ui-session", self.state["name"],
                  "--runtime-identifier", "iossimulator-arm64" if self.args.platform == "ios" else self.android["rid"],
                  timeout=900)
 

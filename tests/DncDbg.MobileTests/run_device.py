@@ -17,6 +17,14 @@ from mobile_tools import adb_path, tool_environment
 from test_dap import Dap, ROOT
 
 
+def ios_ui_port(registration, pid, session):
+    assert registration["platform"] == "iOS", "Broker returned a different platform"
+    assert registration["processId"] == pid, "Broker returned a different process"
+    assert session and registration["sessionId"] == session, "Broker returned a different run identity"
+    assert isinstance(registration["port"], int) and 0 < registration["port"] <= 65535, "Invalid broker UI port"
+    return registration["port"]
+
+
 def verify_ui(port, platform, pid):
     deadline = time.monotonic() + 30
     while True:
@@ -84,6 +92,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--ui-port", type=int, default=9223, help="UI-only fixture port, never the debugger endpoint")
     parser.add_argument("--runtime-identifier", choices=["iossimulator-arm64", "android-arm64", "android-x64"])
+    parser.add_argument("--ui-session")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     assets = args.output / "assets"
@@ -159,9 +168,7 @@ def main():
             ui_port = int(device("forward", "--no-rebind", "tcp:0", "tcp:9223").stdout.strip())
             evidence["devflowBroker"] = wait.returncode == 0
         else:
-            registration = json.loads(wait.stdout)
-            assert registration["port"] == args.ui_port, "Broker returned a different UI port"
-            ui_port = args.ui_port
+            ui_port = ios_ui_port(json.loads(wait.stdout), details["debuggeeProcessId"], args.ui_session)
             evidence["devflowBroker"] = True
         evidence["uiIdentity"] = verify_ui(ui_port, args.platform, details["debuggeeProcessId"])
         ui = Ui(ui_port, args.output)
@@ -374,10 +381,10 @@ def main():
         wait = subprocess.run(["maui", "devflow", "--device", args.device, "wait", "--wait-platform",
                                "Android" if args.platform == "android" else "iOS", "--timeout", "20"],
                               cwd=ROOT, capture_output=True, text=True, timeout=30)
+        restarted_pid = dap.request("dotnet/info")["debuggeeProcessId"]
         if args.platform == "iosSimulator":
-            assert json.loads(wait.stdout)["port"] == args.ui_port, "Restart selected a different UI port"
-            ui_port = args.ui_port
-        verify_ui(ui_port, args.platform, dap.request("dotnet/info")["debuggeeProcessId"])
+            ui_port = ios_ui_port(json.loads(wait.stdout), restarted_pid, args.ui_session)
+        verify_ui(ui_port, args.platform, restarted_pid)
         ui = Ui(ui_port, args.output)
         ui.command("MAUI tree --depth 15")
         ui.send("MAUI tap --automationId run-scenario")

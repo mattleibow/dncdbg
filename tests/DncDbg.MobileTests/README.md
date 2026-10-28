@@ -127,6 +127,12 @@ command must not depend on scanning every process on a loaded hosted runner.
 the **same command/options plus `--cleanup`** in an `always()` step after timeout/
 cancellation. Keep this journal until cleanup succeeds. Never reuse another
 run's journal. Device shutdown is no longer the caller's manual responsibility.
+If the official emulator console returns an empty reply, cleanup must verify
+the journaled PID's exact unique AVD name **and** console port before stopping
+only that owned process. It performs no package/forward mutations through an
+unverified serial, requires that serial to disappear, and removes only the
+run-owned AVD directory. A nonempty different identity or unrelated PID remains
+a hard failure; an empty reply never authorizes touching another device.
 
 ## Evidence and CI requirements
 

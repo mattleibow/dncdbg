@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 import unittest
@@ -155,6 +156,38 @@ class MobileRunnerTests(unittest.TestCase):
                 self.suite.cleanup()
         self.assertEqual(commands, [("/sdk/adb", "-s", "emulator-5566", "emu", "avd", "name"),
                                     ("/sdk/adb", "forward", "--list")])
+        self.assertFalse(self.suite.state["cleanupDone"])
+
+    def test_empty_console_reply_uses_exact_owned_pid_without_mutating_the_serial(self):
+        self.suite.state["emulatorPid"] = 123456
+        commands = []
+
+        def run(*command, **kwargs):
+            commands.append(command)
+            text = ("emulator -avd owned-unique-avd -port 5566\n" if command[0] == "ps" else
+                    "List of devices attached\n" if command[-1] == "devices" else "")
+            return subprocess.CompletedProcess(command, 0, text, "")
+
+        with patch("run_suite.adb_path", return_value="/sdk/adb"), patch.object(self.suite, "run", side_effect=run), \
+                patch("run_suite.os.kill", side_effect=[None, ProcessLookupError()]) as kill:
+            self.suite.cleanup()
+        self.assertEqual(kill.call_args_list, [unittest.mock.call(123456, signal.SIGTERM),
+                                               unittest.mock.call(123456, 0)])
+        self.assertFalse(any("uninstall" in c or "force-stop" in c or "--remove" in c for c in commands))
+        self.assertTrue(self.suite.state["cleanupDone"])
+
+    def test_empty_console_reply_cannot_authorize_an_unrelated_pid(self):
+        self.suite.state["emulatorPid"] = 123456
+
+        def run(*command, **kwargs):
+            return subprocess.CompletedProcess(command, 0,
+                "emulator -avd another-owner -port 5566\n" if command[0] == "ps" else "", "")
+
+        with patch("run_suite.adb_path", return_value="/sdk/adb"), patch.object(self.suite, "run", side_effect=run), \
+                patch("run_suite.os.kill") as kill:
+            with self.assertRaisesRegex(RuntimeError, "Cannot verify"):
+                self.suite.cleanup()
+        kill.assert_not_called()
         self.assertFalse(self.suite.state["cleanupDone"])
 
     def test_ios_cleanup_is_idempotent_after_partial_deletion(self):

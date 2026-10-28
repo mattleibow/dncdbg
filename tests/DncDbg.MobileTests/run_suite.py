@@ -310,10 +310,24 @@ class Suite:
                     if remaining and device in remaining.stdout:
                         errors.append("Owned simulator remains after deletion.")
         elif device:
+            def owned_emulator_pid():
+                pid = self.state.get("emulatorPid")
+                if not pid:
+                    return False
+                process = clean("ps", "-ww", "-p", str(pid), "-o", "args=", check=False)
+                arguments = process.stdout.split() if process else []
+                pairs = set(zip(arguments, arguments[1:]))
+                return ("-avd", self.state["name"]) in pairs and ("-port", device.rsplit("-", 1)[-1]) in pairs
+
             # The serial may have been reused after cancellation: check the unique AVD identity first.
             identity = clean(adb_path(), "-s", device, "emu", "avd", "name", check=False)
+            pid_only = False
             if identity and identity.returncode == 0:
-                if self.state["name"] not in identity.stdout.splitlines():
+                if not identity.stdout.strip():
+                    pid_only = owned_emulator_pid()
+                    if not pid_only:
+                        errors.append("Cannot verify the emulator console or exact journaled AVD/port/PID; refusing serial mutations.")
+                elif self.state["name"] not in identity.stdout.splitlines():
                     errors.append("Emulator identity changed; refusing to touch a different AVD.")
                 else:
                     clean(adb_path(), "-s", device, "shell", "am", "force-stop", APP, check=False)
@@ -332,8 +346,7 @@ class Suite:
                     errors.append(str(error))
             elif self.state.get("emulatorPid"):
                 pid = self.state["emulatorPid"]
-                process = clean("ps", "-p", str(pid), "-o", "args=", check=False)
-                if process and self.state["name"] in process.stdout:
+                if owned_emulator_pid():
                     os.kill(pid, signal.SIGTERM)
                     for attempt in range(100):
                         try:
@@ -345,6 +358,16 @@ class Suite:
                         time.sleep(0.1)
                     else:
                         errors.append("Owned emulator PID remained after bounded SIGTERM/SIGKILL recovery.")
+            if pid_only:
+                deadline = time.monotonic() + 10
+                while True:
+                    devices = clean(adb_path(), "devices")
+                    if not devices or not any(row.split()[:1] == [device] for row in devices.stdout.splitlines()):
+                        break
+                    if time.monotonic() >= deadline:
+                        errors.append("Journaled emulator serial remains after its exact owned PID was stopped.")
+                        break
+                    time.sleep(0.1)
             mappings = clean(adb_path(), "forward", "--list")
             if mappings and any(row.startswith(device + " ") for row in mappings.stdout.splitlines()):
                 errors.append("Owned emulator debugger/UI forwards remained after cleanup.")

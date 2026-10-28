@@ -7,7 +7,8 @@ if (args.Length is < 2 or > 3)
     throw new ArgumentException("Supply the public Python executable and fake_native_adapter.py test peer.");
 string python = args[0], fake = args[1];
 
-AssertManagedIlMapping();
+if (args.Length != 3 || args[2] is not ("pid-reuse-worker" or "parent-reuse-worker"))
+    AssertManagedIlMapping();
 
 if (args.Length == 2 || args[2] == "version-probe-descriptors")
 {

@@ -97,6 +97,12 @@ internal sealed class RemoteLifecycle(IRemoteTargetProvider target, ITunnelProvi
 
     public Task CloseTunnelAsync() => tunnel.DisposeAsync().AsTask();
 
+    public async Task<int?> CompleteExitAsync(int? reportedExitCode, CancellationToken token)
+    {
+        await CloseAsync(terminate: false);
+        return await target.WaitForExitAsync(token) ?? reportedExitCode;
+    }
+
     private async Task CloseCoreAsync(bool terminate)
     {
         if (acquisition != null)

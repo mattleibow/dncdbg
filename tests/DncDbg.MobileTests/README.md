@@ -72,7 +72,20 @@ their own target frameworks.
   device `pixel_6`, NDK **29.0.14206865**, command-line tools **21.0**.
   `--android-abi x86_64` explicitly selects `net11.0-android` / `android-x64`;
   there is no ABI or software-emulation fallback. The workflow provisions with
-  official `sdkmanager`, `avdmanager`, `emulator` and ADB only.
+  official Google archives plus `sdkmanager`, `avdmanager`, `emulator` and ADB.
+
+[`android-archives.json`](android-archives.json) makes tuple-critical emulator
+and system-image provisioning **immutable**, not merely checked after a floating
+install. It records versioned official URLs, exact byte sizes and SHA-256 values
+independently derived from downloads verified against the official catalog's
+SHA-1. The internal provisioner checks the whole archive before extraction,
+rejects path escapes/symlinks and revision/ABI mismatches, preserves executable
+permissions, and registers the exact SDK package metadata. It fails closed if
+an archive changes or disappears; it never asks `sdkmanager` for floating
+`emulator` or image IDs. CI uses a fresh checkout-owned `build/android-sdk`,
+does not overwrite the image's existing SDK, and discards verified download
+archives after installing them to bound disk usage. Small URL/hash/revision
+reports are uploaded; archives and extracted tools are not.
 
 These OS/tool pins supplement, not replace, the exact **runtime/DBI/DAC
 build IDs and code hashes** in `PrivateBootstrapPolicy.SupportedBuilds`. Actual
@@ -144,6 +157,17 @@ are excluded; credential-shaped logs fail closed. Limits: **8 MiB/file,
 100 MiB/run**, 50-minute CI jobs, three-minute recovery, seven-day artifacts.
 Failed gates preserve evidence, not successful-looking partial results.
 
+Build budgets are separate from debugger/RPC and fault deadlines. The first
+hosted iOS attempt exceeded 600 seconds in a cold Release build with no useful
+quiet output. Release packaging now has a **20-minute build-only bound**;
+Debug builds retain 10 minutes, and all debugger operation/fault timeouts and
+assertions are unchanged. Builds use minimal verbosity written to a live log,
+30-second last-output/elapsed progress, a duration/timeout/exit status JSON and
+a binary log with project imports disabled. Secret-bearing environment names
+are removed from build children before binary logging. These diagnostics are
+subject to the same 8 MiB/file and 100 MiB/run evidence bounds. A build timeout
+remains a red gate, never a successful skip.
+
 [`mobile.yml`](../../.github/workflows/mobile.yml) runs unconditionally for
 `pull_request` targeting `main` and pushes to `main` (no path filters or
 `continue-on-error`):
@@ -155,7 +179,7 @@ Failed gates preserve evidence, not successful-looking partial results.
 - **`Mobile Android emulator (pinned)`** uses hosted **`ubuntu-24.04`**,
   explicitly enables/checks KVM and runs the **entire same** unified suite with
   the separate x64 pins. It does not merely cross-build an APK, run host fakes,
-  or pass an arm64 image to x64 KVM. Catalog revision drift fails preflight;
+  or pass an arm64 image to x64 KVM. Immutable archive/hash drift fails provisioning;
   emulator boot failure or missing KVM fails the job.
 
 [.NET 11 Android supports `android-x64` CoreCLR](https://github.com/dotnet/android/blob/main/Documentation/docs-mobile/building-apps/build-properties.md).

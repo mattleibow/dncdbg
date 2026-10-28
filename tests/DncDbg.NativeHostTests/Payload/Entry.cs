@@ -25,6 +25,8 @@ public static class Entry
             {
                 if (command == "exit")
                     return 0;
+                if (command == "exit7")
+                    return 7;
                 result = command switch
                 {
                     "scenario" => ManagedScenario(1).ToString(),

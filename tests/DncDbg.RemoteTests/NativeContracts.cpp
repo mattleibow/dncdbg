@@ -739,5 +739,16 @@ int main(int argc, char** argv) {
         Check(response.at("Error").is_null() && detachedBeforeAck && !process && controller.refs == 1,
             "native disconnect acknowledges only after owned detach and reference cleanup");
     }
+    {
+        state.store(-2);
+        ownerFinished.store(false);
+        std::thread finishing([] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            ownerFinished.store(true);
+        });
+        int completed = dncdbg_complete(7);
+        finishing.join();
+        Check(completed == 1, "completion settles the owner-finished publication window without a false host failure");
+    }
     std::cout << "Passed " << checks << " native contract checks (fakes, not mobile runtime proof).\n";
 }

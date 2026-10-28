@@ -9,6 +9,7 @@ public interface IRemoteTargetProvider
     Task AcquireAsync(string sessionId, CancellationToken cancellationToken);
     Task<string?> ReadDescriptorAsync(CancellationToken cancellationToken);
     Task CloseAsync(bool terminate, CancellationToken cancellationToken);
+    Task<int?> WaitForExitAsync(CancellationToken cancellationToken) => Task.FromResult<int?>(null);
 }
 
 public interface ITunnelProvider : IAsyncDisposable

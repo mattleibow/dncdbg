@@ -53,7 +53,7 @@ int main(int argc, char** argv) {
         auto prepare = Symbol<int (*)(const char*, const char*, const char*)>(agent, "dncdbg_prepare");
         auto start = Symbol<int (*)(const char*, const char*, const char*)>(agent, "dncdbg_start");
         auto status = Symbol<int (*)()>(agent, "dncdbg_status");
-        auto cancel = Symbol<void (*)()>(agent, "dncdbg_cancel");
+        auto complete = Symbol<int (*)(int)>(agent, "dncdbg_complete");
         fs::path root = runtime.parent_path().parent_path().parent_path();
         get_hostfxr_parameters parameters{sizeof(get_hostfxr_parameters), nullptr, root.c_str()};
         char buffer[4096];
@@ -118,9 +118,10 @@ int main(int argc, char** argv) {
         std::string directory = session.string();
         int result = entry(directory.data(), static_cast<int>(directory.size()));
         Phase("managed-entry-returned-to-native-host");
+        int exitCode = static_cast<unsigned char>(result);
+        Check(complete(exitCode) == 1 ? 0 : -1, "native completion acknowledgment");
         fs::remove(descriptorFile);
-        cancel();
-        return result;
+        return exitCode;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "Native host failed: %s\n", error.what());
         return 1;

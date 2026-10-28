@@ -68,6 +68,12 @@ generation and route ports; credentials are never DAP output.
   evaluation, all three step operations, actual CLR exception/catch, pause,
   threads/modules, restart, stale handles/old-listener rejection, credential
   rotation, stopped detach, managed completion and native caller return.
+- **Still-attached natural completion:** three rounds each of actual exit codes
+  0 and 7 over direct and proxy routes (12 fresh targets). No DAP disconnect is
+  sent first. Each must produce exactly one `exited` then `terminated`, the
+  actual owned process must exit/reap, native cleanup must be exact-once, and
+  no transport-failure output or credential/listener may remain. Use
+  `--case natural-completion` for this focused real-runtime gate.
 - **Real socket contracts:** fragmented/partial I/O, bidirectional half-close,
   complete reverse responses, reconnects, multi-MiB backpressure with bounded
   buffers, target EOF, I/O timeout, connection refusal, listener cancellation,
@@ -114,6 +120,15 @@ owned host route. Mobile command/path wrappers contain no shared model logic.
 Restart uses fresh target/tunnel/client/credential generations; DAP integer
 handles are never reused. Reconnect after transport loss is an explicit fresh
 runtime generation, not unsafe hot reattachment to the single-use private DBI.
+
+The native embedding caller uses the target agent's `dncdbg_complete` after
+managed return instead of deleting the descriptor and abruptly canceling/exiting.
+The owner publishes a typed completion and settles its DBI/callback cleanup
+before the native process returns. `NativeHostProvider` captures the observed
+OS exit code before disposing its process, and shared lifecycle/session code
+uses that observation for normal DAP exit semantics. This is product-provider
+behavior, not a synthetic test-only `exited` event. Rebuild host and agent
+together; an older helper without the completion export is refused.
 
 Each run gets a fresh `build/` output folder. Exit 0 requires **all proof and
 cleanup**; missing tuples/tools, failed assertions or leaked owned resources are

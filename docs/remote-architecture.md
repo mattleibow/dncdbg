@@ -31,6 +31,9 @@ target/provider fixture, absent from ordinary Release adapter artifacts.
 `ReadDescriptorAsync` supplies only the platform-specific descriptor read.
 The core polls/parses that descriptor and enforces nonce/credential admission.
 The provider's close operation stops/releases only that target.
+Its optional `WaitForExitAsync` supplies an observed target exit code when the
+platform can obtain one; native hosting observes the actual owned OS process,
+not an assumed successful transport disconnect.
 `ITunnelProvider.OpenAsync(descriptor, token)` returns the
 owned host endpoint; it must preserve the target credential/session/process
 identity. The coordinator enforces that invariant.
@@ -48,6 +51,20 @@ The shared coordinator:
 5. On restart or reconnect after transport loss, creates a new target, endpoint,
    credential, client and tunnel generation. DAP integer handles are invalidated
    and never reused; source breakpoint request IDs remain stable.
+
+Shutdown signals the lifetime cancellation source **before** acquiring the
+state lock held by synchronous inspection RPCs. The blocked operation is
+interrupted first; the existing acquisition/close ownership gates then settle
+and clean the session once. Terminate cannot wait for an inspection's RPC
+deadline before it becomes able to cancel that inspection.
+
+Attached natural completion is a separate path from EOF or detach. The native
+embedding caller publishes completion through `dncdbg_complete(exitCode)` and
+holds the runtime alive while the owner publishes the typed exit event and
+settles disconnect/DBI cleanup. The lifecycle closes the route, observes the
+provider's actual process exit, then emits DAP `exited` followed by `terminated`
+exactly once. Unknown mobile exit codes remain unknown; abrupt EOF is not
+silently reclassified as successful completion.
 
 Providers do not implement shared stepping/inspection/evaluation or transport
 authentication:

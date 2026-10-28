@@ -95,24 +95,28 @@ jobs:
           sudo chmod 0666 /dev/kvm
           stat /dev/kvm | tee build/validation/android-provision/kvm.log
           test -r /dev/kvm && test -w /dev/kvm
-      - name: Provision pinned SDK image using official Android CLI only
+      - name: Provision immutable checksummed Android emulator and image
         shell: bash
         run: |
           set -euo pipefail
           : "${ANDROID_HOME:?Hosted image must expose the Android SDK}"
-          export ANDROID_SDK_ROOT="$ANDROID_HOME"
-          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
-          mkdir -p build/validation/android-provision
           manager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-          { yes || true; } | "$manager" --licenses > build/validation/android-provision/licenses.log
-          "$manager" --channel=0 --install \
+          export ANDROID_HOME="$PWD/build/android-sdk"
+          export ANDROID_SDK_ROOT="$ANDROID_HOME"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+          mkdir -p "$ANDROID_HOME" build/validation/android-provision
+          { yes || true; } | "$manager" --sdk_root="$ANDROID_HOME" --licenses > build/validation/android-provision/licenses.log
+          "$manager" --sdk_root="$ANDROID_HOME" --channel=0 --install \
             "cmdline-tools;21.0" "platform-tools" "platforms;android-37.0" "build-tools;37.0.0" \
-            "ndk;29.0.14206865" "emulator" \
-            "system-images;android-37.1;google_apis_ps16k;x86_64" \
+            "ndk;29.0.14206865" \
             > build/validation/android-provision/sdkmanager.log 2>&1 || {
               cat build/validation/android-provision/sdkmanager.log
               exit 1
             }
+          python3 tests/DncDbg.MobileTests/provision_android.py \
+            --sdk-root "$ANDROID_HOME" --cache build/android-archives \
+            --output build/validation/android-provision --discard-archives
           "$ANDROID_HOME/emulator/emulator" -accel-check
       - name: Install exact workload and DevFlow CLI
         shell: bash

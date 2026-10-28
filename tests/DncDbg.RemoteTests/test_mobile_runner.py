@@ -47,6 +47,35 @@ class MobileRunnerTests(unittest.TestCase):
                 self.suite.build("Release")
         self.assertIn("-p:DncDbgMobileTestPlatform=android", evaluate.call_args.args)
 
+    def test_release_build_has_its_own_budget_and_useful_diagnostics(self):
+        self.suite.state |= {"uiPort": 9223, "name": "ownedrun"}
+        evaluated = {"Properties": {"MauiVersion": PIN["maui"], "DefineConstants": ""},
+                     "Items": {key: [] for key in ("NativeReference", "AndroidNativeLibrary", "PackageReference", "ProjectReference")}}
+        with patch.object(self.suite, "json", return_value=evaluated), patch.object(self.suite, "run") as run, \
+                patch("run_suite.Path.exists", return_value=True):
+            self.suite.build("Release", faults=True)
+        build = next(call for call in run.call_args_list if call.args[:2] == ("dotnet", "build"))
+        self.assertEqual(build.kwargs["timeout"], 1200)
+        self.assertIn("-v:minimal", build.args)
+        self.assertTrue(any(str(arg).startswith("-bl:") and "ProjectImports=None" in str(arg) for arg in build.args))
+        self.assertTrue(build.kwargs["progress"])
+
+    def test_build_environment_does_not_publish_secret_environment_values(self):
+        from run_suite import build_environment
+        environment = {"PATH": "/tools", "ANDROID_HOME": "/sdk", "GITHUB_TOKEN": "secret",
+                       "ACTIONS_RUNTIME_TOKEN": "secret", "NuGet_Credential": "secret", "MY_PASSWORD": "secret"}
+        self.assertEqual(build_environment(environment), {"PATH": "/tools", "ANDROID_HOME": "/sdk"})
+
+    def test_build_timeout_retains_live_progress_and_status(self):
+        with self.assertRaisesRegex(TimeoutError, "partial output"), patch("run_suite.print") as progress:
+            self.suite.run(sys.executable, "-c", "import time;print('reached linker',flush=True);time.sleep(30)",
+                           timeout=0.3, progress=True, progress_interval=0.1)
+        self.assertIn("reached linker", next(self.output.glob("*.log")).read_text())
+        status = json.loads(next(self.output.glob("*.status.json")).read_text())
+        self.assertTrue(status["timedOut"])
+        self.assertEqual(status["timeoutSeconds"], 0.3)
+        self.assertTrue(any("still running" in str(call) for call in progress.call_args_list))
+
     def test_mobile_catalog_copies_only_matching_fixture_symbols(self):
         from run_device import copy_debug_assets
         source = self.output / "input"

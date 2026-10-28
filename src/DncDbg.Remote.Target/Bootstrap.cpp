@@ -37,6 +37,8 @@ constexpr HResult Fail = static_cast<HResult>(0x80004005);
 std::atomic<int> state{0};
 std::atomic<bool> ownerFinished{false};
 std::atomic<bool> cancel{false};
+std::atomic<bool> completionStarted{false}, completionPending{false};
+std::atomic<int> completionExitCode{0};
 #ifdef DNCDBG_TEST_FAULTS
 std::atomic<bool> testStallOwner{false};
 #endif
@@ -292,6 +294,8 @@ void BindModule(Unknown* module) {
 
 void Pump() {
     heartbeat.store(Milliseconds());
+    if (completionPending.exchange(false))
+        remoteEvents.push_back({{"Kind", "exited"}, {"Generation", NewId()}, {"ExitCode", completionExitCode.load()}});
 #ifdef DNCDBG_TEST_FAULTS
     if (testStallOwner.exchange(false)) {
         Report("test-owner-stall");
@@ -749,3 +753,19 @@ EXPORT int dncdbg_start(const char* report, const char* token, const char* capab
 }
 EXPORT int dncdbg_status() { return state.load(); }
 EXPORT void dncdbg_cancel() { cancel.store(true); queueReady.notify_one(); }
+EXPORT int dncdbg_complete(int exitCode) {
+    if (ownerFinished.load()) return 1;
+    int current = state.load();
+    if (current != 2 && current != -2) return 0;
+    bool expected = false;
+    if (current == 2 && completionStarted.compare_exchange_strong(expected, true)) {
+        completionExitCode.store(exitCode);
+        completionPending.store(true);
+        queueReady.notify_one();
+    }
+    // Keep the native runtime alive until the host has observed completion and
+    // disconnected the owner. Never tear down its final callback/DBI mid-cleanup.
+    auto deadline = Clock::now() + std::chrono::seconds(30);
+    while (!ownerFinished.load() && Clock::now() < deadline) usleep(1000);
+    return ownerFinished.load() ? 1 : 0;
+}

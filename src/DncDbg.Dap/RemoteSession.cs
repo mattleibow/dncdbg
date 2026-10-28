@@ -19,6 +19,7 @@ internal sealed class RemoteSession : IDisposable
     private readonly object stateGate = new();
     private readonly object acquisitionGate = new(), closeGate = new();
     private int terminatedSent;
+    private int disposalStarted;
     private readonly Dictionary<string, int[]> breakpoints = new(StringComparer.Ordinal);
     private int nextHandle;
     private RemoteStop? stop;
@@ -171,11 +172,16 @@ internal sealed class RemoteSession : IDisposable
                                     connection.SendEvent("breakpoint", new { reason = "changed", breakpoint = Breakpoint(item.Breakpoint) });
                             break;
                         case "exited":
-                            if (item.ExitCode is { } exitCode)
+                            int? observedExit;
+                            using (var settlement = CancellationTokenSource.CreateLinkedTokenSource(Token))
+                            {
+                                settlement.CancelAfter(TimeSpan.FromSeconds(30));
+                                observedExit = await lifecycle.CompleteExitAsync(item.ExitCode, settlement.Token);
+                            }
+                            if (observedExit is { } exitCode)
                                 connection.SendEvent("exited", new ExitedEventBody { ExitCode = exitCode });
                             else
                                 connection.SendEvent("output", new OutputEventBody { Category = "console", Output = "The remote target exited; its exit code is unavailable.\n" });
-                            await lifecycle.CloseAsync(terminate: false);
                             SendTerminated();
                             return;
                         default:
@@ -244,6 +250,9 @@ internal sealed class RemoteSession : IDisposable
 
     public object? Dispatch(DapMessage request, out Action? after)
     {
+        // A synchronous RPC can own stateGate. Signal cancellation before
+        // acquiring it so shutdown can interrupt that RPC instead of waiting.
+        if (request.Command is "terminate" or "detach" or "disconnect") Cancel();
         if (request.Command == "restart") return DispatchCore(request, out after);
         lock (stateGate) return DispatchCore(request, out after);
     }
@@ -470,6 +479,7 @@ internal sealed class RemoteSession : IDisposable
     }
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref disposalStarted, 1) != 0) return;
         try { Close(true); }
         finally { lifetime.Dispose(); pollStop.Dispose(); }
     }

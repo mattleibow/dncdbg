@@ -23,6 +23,14 @@ PIN = json.loads(Path(__file__).with_name("tuple.json").read_text())
 FIXTURE = ROOT / "tests/DncDbg.MauiTestApp"
 APP = "com.dncdbg.mobiletests"
 ANDROID_CONSOLE_PORTS = tuple(range(5554, 5586, 2))
+RELEASE_BUILD_TIMEOUT = 20 * 60
+DEBUG_BUILD_TIMEOUT = 10 * 60
+
+
+def build_environment(environment):
+    sensitive = ("TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "API_KEY", "ACCESS_KEY", "PRIVATE_KEY", "AUTHORIZATION")
+    return {key: value for key, value in environment.items()
+            if not any(part in key.upper() for part in sensitive)}
 
 
 def require(condition, message):
@@ -53,10 +61,15 @@ class Suite:
     def save(self):
         self.state_path.write_text(json.dumps(self.state, indent=2))
 
-    def run(self, *command, cwd=ROOT, timeout=180, check=True, input=None, grouped=True):
+    def run(self, *command, cwd=ROOT, timeout=180, check=True, input=None, grouped=True,
+            progress=False, progress_interval=30, environment=None):
+        if progress:
+            require(grouped, "Build diagnostics require owned process groups.")
+            return self.run_progress(command, cwd, timeout, check, input, progress_interval, environment)
         self.number += 1
         print("RUN:", " ".join(str(c) for c in command), flush=True)
-        process = subprocess.Popen([str(c) for c in command], cwd=cwd, env=self.env, text=True,
+        process = subprocess.Popen([str(c) for c in command], cwd=cwd,
+                                   env=self.env if environment is None else environment, text=True,
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                    start_new_session=grouped)
         timed_out = False
@@ -76,6 +89,45 @@ class Suite:
                 process.wait(timeout=5)
         log = self.output / f"{self.number:03d}-{Path(str(command[0])).name}.log"
         log.write_text(text)
+        if timed_out:
+            raise TimeoutError(f"{command[0]} exceeded {timeout}s; partial output: {log.relative_to(ROOT)}")
+        if check and process.returncode:
+            raise RuntimeError(f"{command[0]} exited {process.returncode}; see {log.relative_to(ROOT)}\n{text[-4000:]}")
+        return subprocess.CompletedProcess(command, process.returncode, text, "")
+
+    def run_progress(self, command, cwd, timeout, check, input, interval, environment):
+        self.number += 1
+        log = self.output / f"{self.number:03d}-{Path(str(command[0])).name}.log"
+        started = time.monotonic()
+        timed_out = False
+        print("RUN:", " ".join(str(c) for c in command), flush=True)
+        with log.open("w") as stream:
+            process = start_owned([str(c) for c in command], cwd=cwd,
+                                  env=build_environment(self.env if environment is None else environment),
+                                  text=True, stdin=subprocess.PIPE, stdout=stream, stderr=subprocess.STDOUT)
+            first = True
+            try:
+                while True:
+                    remaining = timeout - (time.monotonic() - started)
+                    if remaining <= 0:
+                        timed_out = True
+                        stop_owned(process)
+                        break
+                    try:
+                        process.communicate(input if first else None, timeout=min(interval, remaining))
+                        break
+                    except subprocess.TimeoutExpired:
+                        first = False
+                        lines = log.read_text(errors="replace").splitlines()
+                        print(f"BUILD still running: {time.monotonic() - started:.1f}/{timeout}s; "
+                              f"last output: {lines[-1] if lines else '<none yet>'}; log: {log.relative_to(ROOT)}", flush=True)
+            finally:
+                stop_owned(process)
+                log.with_suffix(".status.json").write_text(json.dumps({
+                    "command": [str(c) for c in command], "seconds": time.monotonic() - started,
+                    "timeoutSeconds": timeout, "timedOut": timed_out, "exitCode": process.returncode,
+                }, indent=2))
+        text = log.read_text()
         if timed_out:
             raise TimeoutError(f"{command[0]} exceeded {timeout}s; partial output: {log.relative_to(ROOT)}")
         if check and process.returncode:
@@ -233,8 +285,11 @@ class Suite:
                     not any("DevFlow" in i["Identity"] for i in result["Items"]["PackageReference"]) and
                     not any("DncDbg.Remote" in i["Identity"] for i in result["Items"]["ProjectReference"]),
                     "Experimental code must remain absent even with every opt-in supplied to Release.")
+        binlog = self.output / f"{self.number + 1:03d}-{configuration}-{faults}.binlog"
         self.run("dotnet", "build", ".", "-t:Rebuild", "-c", configuration, "-f", tfm, *properties,
-                 "--nologo", "-v:q", cwd=FIXTURE, timeout=600)
+                 "--nologo", "-v:minimal", f"-bl:{binlog};ProjectImports=None", cwd=FIXTURE,
+                 timeout=RELEASE_BUILD_TIMEOUT if configuration == "Release" else DEBUG_BUILD_TIMEOUT,
+                 progress=True, environment=build_environment(self.env))
         output = FIXTURE / f"bin/{configuration}/{tfm}/{rid}"
         app = output / ("DncDbg.MauiTestApp.app" if self.args.platform == "ios" else f"{APP}-Signed.apk")
         require(app.exists(), f"Fixture build produced no installable artifact: {app}")
@@ -425,14 +480,15 @@ class Suite:
         for path in self.output.rglob("*"):
             relative = path.relative_to(self.output)
             if (not path.is_file() or any(p in relative.parts for p in ("evidence", "work", "assets", "tools")) or
-                    path.name == "state.json" or path.suffix not in (".json", ".jsonl", ".log", ".png")):
+                    path.name == "state.json" or path.suffix not in (".json", ".jsonl", ".log", ".png", ".binlog")):
                 continue
             size = path.stat().st_size
             total += size
             require(size <= 8 * 1024 * 1024 and total <= 100 * 1024 * 1024,
                     "Mobile evidence exceeds 8 MiB/file or 100 MiB/run; refusing unbounded uploads.")
             data = path.read_bytes()
-            require(b'"Token"' not in data and b'"token"' not in data, f"Credential-shaped evidence refused: {relative}")
+            if path.suffix != ".binlog":
+                require(b'"Token"' not in data and b'"token"' not in data, f"Credential-shaped evidence refused: {relative}")
             target = destination / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
@@ -442,7 +498,8 @@ class Suite:
 
 def contracts(suite):
     for path in ("src/DncDbg.Remote/generate_contract.py", "tests/DncDbg.RemoteTests/test_dap.py",
-                 "tests/DncDbg.RemoteTests/test_mobile_processes.py", "tests/DncDbg.RemoteTests/test_mobile_runner.py"):
+                 "tests/DncDbg.RemoteTests/test_mobile_processes.py", "tests/DncDbg.RemoteTests/test_mobile_runner.py",
+                 "tests/DncDbg.RemoteTests/test_android_provisioning.py"):
         suite.run(sys.executable, path, *(["--check"] if "generate_contract" in path else []), timeout=180)
     suite.run(sys.executable, "src/DncDbg.Remote.Target/build.py", "--test-host")
 

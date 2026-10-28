@@ -11,6 +11,7 @@ internal sealed class NativeHostProvider(NativeHostLaunchArguments options) : IR
 {
     private Process? process;
     private Task<string>? output, errors;
+    private Task<int>? exitCode;
     private string? sessionId;
     public string Name => Path.GetFileName(options.AssemblyPath);
     public string ExpectedPlatform => OperatingSystem.IsMacOS() ? "MacOSNativeHost" : "LinuxNativeHost";
@@ -42,6 +43,7 @@ internal sealed class NativeHostProvider(NativeHostLaunchArguments options) : IR
         start.Environment["DNCDBG_SESSION_ID"] = sessionId;
         token.ThrowIfCancellationRequested();
         process = Process.Start(start) ?? throw new InvalidOperationException("Native host did not start.");
+        exitCode = ObserveExitAsync(process);
         start.Environment.Remove("DNCDBG_NATIVE_TOKEN");
         output = process.StandardOutput.ReadToEndAsync();
         errors = process.StandardError.ReadToEndAsync();
@@ -55,6 +57,15 @@ internal sealed class NativeHostProvider(NativeHostLaunchArguments options) : IR
             throw new InvalidOperationException($"Native host exited before publishing its descriptor: {await errors!}");
         string descriptor = Path.Combine(ArtifactsPath!, "endpoint.json");
         return File.Exists(descriptor) ? await File.ReadAllTextAsync(descriptor, token) : null;
+    }
+
+    public async Task<int?> WaitForExitAsync(CancellationToken token) =>
+        exitCode == null ? null : await exitCode.WaitAsync(token);
+
+    private static async Task<int> ObserveExitAsync(Process target)
+    {
+        await target.WaitForExitAsync();
+        return target.ExitCode;
     }
 
     public async Task CloseAsync(bool terminate, CancellationToken token)
@@ -114,16 +125,20 @@ internal sealed class NativeHostProvider(NativeHostLaunchArguments options) : IR
             }
             finally
             {
-                if (process.HasExited) process.Dispose();
-                else _ = ReapDetachedAsync(process);
+                if (process.HasExited)
+                {
+                    try { await exitCode!; }
+                    finally { process.Dispose(); }
+                }
+                else _ = ReapDetachedAsync(process, exitCode!);
             }
         }
         if (failure != null) throw failure;
     }
 
-    private static async Task ReapDetachedAsync(Process detached)
+    private static async Task ReapDetachedAsync(Process detached, Task<int> exit)
     {
-        try { await detached.WaitForExitAsync(); }
+        try { await exit; }
         finally { detached.Dispose(); }
     }
 }

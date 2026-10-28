@@ -99,6 +99,9 @@ class Remote:
         self.stack_count = 1
         self.stack_complete = True
         self.stack_omit_last = False
+        self.block_operation = None
+        self.operation_blocked = threading.Event()
+        self.release_operation = threading.Event()
         self.thread = threading.Thread(target=self.serve, daemon=True)
         self.thread.start()
 
@@ -116,6 +119,9 @@ class Remote:
                     op, body = request["Operation"], request["Body"]
                     self.operations.append(op)
                     self.requests.append((op, body))
+                    if op == self.block_operation:
+                        self.operation_blocked.set()
+                        self.release_operation.wait(timeout=10)
                     error, result = None, {}
                     if op == 1:
                         identity = IDENTITIES[self.platform]
@@ -189,6 +195,7 @@ class Remote:
             pass
 
     def close(self):
+        self.release_operation.set()
         self.listener.close()
         self.thread.join(timeout=2)
 
@@ -357,6 +364,29 @@ class MobileDapTests(unittest.TestCase):
         self.remote = Remote(self.state, "Android")
         launch = self.dap.send("launch", {"mobile": self.options("android") | {"runtimeIdentifier": "android-x64"}})
         self.dap.response(launch, success=False)
+
+    def test_terminate_interrupts_a_blocked_inspection_before_taking_the_state_lock(self):
+        self.launch("android")
+        frame = self.dap.request("stackTrace", {"threadId": 7})["stackFrames"][0]["id"]
+        self.remote.block_operation = 6
+        inspection = self.dap.send("evaluate", {"frameId": frame, "expression": "answer + 1"})
+        self.assertTrue(self.remote.operation_blocked.wait(timeout=5), "Inspection must actually be blocked in its RPC.")
+        self.dap.timeout = 3
+        started = time.monotonic()
+        try:
+            self.dap.request("terminate")
+            self.assertLess(time.monotonic() - started, 3, "Control cancellation must not wait for the stalled RPC.")
+            self.dap.response(inspection, success=False)
+            self.dap.event("terminated")
+            self.dap.request("disconnect")
+            self.dap.close()
+        finally:
+            self.remote.release_operation.set()
+        events = [m for m in self.dap.transcript if m.get("event") == "terminated"]
+        self.assertEqual(len(events), 1)
+        commands = [json.loads(row) for row in (self.state / "commands.jsonl").read_text().splitlines()]
+        self.assertEqual(sum("uninstall" in row for row in commands), 1, "The target is cleaned exactly once.")
+        self.assertEqual(sum("--remove" in row for row in commands), 1, "The tunnel is cleaned exactly once.")
 
     def test_ios_host_networking_detach(self):
         self.launch("iosSimulator")

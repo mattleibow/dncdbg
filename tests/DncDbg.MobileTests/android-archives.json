@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "host": "linux-x64",
+  "provenance": [
+    "https://dl.google.com/android/repository/repository2-3.xml",
+    "https://dl.google.com/android/repository/sys-img/google_apis/sys-img2-4.xml"
+  ],
+  "packages": [
+    {
+      "id": "emulator",
+      "revision": "37.2.12",
+      "url": "https://dl.google.com/android/repository/emulator-linux_x64-16428233.zip",
+      "sha256": "b08fc43d8608d2955f607f1b287beb525041e730086bdca3af152accac3af9c1",
+      "officialSha1": "cd7362ea55dfb86a418958138dc396e74165dd01",
+      "size": 349654171,
+      "archiveRoot": "emulator",
+      "sdkPath": "emulator",
+      "properties": {
+        "Pkg.Revision": "37.2.12",
+        "Pkg.Path": "emulator",
+        "Pkg.BuildId": "16428233"
+      }
+    },
+    {
+      "id": "system-images;android-37.1;google_apis_ps16k;x86_64",
+      "revision": "9",
+      "url": "https://dl.google.com/android/repository/sys-img/google_apis/x86_64-ps16k-37.1_r09.zip",
+      "sha256": "11b9682183827379e8d415db880a30b9ec84d4032650e08e6149b69b30d545a0",
+      "officialSha1": "35c0da1cd298f3426a5b48233f59515097446a28",
+      "size": 2178012675,
+      "archiveRoot": "x86_64",
+      "sdkPath": "system-images/android-37.1/google_apis_ps16k/x86_64",
+      "properties": {
+        "Pkg.Revision": "9",
+        "AndroidVersion.ApiLevel": "37.1",
+        "AndroidVersion.ExtensionLevel": "23",
+        "SystemImage.Abi": "x86_64",
+        "SystemImage.TagId": "google_apis,page_size_16kb"
+      }
+    }
+  ]
+}

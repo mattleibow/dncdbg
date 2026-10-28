@@ -261,6 +261,41 @@ class Proof:
             (directory / "dap.json").write_text(json.dumps(dap.transcript, indent=2))
             (directory / "adapter-stderr.log").write_text(dap.stderr)
 
+    def natural_completion(self, provider, exit_code, attempt):
+        directory = self.output / f"natural-{provider}-{exit_code}-{attempt}"
+        directory.mkdir()
+        dap = self.dap(directory, self.adapter)
+        try:
+            _, info, _ = self.start(dap, self.options(directory, provider))
+            session = Path(info["artifactsPath"])
+            self.command(session, 1, "scenario")
+            stopped, frame = self.stack(dap)
+            require(dap.request("evaluate", {"frameId": frame["id"], "expression": "answer + 1"})["result"] == "43",
+                    "natural completion is attached to the real native agent, not a detached process")
+            dap.request("continue", {"threadId": stopped["threadId"]})
+            require(self.result(session, 1) == "42", "attached scenario completes before natural exit")
+            self.command(session, 2, "exit" if exit_code == 0 else "exit7")
+            dap.timeout = 5
+            require(dap.event("exited")["exitCode"] == exit_code, "attached natural completion reports the actual exit code")
+            dap.event("terminated")
+            wait_for(lambda: not alive(info["debuggeeProcessId"]), "naturally completed native host did not exit/reap")
+            self.native_cleanup(session)
+            wait_for(lambda: closed(info["route"]["hostPort"]), "natural exit left an owned route")
+            time.sleep(0.1)
+            events = [m["event"] for m in dap.transcript if m.get("event") in ("exited", "terminated")]
+            require(events == ["exited", "terminated"], "natural exit emits exited then terminated exactly once")
+            require(not any(m.get("event") == "output" and any(word in m.get("body", {}).get("output", "").lower()
+                            for word in ("disconnected", "cleanup failed")) for m in dap.transcript),
+                    "natural completion is not reported as transport/debugger failure")
+            require("managed-entry-returned-to-native-host" in (session / "host.log").read_text(),
+                    "attached completion actually returns through the native host")
+            dap.request("scopes", {"frameId": frame["id"]}, success=False)
+            self.checks.append(f"natural-{provider}-{exit_code}-{attempt}")
+        finally:
+            dap.close()
+            (directory / "dap.json").write_text(json.dumps(dap.transcript, indent=2))
+            (directory / "adapter-stderr.log").write_text(dap.stderr)
+
     def failure(self, name, stopped=False, delayed=False, collision=False, timeout=False, terminate=False, target_death=False,
                 reconnect=False):
         directory = self.output / name
@@ -413,6 +448,7 @@ def main():
     parser.add_argument("--output", type=Path, default=ROOT / "build/native-host" / uuid.uuid4().hex)
     parser.add_argument("--runtime-directory", type=Path)
     parser.add_argument("--cleanup", action="store_true", help="Recover only this run's journaled processes/listeners/credentials")
+    parser.add_argument("--case", choices=["all", "natural-completion"], default="all")
     args = parser.parse_args()
     if args.cleanup and not args.output.exists():
         return 0
@@ -429,18 +465,23 @@ def main():
     signal.signal(signal.SIGTERM, interrupted)
     try:
         proof.build()
-        proof.complete("directLoopback")
-        proof.complete("localTcpProxy")
-        proof.failure("cancel-unpublished-listener", delayed=True)
-        proof.failure("unpublished-listener-timeout", timeout=True)
-        proof.failure("listener-collision", collision=True)
-        proof.failure("tunnel-dies-running")
-        proof.failure("tunnel-dies-stopped", stopped=True)
-        proof.failure("terminate-running", terminate=True)
-        proof.failure("terminate-stopped", terminate=True, stopped=True)
-        proof.failure("target-eof-running", target_death=True)
-        proof.failure("target-eof-stopped", target_death=True, stopped=True)
-        proof.failure("reconnect-after-tunnel-death", stopped=True, reconnect=True)
+        for provider in ("directLoopback", "localTcpProxy"):
+            for exit_code in (0, 7):
+                for attempt in range(3):
+                    proof.natural_completion(provider, exit_code, attempt)
+        if args.case == "all":
+            proof.complete("directLoopback")
+            proof.complete("localTcpProxy")
+            proof.failure("cancel-unpublished-listener", delayed=True)
+            proof.failure("unpublished-listener-timeout", timeout=True)
+            proof.failure("listener-collision", collision=True)
+            proof.failure("tunnel-dies-running")
+            proof.failure("tunnel-dies-stopped", stopped=True)
+            proof.failure("terminate-running", terminate=True)
+            proof.failure("terminate-stopped", terminate=True, stopped=True)
+            proof.failure("target-eof-running", target_death=True)
+            proof.failure("target-eof-stopped", target_death=True, stopped=True)
+            proof.failure("reconnect-after-tunnel-death", stopped=True, reconnect=True)
         passed = True
     except BaseException as failure:
         error = repr(failure)

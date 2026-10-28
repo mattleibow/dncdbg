@@ -80,15 +80,15 @@ partial class Context
     public void ConfigureHitLifecycle(string trace, string hit, bool enabled)
     {
         var source = new SetBreakpointsRequest();
-        source.arguments.source.path = ControlInfo.SourceFilesPath;
+        source.arguments.source.path = m_controlInfo.SourceFilesPath;
         source.arguments.breakpoints.Add(new SourceBreakpoint(Line("stage")));
         source.arguments.breakpoints.Add(new SourceBreakpoint(Line("conditional_source"), "visit % 2 == 0", "==2"));
         if (enabled)
         {
-            source.arguments.breakpoints.Add(new SourceBreakpoint(Line("source"), HitCondition: hit));
-            source.arguments.breakpoints.Add(new SourceBreakpoint(Line("logpoint"), HitCondition: hit, LogMessage: "hit-log:{visit}"));
+            source.arguments.breakpoints.Add(new SourceBreakpoint(Line("source"), hitCondition: hit));
+            source.arguments.breakpoints.Add(new SourceBreakpoint(Line("logpoint"), hitCondition: hit, logMessage: "hit-log:{visit}"));
         }
-        var response = DAPDebugger.Request(source);
+        var response = m_dapDebugger.Request(source);
         Assert.True(response.Success, trace);
         if (enabled)
         {
@@ -104,8 +104,8 @@ partial class Context
         functions.arguments.breakpoints.Add(new FunctionBreakpoint("TestHitConditionLifecycle.Program.Conditional",
             "visit % 2 == 0", "==2"));
         if (enabled)
-            functions.arguments.breakpoints.Add(new FunctionBreakpoint("TestHitConditionLifecycle.Program.Target", HitCondition: hit));
-        response = DAPDebugger.Request(functions);
+            functions.arguments.breakpoints.Add(new FunctionBreakpoint("TestHitConditionLifecycle.Program.Target", hitCondition: hit));
+        response = m_dapDebugger.Request(functions);
         Assert.True(response.Success, trace);
         if (enabled)
         {
@@ -117,7 +117,7 @@ partial class Context
             functionHitId = id;
         }
 
-        int Line(string label) => ((LineBreakpoint)ControlInfo.Breakpoints[label]).NumLine;
+        int Line(string label) => ((LineBreakpoint)m_controlInfo.Breakpoints[label]).NumLine;
     }
 
     public void CheckHitLifecycle(string trace)
@@ -127,24 +127,24 @@ partial class Context
         {
             while (true)
             {
-                Assert.True(DAPDebugger.IsEventReceived(json =>
+                Assert.True(m_dapDebugger.IsEventReceived(json =>
                 {
-                    if (!DAPDebugger.IsResponseContainProperty(json, "event", "stopped"))
+                    if (!m_dapDebugger.IsResponseContainProperty(json, "event", "stopped"))
                         return false;
                     var stop = JsonConvert.DeserializeObject<StoppedEvent>(json)!;
                     Assert.Equal("breakpoint", stop.body.reason, trace);
-                    threadId = stop.body.threadId!.Value;
+                    m_threadId = stop.body.threadId!.Value;
                     return true;
                 }), trace);
                 var stack = new StackTraceRequest();
-                stack.arguments.threadId = threadId;
+                stack.arguments.threadId = m_threadId;
                 stack.arguments.levels = 1;
-                var response = DAPDebugger.Request(stack);
+                var response = m_dapDebugger.Request(stack);
                 Assert.True(response.Success, trace);
                 var frame = JsonConvert.DeserializeObject<StackTraceResponse>(response.ResponseStr)!.body.stackFrames[0];
                 string label = "";
                 foreach (string name in new[] { "source", "conditional_source", "function", "conditional_function", "stage" })
-                    if (frame.line == ((LineBreakpoint)ControlInfo.Breakpoints[name]).NumLine)
+                    if (frame.line == ((LineBreakpoint)m_controlInfo.Breakpoints[name]).NumLine)
                         label = name;
                 Assert.True(label.Length > 0, trace);
                 if (label == "stage")
@@ -161,13 +161,13 @@ partial class Context
             if (visit == 4)
             {
                 var badSource = new SetBreakpointsRequest();
-                badSource.arguments.source.path = ControlInfo.SourceFilesPath;
-                badSource.arguments.breakpoints.Add(new SourceBreakpoint(((LineBreakpoint)ControlInfo.Breakpoints["stage"]).NumLine));
-                badSource.arguments.breakpoints.Add(new SourceBreakpoint(((LineBreakpoint)ControlInfo.Breakpoints["source"]).NumLine, HitCondition: "%0"));
-                Assert.False(DAPDebugger.Request(badSource).Success, trace);
+                badSource.arguments.source.path = m_controlInfo.SourceFilesPath;
+                badSource.arguments.breakpoints.Add(new SourceBreakpoint(((LineBreakpoint)m_controlInfo.Breakpoints["stage"]).NumLine));
+                badSource.arguments.breakpoints.Add(new SourceBreakpoint(((LineBreakpoint)m_controlInfo.Breakpoints["source"]).NumLine, hitCondition: "%0"));
+                Assert.False(m_dapDebugger.Request(badSource).Success, trace);
                 var badFunctions = new SetFunctionBreakpointsRequest();
-                badFunctions.arguments.breakpoints.Add(new FunctionBreakpoint("TestHitConditionLifecycle.Program.Target", HitCondition: "abc()"));
-                Assert.False(DAPDebugger.Request(badFunctions).Success, trace);
+                badFunctions.arguments.breakpoints.Add(new FunctionBreakpoint("TestHitConditionLifecycle.Program.Target", hitCondition: "abc()"));
+                Assert.False(m_dapDebugger.Request(badFunctions).Success, trace);
             }
             if (visit == 5)
                 ConfigureHitLifecycle(trace, "2", false);

@@ -21,7 +21,7 @@ class Program
                 Context.AddBreakpoint(@"__FILE__:__LINE__", "after");
                 Context.SetBreakpoints(@"__FILE__:__LINE__");
                 Context.ConfigurationDone(@"__FILE__:__LINE__");
-                Context.Launch(@"__FILE__:__LINE__", JMC: true);
+                Context.Launch(@"__FILE__:__LINE__", jmc: true);
                 Context.WasEntryPointHit(@"__FILE__:__LINE__");
             });
 
@@ -67,7 +67,7 @@ namespace DbgTest.Script
 {
 partial class Context
 {
-    public void CheckExceptionConditions(string caller_trace)
+    public void CheckExceptionConditions(string callerTrace)
     {
         string invalid = "System.InvalidOperationException";
         string nullRef = "System.NullReferenceException";
@@ -121,52 +121,52 @@ partial class Context
             request.arguments.filterOptions = new List<ExceptionFilterOptions>();
             foreach (string condition in scenario.Conditions)
                 request.arguments.filterOptions.Add(new ExceptionFilterOptions { filterId = "all", condition = condition });
-            Assert.True(DAPDebugger.Request(request).Success, caller_trace);
-            Continue(caller_trace);
+            Assert.True(m_dapDebugger.Request(request).Success, callerTrace);
+            Continue(callerTrace);
 
             var hits = new List<string>();
             for (int stops = 0; ; stops++)
             {
-                Assert.True(stops <= 2, caller_trace);
+                Assert.True(stops <= 2, callerTrace);
                 string reason = "";
-                Assert.True(DAPDebugger.IsEventReceived(json =>
+                Assert.True(m_dapDebugger.IsEventReceived(json =>
                 {
-                    if (!DAPDebugger.IsResponseContainProperty(json, "event", "stopped"))
+                    if (!m_dapDebugger.IsResponseContainProperty(json, "event", "stopped"))
                         return false;
                     var stopped = JsonConvert.DeserializeObject<StoppedEvent>(json)!;
-                    threadId = stopped.body.threadId!.Value;
+                    m_threadId = stopped.body.threadId!.Value;
                     reason = stopped.body.reason;
                     return true;
-                }), caller_trace);
+                }), callerTrace);
                 var stack = new StackTraceRequest();
-                stack.arguments.threadId = threadId;
+                stack.arguments.threadId = m_threadId;
                 stack.arguments.levels = 1;
-                var result = DAPDebugger.Request(stack);
-                Assert.True(result.Success, caller_trace);
+                var result = m_dapDebugger.Request(stack);
+                Assert.True(result.Success, callerTrace);
                 var frame = JsonConvert.DeserializeObject<StackTraceResponse>(result.ResponseStr)!.body.stackFrames[0];
-                Assert.Equal(ControlInfo.SourceFilesPath, frame.source.path, caller_trace);
+                Assert.Equal(m_controlInfo.SourceFilesPath, frame.source.path, callerTrace);
                 if (reason == "breakpoint")
                 {
-                    Assert.Equal(((LineBreakpoint)ControlInfo.Breakpoints["after"]).NumLine, frame.line, caller_trace);
+                    Assert.Equal(((LineBreakpoint)m_controlInfo.Breakpoints["after"]).NumLine, frame.line, callerTrace);
                     break;
                 }
-                Assert.Equal("exception", reason, caller_trace);
+                Assert.Equal("exception", reason, callerTrace);
                 string type;
-                if (frame.line == ((LineBreakpoint)ControlInfo.Breakpoints["invalid"]).NumLine)
+                if (frame.line == ((LineBreakpoint)m_controlInfo.Breakpoints["invalid"]).NumLine)
                     type = invalid;
                 else
                 {
-                    Assert.Equal(((LineBreakpoint)ControlInfo.Breakpoints["null"]).NumLine, frame.line, caller_trace);
+                    Assert.Equal(((LineBreakpoint)m_controlInfo.Breakpoints["null"]).NumLine, frame.line, callerTrace);
                     type = nullRef;
                 }
-                TestExceptionInfo(caller_trace, "CLR", "always", type);
+                TestExceptionInfo(callerTrace, "CLR", "always", type);
                 hits.Add(type);
-                Continue(caller_trace);
+                Continue(callerTrace);
             }
             actual.Add(string.Join(",", hits));
             expected.Add(scenario.Expected);
         }
-        Assert.Equal(string.Join("\n", expected), string.Join("\n", actual), caller_trace);
+        Assert.Equal(string.Join("\n", expected), string.Join("\n", actual), callerTrace);
     }
 }
 }

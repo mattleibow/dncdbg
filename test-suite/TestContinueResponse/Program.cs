@@ -21,7 +21,7 @@ class Program
                 Context.ConfigurationDone(@"__FILE__:__LINE__");
                 Context.Launch(@"__FILE__:__LINE__");
                 Context.WasEntryPointHit(@"__FILE__:__LINE__");
-                Context.Continue(@"__FILE__:__LINE__", SingleThread: false, ExpectedAllThreadsContinued: true, CheckContinuedEvent: true);
+                Context.Continue(@"__FILE__:__LINE__", singleThread: false, expectedAllThreadsContinued: true, checkContinuedEvent: true);
             });
 
         GC.KeepAlive(args);                                               Label.Breakpoint("first");
@@ -31,7 +31,7 @@ class Program
             {
                 Context Context = (Context)context;
                 Context.WasBreakpointHit(@"__FILE__:__LINE__", "first");
-                Context.Continue(@"__FILE__:__LINE__", ExpectedAllThreadsContinued: true, CheckContinuedEvent: true);
+                Context.Continue(@"__FILE__:__LINE__", expectedAllThreadsContinued: true, checkContinuedEvent: true);
             });
 
         GC.KeepAlive(args);                                               Label.Breakpoint("second");
@@ -41,7 +41,7 @@ class Program
             {
                 Context Context = (Context)context;
                 Context.WasBreakpointHit(@"__FILE__:__LINE__", "second");
-                Context.Continue(@"__FILE__:__LINE__", SingleThread: true, ExpectedAllThreadsContinued: false, CheckContinuedEvent: true);
+                Context.Continue(@"__FILE__:__LINE__", singleThread: true, expectedAllThreadsContinued: false, checkContinuedEvent: true);
             });
 
         GC.KeepAlive(args);                                               Label.Breakpoint("third");
@@ -51,7 +51,7 @@ class Program
             {
                 Context Context = (Context)context;
                 Context.WasBreakpointHit(@"__FILE__:__LINE__", "third");
-                Context.Continue(@"__FILE__:__LINE__", ExpectedAllThreadsContinued: true, CheckContinuedEvent: true);
+                Context.Continue(@"__FILE__:__LINE__", expectedAllThreadsContinued: true, checkContinuedEvent: true);
             });
 
         string? input = Console.ReadLine();
@@ -61,7 +61,7 @@ class Program
             (Object context) =>
             {
                 Context Context = (Context)context;
-                Context.Continue(@"__FILE__:__LINE__", SingleThread: true, ExpectedAllThreadsContinued: true);
+                Context.Continue(@"__FILE__:__LINE__", singleThread: true, expectedAllThreadsContinued: true);
                 Context.CheckNoContinued(@"__FILE__:__LINE__");
                 Context.CalcExpressionWithStatusOnlyCheck(@"__FILE__:__LINE__", 0, "go", true);
             });

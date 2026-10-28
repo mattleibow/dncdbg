@@ -34,7 +34,7 @@ namespace DbgTest.Script
 {
 partial class Context
 {
-    public void CheckUnhandledExceptionFilters(string caller_trace)
+    public void CheckUnhandledExceptionFilters(string callerTrace)
     {
         var cases = new (bool All, string[] Conditions, bool Stop, bool Thrown)[]
         {
@@ -59,7 +59,7 @@ partial class Context
         };
         foreach (var scenario in cases)
         {
-            Initialize(caller_trace);
+            Initialize(callerTrace);
             var request = new SetExceptionBreakpointsRequest();
             request.arguments.filterOptions = new List<ExceptionFilterOptions>();
             if (scenario.All)
@@ -74,40 +74,40 @@ partial class Context
                 request.arguments.filterOptions.Add(new ExceptionFilterOptions { filterId = "all", condition = "*" });
             foreach (string condition in scenario.Conditions)
                 request.arguments.filterOptions.Add(new ExceptionFilterOptions { filterId = "unhandled", condition = condition });
-            Assert.True(DAPDebugger.Request(request).Success, caller_trace);
-            ConfigurationDone(caller_trace);
-            Launch(caller_trace, JMC: true);
-            WasEntryPointHit(caller_trace);
-            Continue(caller_trace);
+            Assert.True(m_dapDebugger.Request(request).Success, callerTrace);
+            ConfigurationDone(callerTrace);
+            Launch(callerTrace, jmc: true);
+            WasEntryPointHit(callerTrace);
+            Continue(callerTrace);
             if (scenario.Thrown)
             {
-                WasExceptionBreakpointHit(caller_trace, "throw", "CLR", "always", "System.InvalidOperationException");
-                Continue(caller_trace);
+                WasExceptionBreakpointHit(callerTrace, "throw", "CLR", "always", "System.InvalidOperationException");
+                Continue(callerTrace);
             }
             if (scenario.Stop)
             {
-                WasExceptionBreakpointHit(caller_trace, "throw", "CLR", "unhandled", "System.InvalidOperationException");
-                Continue(caller_trace);
-                WasExit(caller_trace, CheckExitCode: null);
+                WasExceptionBreakpointHit(callerTrace, "throw", "CLR", "unhandled", "System.InvalidOperationException");
+                Continue(callerTrace);
+                WasExit(callerTrace, checkExitCode: null);
             }
             else
             {
                 bool exited = false;
                 bool terminated = false;
-                Assert.True(DAPDebugger.IsEventReceived(json =>
+                Assert.True(m_dapDebugger.IsEventReceived(json =>
                 {
-                    Assert.False(DAPDebugger.IsResponseContainProperty(json, "event", "stopped"), caller_trace);
-                    if (DAPDebugger.IsResponseContainProperty(json, "event", "exited"))
+                    Assert.False(m_dapDebugger.IsResponseContainProperty(json, "event", "stopped"), callerTrace);
+                    if (m_dapDebugger.IsResponseContainProperty(json, "event", "exited"))
                     {
                         exited = true;
-                        Assert.NotEqual(0, JsonConvert.DeserializeObject<ExitedEvent>(json)!.body.exitCode, caller_trace);
+                        Assert.NotEqual(0, JsonConvert.DeserializeObject<ExitedEvent>(json)!.body.exitCode, callerTrace);
                     }
-                    terminated |= DAPDebugger.IsResponseContainProperty(json, "event", "terminated");
+                    terminated |= m_dapDebugger.IsResponseContainProperty(json, "event", "terminated");
                     return exited && terminated;
-                }), caller_trace);
+                }), callerTrace);
             }
         }
-        DebuggerExit(caller_trace);
+        DebuggerExit(callerTrace);
     }
 }
 }

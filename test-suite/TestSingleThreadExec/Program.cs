@@ -37,7 +37,7 @@ class Program
                 Context.Launch(@"__FILE__:__LINE__");
 
                 Context.WasEntryPointHit(@"__FILE__:__LINE__");
-                Context.Continue(@"__FILE__:__LINE__", ExpectedAllThreadsContinued: true, CheckContinuedEvent: true);
+                Context.Continue(@"__FILE__:__LINE__", singleThread: false, expectedAllThreadsContinued: true, checkContinuedEvent: true);
             });
 
         System.Threading.Thread testThread = new System.Threading.Thread(DoWork);
@@ -61,32 +61,32 @@ class Program
                 Context Context = (Context)context;
                 Context.WasBreakpointHit(@"__FILE__:__LINE__", "BREAK2");
 
-                Context.StepOver(@"__FILE__:__LINE__", SingleThread: true);
+                Context.StepOver(@"__FILE__:__LINE__", singleThread: true);
                 Context.CheckContinued(@"__FILE__:__LINE__", false);
                 Context.WasStep(@"__FILE__:__LINE__", "test_step_1");
-                Context.StepOver(@"__FILE__:__LINE__", SingleThread: true);
+                Context.StepOver(@"__FILE__:__LINE__", singleThread: true);
                 Context.CheckContinued(@"__FILE__:__LINE__", false);
                 Context.WasStep(@"__FILE__:__LINE__", "test_step_2");
-                Context.StepIn(@"__FILE__:__LINE__", SingleThread: true);
+                Context.StepIn(@"__FILE__:__LINE__", singleThread: true);
                 Context.CheckContinued(@"__FILE__:__LINE__", false);
                 Context.WasStep(@"__FILE__:__LINE__", "test_step_3");
-                Context.StepIn(@"__FILE__:__LINE__", SingleThread: true);
+                Context.StepIn(@"__FILE__:__LINE__", singleThread: true);
                 Context.CheckContinued(@"__FILE__:__LINE__", false);
                 Context.WasStep(@"__FILE__:__LINE__", "test_step_4");
-                Context.StepIn(@"__FILE__:__LINE__", SingleThread: true);
+                Context.StepIn(@"__FILE__:__LINE__", singleThread: true);
                 Context.CheckContinued(@"__FILE__:__LINE__", false);
                 Context.WasStep(@"__FILE__:__LINE__", "test_step_5");
-                Context.StepOut(@"__FILE__:__LINE__", SingleThread: true);
+                Context.StepOut(@"__FILE__:__LINE__", singleThread: true);
                 Context.CheckContinued(@"__FILE__:__LINE__", false);
                 Context.WasStep(@"__FILE__:__LINE__", "test_step_2");
 
-                Context.Continue(@"__FILE__:__LINE__", SingleThread: true, ExpectedAllThreadsContinued: false, CheckContinuedEvent: true);
+                Context.Continue(@"__FILE__:__LINE__", singleThread: true, expectedAllThreadsContinued: false, checkContinuedEvent: true);
                 Context.WasBreakpointHit(@"__FILE__:__LINE__", "BREAK3");
 
                 Context.RemoveBreakpoint(@"__FILE__:__LINE__", "BREAK1");
                 Context.SetBreakpoints(@"__FILE__:__LINE__");
 
-                Context.Continue(@"__FILE__:__LINE__", ExpectedAllThreadsContinued: true, CheckContinuedEvent: true);
+                Context.Continue(@"__FILE__:__LINE__", expectedAllThreadsContinued: true, checkContinuedEvent: true);
             });
 
         // last checkpoint must provide "finish" as id or empty string ("") as next checkpoint id

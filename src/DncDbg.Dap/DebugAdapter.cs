@@ -377,6 +377,10 @@ internal sealed class DebugAdapter : IDisposable
                             _pendingStartResponse = null;
                             _connection.SendErrorResponse(pending.Request, e.Message);
                         }
+                        MobileSession failed = _mobile;
+                        _mobile = null;
+                        try { failed.Dispose(); }
+                        catch (Exception cleanup) { _log($"Mobile startup cleanup failed: {cleanup}"); }
                         throw;
                     }
                 }

@@ -58,7 +58,7 @@ def tool():
 
 
 class Remote:
-    def __init__(self, state, platform, model_version=2):
+    def __init__(self, state, platform, model_version=2, start_error=None):
         self.listener = socket.socket()
         self.listener.bind(("127.0.0.1", 0))
         self.listener.listen()
@@ -68,6 +68,7 @@ class Remote:
         (state / "Library/dncdbg-remote.json").write_text(json.dumps(self.endpoint))
         self.platform = platform
         self.model_version = model_version
+        self.start_error = start_error
         self.operations = []
         self.thread = threading.Thread(target=self.serve, daemon=True)
         self.thread.start()
@@ -101,6 +102,7 @@ class Remote:
                     elif op == 3:
                         pending = [{"Kind": "stopped", "Generation": generation, "Stop": {
                             "Id": generation, "Reason": "breakpoint", "ThreadId": 7}}]
+                        error = self.start_error
                     elif op == 11:
                         result, pending = pending, []
                     elif op == 12:
@@ -299,6 +301,15 @@ class MobileDapTests(unittest.TestCase):
         self.remote = Remote(self.state, "Android", model_version=99)
         self.dap.request("launch", {"mobile": self.options("android")}, success=False)
         self.assertEqual(self.remote.operations, [1, 9])
+        commands = [json.loads(x) for x in (self.state / "commands.jsonl").read_text().splitlines()]
+        self.assertTrue(any("forward" in c and "--remove" in c for c in commands))
+        self.assertTrue(any("uninstall" in c for c in commands))
+
+    def test_native_start_failure_cleans_before_dap_disconnect(self):
+        self.remote = Remote(self.state, "Android", start_error="CorDebugCallFailed")
+        launch = self.dap.send("launch", {"mobile": self.options("android")})
+        self.dap.request("configurationDone", success=False)
+        self.dap.response(launch, success=False)
         commands = [json.loads(x) for x in (self.state / "commands.jsonl").read_text().splitlines()]
         self.assertTrue(any("forward" in c and "--remove" in c for c in commands))
         self.assertTrue(any("uninstall" in c for c in commands))

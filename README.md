@@ -82,18 +82,19 @@ See [Docker and WSL debugging](docs/docker_wsl.md) for prerequisites, cleanup,
 source mapping and host-client transport configuration. Linux CI requires Docker;
 without `--require-docker`, local runs skip when Docker is unavailable.
 
-### Mobile investigation (not supported debugger targets)
+### Experimental mobile DAP preview
 
-The isolated [`DncDbg.Remote` experiment](docs/experimental-mobile-debugging.md)
-adds a versioned transport precursor and a separately built
-[MAUI fixture](tests/DncDbg.MauiTestApp/README.md). The fixture uses a local
-.NET 11 SDK pin; the debugger remains on .NET 10. CoreCLR is the measured default
-on its tested .NET 11 simulator/emulator targets. Desktop breakpoint transport
-proof is not mobile-debugger proof. Default mobile execution remains unavailable;
-a separate explicit private-bootstrap opt-in now exercises an exact-build-pinned,
-runtime-version-fragile target-native breakpoint/int32 proof. It is not general
-mobile engine/DAP support and does not support physical devices. The normal DAP debugger
-does not enable or depend on the experiment.
+The opt-in [`mobile` launch configuration](docs/mobile-preview.md) adds
+adapter-owned deployment, scoped transport, a generated typed debugger model
+and a private CoreCLR provider for **exactly pinned .NET 11 RC1 arm64 iOS
+simulator/Android emulator** builds. It is not general supported mobile
+debugging and makes no physical-device claim. The separately built
+[MAUI fixture](tests/DncDbg.MauiTestApp/README.md) remains on a local .NET 11
+SDK pin; the debugger and ordinary desktop launch remain on .NET 10.
+Runtime capabilities explicitly exclude func-eval and other unsupported
+operations. See the [preview guide](docs/mobile-preview.md) for configuration,
+limitations and current merge gates, and the [historical proof](docs/experimental-mobile-debugging.md)
+for earlier direct-client evidence. DevFlow UI automation is a separate proof.
 
 ## Usage
 

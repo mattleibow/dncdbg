@@ -1,5 +1,10 @@
 # Mobile experimental fixture
 
+The adapter-owned launch and extended inspection/stepping/exception/restart
+gate is documented in [Mobile DAP preview](../../docs/mobile-preview.md).
+The direct-client proofs below remain separate regression gates; their
+historical results do not prove the newer DAP surface.
+
 Standard `dotnet new maui` app, now targeting `net11.0-ios` and
 `net11.0-android`. This is a
 **experimental debugger test fixture, not general mobile debugger support**. See the

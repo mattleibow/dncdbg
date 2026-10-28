@@ -1,5 +1,9 @@
 # Experimental mobile managed-debugging investigation
 
+For the newer adapter-owned typed mobile DAP surface, configuration, limitations
+and validation gates, see [Mobile DAP preview](mobile-preview.md). The historical
+proof evidence below does not establish that the newer preview gates passed.
+
 **Not shipping general mobile debugger support. The private bootstrap is an
 explicit, runtime-version-fragile experiment, not a supported CoreCLR API.**
 

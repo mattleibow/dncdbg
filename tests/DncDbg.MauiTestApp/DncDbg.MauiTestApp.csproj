@@ -64,6 +64,9 @@
 	<ItemGroup Condition="'$(Configuration)' == 'Debug'">
 		<PackageReference Include="Microsoft.Maui.DevFlow.Agent" Version="0.1.0-preview.12.26421.1" />
 	</ItemGroup>
+	<ItemGroup Condition="'$(Configuration)' == 'Debug' And $([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'android' And '$(ExperimentalDiagnosticsEnvironmentFile)' != ''">
+		<AndroidEnvironment Include="$(ExperimentalDiagnosticsEnvironmentFile)" />
+	</ItemGroup>
 	<PropertyGroup Condition="'$(Configuration)' == 'Debug' And '$(EnableExperimentalRemoteDebugging)' == 'true'">
 		<DefineConstants>$(DefineConstants);DNCDBG_EXPERIMENTAL_REMOTE</DefineConstants>
 	</PropertyGroup>

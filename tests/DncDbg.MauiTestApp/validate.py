@@ -4,6 +4,8 @@ import argparse
 import json
 import os
 from pathlib import Path
+import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -39,11 +41,23 @@ def main():
     parser.add_argument("--replace-fixture", action="store_true", help="Permit replacing this fixture on the dedicated target")
     parser.add_argument("--public-attach-probe", action="store_true",
                         help="After UI validation, test the existing public desktop attach API on the owned iOS simulator app")
+    parser.add_argument("--startup-probes", action="store_true",
+                        help="Record allowlisted startup environment and separate public factory/provider/notification phases")
+    parser.add_argument("--diagnostic-trace", action="store_true",
+                        help="Test the documented mobile diagnostic-port route using dotnet-dsrouter and dotnet-trace")
+    parser.add_argument("--diagnostic-transport", choices=["tcp", "uds"], default="tcp",
+                        help="TCP is the supported mobile route; UDS preserves the iOS negative experiment")
+    parser.add_argument("--shared-debugger-ipc", action="store_true",
+                        help="iOS only: give the owned target and probe the same short project-owned TMPDIR")
     args = parser.parse_args()
     if args.platform == "android" and not args.device.startswith("emulator-"):
         parser.error("Physical Android devices are intentionally not supported")
     if args.public_attach_probe and args.platform != "ios":
         parser.error("The host public attach probe only applies to an iOS simulator process, not an emulator PID")
+    if args.shared_debugger_ipc and args.platform != "ios":
+        parser.error("A shared debugger IPC directory applies only to the iOS simulator's host filesystem")
+    if args.diagnostic_trace and args.diagnostic_transport == "uds" and args.platform != "ios":
+        parser.error("The UDS diagnostic experiment applies only to the iOS simulator")
     EVIDENCE = ROOT / f"build/validation/mobile/net11-{args.runtime}"
     EVIDENCE.mkdir(parents=True, exist_ok=True)
     prefix = args.platform
@@ -51,6 +65,15 @@ def main():
     forwards = []
     added_reverse = False
     installed = False
+    tracer = None
+    router = None
+    trace_output = None
+    router_output = None
+    diagnostic_socket = None
+    ipc_directory = None
+    diagnostic_tcp_port = None
+    diagnostic_reverse_added = False
+    probe_env = os.environ.copy()
     endpoint_file = EVIDENCE / f"{prefix}-endpoint.json"
     forwarded_file = EVIDENCE / f"{prefix}-forwarded-endpoint.json"
 
@@ -91,6 +114,37 @@ def main():
         tfm = f"net11.0-{prefix}"
         rid = "iossimulator-arm64" if prefix == "ios" else "android-arm64"
         properties = [f"-p:RuntimeIdentifier={rid}", "-p:EnableExperimentalRemoteDebugging=true"]
+        if args.diagnostic_trace or args.shared_debugger_ipc:
+            parent = ROOT / "build/i"
+            parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            ipc_directory = parent / f"{os.getpid():x}"
+            ipc_directory.mkdir(mode=0o700)
+            environment_options = []
+            if args.shared_debugger_ipc:
+                probe_env["TMPDIR"] = str(ipc_directory) + "/"
+                environment_options.append(f"--setenv=TMPDIR={ipc_directory}/")
+            if args.diagnostic_trace:
+                diagnostic_socket = ipc_directory / "s"
+                if len(str(diagnostic_socket).encode()) >= 108:
+                    raise RuntimeError("The diagnostic socket must be shorter than 108 bytes")
+                address = str(diagnostic_socket)
+                if args.diagnostic_transport == "tcp":
+                    with socket.socket() as reserve:
+                        reserve.bind(("127.0.0.1", 0))
+                        diagnostic_tcp_port = reserve.getsockname()[1]
+                    address = f"127.0.0.1:{diagnostic_tcp_port}"
+                diagnostic_environment = {
+                    "DOTNET_EnableDiagnostics": "1", "DOTNET_EnableDiagnostics_IPC": "1",
+                    "DOTNET_DiagnosticPorts": f"{address},nosuspend,connect",
+                }
+                environment_options += [f"--setenv={name}={value.replace(',', '%2C')}" for name, value in diagnostic_environment.items()]
+            if prefix == "ios":
+                # The simulator rewrites launch-time TMPDIR. The SDK applies these before CoreCLR initializes.
+                properties.append("-p:AppBundleExtraOptions=" + " ".join(environment_options))
+            else:
+                android_environment = ipc_directory / "android.env"
+                android_environment.write_text("".join(f"{name}={value}\n" for name, value in diagnostic_environment.items()))
+                properties.append(f"-p:ExperimentalDiagnosticsEnvironmentFile={android_environment}")
         if args.runtime != "default":
             properties.append(f"-p:UseMonoRuntime={'true' if args.runtime == 'mono' else 'false'}")
         if prefix == "android":
@@ -121,11 +175,40 @@ def main():
                 native_assets = [name for name in package.namelist()
                                  if any(part in name.lower() for part in ("coreclr", "mscord", "dbgshim", "monosgen"))]
         (EVIDENCE / f"{prefix}-native-assets.json").write_text(json.dumps(native_assets, indent=2) + "\n")
+        if args.diagnostic_trace:
+            trace_output = (EVIDENCE / f"{prefix}-diagnostic-trace.log").open("w")
+            tracer = subprocess.Popen(
+                ["dotnet-trace", "collect", "--diagnostic-port", str(diagnostic_socket),
+                 "--duration", "00:00:00:02", "--profile", "dotnet-sampled-thread-time",
+                 "--output", str(EVIDENCE / f"{prefix}-diagnostic.nettrace")],
+                cwd=ROOT, stdout=trace_output, stderr=subprocess.STDOUT, text=True)
+            ready = time.monotonic() + 10
+            while not diagnostic_socket.exists():
+                if tracer.poll() is not None or time.monotonic() >= ready:
+                    raise RuntimeError("dotnet-trace did not open the project-owned diagnostic socket")
+                time.sleep(0.1)
+            if diagnostic_tcp_port is not None:
+                router_path = shutil.which("dotnet-dsrouter") or str(ROOT / "build/tools/dotnet-dsrouter")
+                router_output = (EVIDENCE / f"{prefix}-diagnostic-router.log").open("w")
+                router = subprocess.Popen(
+                    [router_path, "client-server", "-ipcc", str(diagnostic_socket),
+                     "-tcps", f"127.0.0.1:{diagnostic_tcp_port}", "-rt", "120", "-v", "debug"],
+                    cwd=ROOT, stdout=router_output, stderr=subprocess.STDOUT, text=True)
+                ready = time.monotonic() + 10
+                while run("lsof", "-nP", "-a", "-p", str(router.pid), f"-iTCP:{diagnostic_tcp_port}", "-sTCP:LISTEN", check=False).returncode:
+                    if router.poll() is not None or time.monotonic() >= ready:
+                        raise RuntimeError("dotnet-dsrouter did not open its loopback TCP listener")
+                    time.sleep(0.1)
+                if prefix == "android":
+                    device("reverse", "--no-rebind", f"tcp:{diagnostic_tcp_port}", f"tcp:{diagnostic_tcp_port}")
+                    diagnostic_reverse_added = True
         installed = True
         if prefix == "ios":
+            run("xcrun", "simctl", "terminate", args.device, APP, check=False)
             run("xcrun", "simctl", "install", args.device, str(output / "DncDbg.MauiTestApp.app"))
+            launch_env = os.environ.copy()
             run("xcrun", "simctl", "launch", f"--stdout={EVIDENCE / 'ios-app-stdout.log'}",
-                f"--stderr={EVIDENCE / 'ios-app-stderr.log'}", args.device, APP)
+                f"--stderr={EVIDENCE / 'ios-app-stderr.log'}", args.device, APP, env=launch_env)
         else:
             device("shell", "am", "force-stop", APP)
             device("install", "-r", str(output / f"{APP}-Signed.apk"))
@@ -199,10 +282,41 @@ def main():
         expected_kind = "Mono" if inspected["UseMonoRuntime"] == "true" else "CoreClr"
         if not capabilities["Runtime"].endswith(f"({expected_kind})"):
             raise RuntimeError("Runtime declaration differs from the measured SDK configuration")
+        startup = None
+        startup_probes = []
+        if args.startup_probes:
+            if prefix == "ios":
+                startup = json.loads((container / "Library/dncdbg-startup.json").read_text())
+            else:
+                startup = json.loads(device("exec-out", "run-as", APP, "cat", "files/dncdbg-startup.json").stdout)
+            (EVIDENCE / f"{prefix}-startup-environment.json").write_text(json.dumps(startup, indent=2) + "\n")
+            if prefix == "ios":
+                target_libraries = Path(startup["NativeLibraryDirectory"])
+                host_libraries = Path(run("which", "dotnet").stdout.strip()).resolve().parent / "shared/Microsoft.NETCore.App" / startup["Runtime"].removeprefix(".NET ")
+                for name, libraries in (("default", None), ("target", target_libraries), ("host", host_libraries)):
+                    destination = EVIDENCE / f"ios-startup-{name}.json"
+                    command = ["dotnet", "run", "--project", "tests/DncDbg.RemoteTests", "--", "--startup-probe",
+                               str(status["app"]["processId"]), str(target_libraries / "libcoreclr.dylib"), str(destination)]
+                    if libraries:
+                        command += ["--libraries", str(libraries)]
+                    result = run(*command, env=probe_env, check=False, timeout=30, log=f"ios-startup-{name}.log")
+                    if result.returncode not in (0, 2):
+                        raise RuntimeError("Startup probe failed without a structured result")
+                    startup_probes.append(json.loads(destination.read_text()))
+            else:
+                startup_probes.append({"NotRun": "Android PIDs are not host PIDs; no target-native public dbgshim is packaged."})
+        diagnostic_trace = None
+        if tracer is not None:
+            try:
+                trace_code = tracer.wait(timeout=15)
+                diagnostic_trace = {"Transport": args.diagnostic_transport, "ExitCode": trace_code,
+                                    "TraceExists": (EVIDENCE / f"{prefix}-diagnostic.nettrace").exists()}
+            except subprocess.TimeoutExpired:
+                diagnostic_trace = {"Timeout": True, "Connected": False}
         public_attach = None
         if args.public_attach_probe:
             probe = run("dotnet", "run", "--project", "tests/DncDbg.RemoteTests", "--", "--attach-probe",
-                        str(status["app"]["processId"]), check=False, timeout=60, log="ios-public-attach-probe.log")
+                        str(status["app"]["processId"]), env=probe_env, check=False, timeout=60, log="ios-public-attach-probe.log")
             public_attach = json.loads(next(line for line in probe.stdout.splitlines() if line.startswith("{")))
             if probe.returncode not in (0, 2):
                 raise RuntimeError("Public attach probe failed without a structured result")
@@ -210,6 +324,7 @@ def main():
                   "sdk": sdk_version, "workload_set": workload_version, "runtime_selection": args.runtime,
                   "properties": inspected, "runtime_packs": runtime_packs, "native_assets": native_assets,
                   "capabilities": capabilities, "public_attach_probe": public_attach,
+                  "startup_environment": startup, "startup_probes": startup_probes, "diagnostic_trace": diagnostic_trace,
                   "mobile_managed_breakpoint": "blocked", "physical_devices": "not tested"}
         (EVIDENCE / f"{prefix}-report.json").write_text(json.dumps(report, indent=2) + "\n")
         print(json.dumps(report))
@@ -230,10 +345,34 @@ def main():
             else:
                 cleanup(lambda: device("shell", "am", "force-stop", APP))
                 cleanup(lambda: device("uninstall", APP))
+        if tracer is not None and tracer.poll() is None:
+            tracer.terminate()
+            try:
+                tracer.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                tracer.kill()
+                tracer.wait(timeout=5)
+        if router is not None and router.poll() is None:
+            router.terminate()
+            try:
+                router.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                router.kill()
+                router.wait(timeout=5)
+        if trace_output is not None:
+            trace_output.close()
+        if router_output is not None:
+            router_output.close()
+        if diagnostic_socket is not None:
+            cleanup(lambda: diagnostic_socket.unlink(missing_ok=True))
+        if ipc_directory is not None:
+            cleanup(lambda: shutil.rmtree(ipc_directory))
         for port in forwards:
             cleanup(lambda port=port: device("forward", "--remove", f"tcp:{port}"))
         if added_reverse:
             cleanup(lambda: device("reverse", "--remove", "tcp:19223"))
+        if diagnostic_reverse_added:
+            cleanup(lambda: device("reverse", "--remove", f"tcp:{diagnostic_tcp_port}"))
         for path in [endpoint_file, forwarded_file]:
             cleanup(lambda path=path: path.unlink(missing_ok=True))
         if cleanup_errors:

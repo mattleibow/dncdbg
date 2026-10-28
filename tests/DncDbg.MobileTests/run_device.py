@@ -280,8 +280,17 @@ def main():
         unload_context(0)
         changed = dap.event("breakpoint")["breakpoint"]
         check(changed["id"] == reload_bp["id"] and not changed["verified"], "final collectible unload invalidates the last binding")
+        module_ids = {m["id"] for m in both + reloaded}
+        module_events = [m["body"] for m in dap.history if m.get("event") == "module" and
+                         m["body"]["module"]["id"] in module_ids]
+        check(len(module_events) == 6 and all(
+            sorted(e["reason"] for e in module_events if e["module"]["id"] == id) == ["new", "removed"]
+            for id in module_ids), "each real module generation emits exactly one truthful new/removed event pair")
+        check(not any(m.get("event") == "stopped" or
+                      (m.get("event") == "breakpoint" and m["body"]["breakpoint"]["id"] == reload_bp["id"])
+                      for m in dap.history), "no duplicate stops or stale verification callbacks remain after collectible unload")
         evidence["collectibleModules"] = {"first": first, "both": both, "surviving": surviving, "reloaded": reloaded,
-                                          "breakpoint": reload_bp}
+                                          "breakpoint": reload_bp, "events": module_events}
         dap.request("setExceptionBreakpoints", {"filters": [], "filterOptions": [
             {"filterId": "all", "condition": "System.ArgumentException"},
             {"filterId": "unhandled", "condition": "System.InvalidOperationException"}]})

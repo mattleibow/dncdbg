@@ -108,7 +108,7 @@ struct ExceptionMetadata final : FakeRef<MetadataImport> {
         *count = static_cast<uint32_t>(name.size() + 1); return 0;
     }
 };
-struct ExceptionModule final : FakeRef<Module> {
+struct ExceptionModule : FakeRef<Module> {
     ExceptionMetadata metadata;
     HResult GetProcess(Controller**) override { return Fail; }
     HResult GetBaseAddress(uint64_t*) override { return Fail; }
@@ -158,6 +158,134 @@ struct ExceptionThread : FakeRef<Thread> {
     HResult GetActiveChain(Unknown**) override { return Fail; }
     HResult GetActiveFrame(Frame**) override { return Fail; }
 };
+struct NativeBreakpoint final : FakeRef<Breakpoint> {
+    int activations = 0, deactivations = 0;
+    HResult QueryInterface(const Guid& id, void** result) override {
+        if (std::memcmp(&id, &UnknownId, sizeof(id))) return Fail;
+        *result = this; AddRef(); return 0;
+    }
+    HResult Activate(Bool active) override { active ? ++activations : ++deactivations; return 0; }
+    HResult IsActive(Bool* result) override { *result = activations > deactivations; return 0; }
+};
+struct BreakpointCode final : FakeRef<Code> {
+    std::deque<NativeBreakpoint> created;
+    HResult IsIL(Bool*) override { return Fail; }
+    HResult GetFunction(Function**) override { return Fail; }
+    HResult GetAddress(uint64_t*) override { return Fail; }
+    HResult GetSize(uint32_t*) override { return Fail; }
+    HResult CreateBreakpoint(uint32_t offset, Breakpoint** result) override {
+        if (offset != 3) return Fail;
+        created.emplace_back(); created.back().AddRef(); *result = &created.back(); return 0;
+    }
+};
+struct BreakpointFunction final : FakeRef<Function> {
+    BreakpointCode code;
+    HResult GetModule(Module**) override { return Fail; }
+    HResult GetClass(Unknown**) override { return Fail; }
+    HResult GetToken(uint32_t*) override { return Fail; }
+    HResult GetILCode(Code** result) override { code.AddRef(); *result = &code; return 0; }
+    HResult GetNativeCode(Code**) override { return Fail; }
+    HResult CreateBreakpoint(Breakpoint**) override { return Fail; }
+    HResult GetLocalVarSigToken(uint32_t*) override { return Fail; }
+    HResult GetCurrentVersionNumber(uint32_t*) override { return Fail; }
+};
+struct BreakpointModule final : ExceptionModule {
+    BreakpointFunction function;
+    HResult QueryInterface(const Guid& id, void** result) override {
+        if (std::memcmp(&id, &UnknownId, sizeof(id))) return Fail;
+        *result = this; AddRef(); return 0;
+    }
+    HResult GetName(uint32_t size, uint32_t* count, char16_t* result) override {
+        const std::u16string name = u"fixture.dll";
+        if (size <= name.size()) return Fail;
+        std::copy(name.begin(), name.end(), result); result[name.size()] = 0;
+        *count = name.size() + 1; return 0;
+    }
+    HResult GetFunctionFromToken(uint32_t token, Function** result) override {
+        if (token != 0x06000001) return Fail;
+        function.AddRef(); *result = &function; return 0;
+    }
+};
+Json BreakpointRequest() {
+    Json point{{"Offset", 3}, {"Source", "fixture.cs"}, {"Line", 42}, {"Checksum", "AA"}, {"Algorithm", "SHA256"}};
+    Json method{{"Token", 0x06000001}, {"Name", "Fixture.Run"}, {"Variables", Json::array()}, {"Points", Json::array({point})}};
+    Json module{{"Mvid", std::string(32, '0')}, {"Name", "fixture"},
+        {"Types", Json::array()}, {"Methods", Json::array({method})}};
+    ModelConfigure({{"Modules", Json::array({module})}});
+    return {{"Source", "fixture.cs"}, {"Lines", {42}}, {"Locations", Json::array({
+        {{"Mvid", std::string(32, '0')}, {"MethodToken", 0x06000001}, {"IlOffset", 3}}})}};
+}
+void ModuleReloadChecks() {
+    Fake controller;
+    BreakpointModule module;
+    Json request = BreakpointRequest();
+    Check(!ModelSetBreakpoints(request)[0].at("Verified").get<bool>(), "source request is pending before its module loads");
+    handler.LoadModule(&controller, &module); Pump();
+    Json first = mobileEvents[0].at("Module");
+    Check(module.function.code.created.size() == 1, "initial module load binds the existing source request");
+    handler.UnloadModule(&controller, &module); Pump();
+    Check(module.function.code.created[0].refs == 1, "module unload releases its native breakpoint without retaining a stale binding");
+    Check(module.function.code.created[0].deactivations == 0, "module unload never calls a neutered native breakpoint");
+    handler.LoadModule(&controller, &module); Pump();
+    Check(module.function.code.created.size() == 2, "same module identity reloaded receives the existing source breakpoint");
+    Json last;
+    for (auto& event : mobileEvents) if (event.at("Kind") == "module") last = event.at("Module");
+    Check(last.at("Id") != first.at("Id") && last.at("Generation") > first.at("Generation"),
+          "reload publishes a fresh module identity/load generation");
+    ModelDeactivateBreakpoints(); ModelCleanup();
+    Check(module.refs == 1 && module.function.refs == 1 && module.function.code.refs == 1 &&
+          module.function.code.created[1].refs == 1, "reload cleanup releases every module/function/code/breakpoint lease");
+}
+void ModuleContextChecks() {
+    Fake controller;
+    BreakpointModule first, second;
+    Json request = BreakpointRequest();
+    handler.LoadModule(&controller, &first); handler.LoadModule(&controller, &second); Pump();
+    Check(ModelSetBreakpoints(request)[0].at("Verified") && first.function.code.created.size() == 1 &&
+          second.function.code.created.size() == 1, "two already-loaded instances with the same MVID each get a native breakpoint");
+    handler.LoadModule(&controller, &first); Pump();
+    Check(first.function.code.created.size() == 1 && modelModules.size() == 2,
+          "duplicate load callbacks create neither duplicate module events nor native bindings");
+    size_t before = mobileEvents.size();
+    handler.UnloadModule(&controller, &first); handler.UnloadModule(&controller, &first); Pump();
+    Check(first.function.code.created[0].refs == 1 && second.function.code.created[0].refs == 2,
+          "unloading one context releases only that context's binding");
+    Check(mobileEvents.size() == before + 1 && mobileEvents.back().at("Kind") == "moduleRemoved",
+          "unload leaves the surviving request verified and duplicate unload emits no stale event");
+    handler.LoadModule(&controller, &first); Pump();
+    Check(first.function.code.created.size() == 2 && second.function.code.created.size() == 1,
+          "later reload binds again without duplicating a surviving context");
+    ModelDeactivateBreakpoints(); ModelCleanup();
+    Check(first.refs == 1 && second.refs == 1 && second.function.code.created[0].refs == 1,
+          "multiple-context cleanup releases each binding exactly once");
+}
+void ModuleCallbackChecks() {
+    Fake controller;
+    ExceptionThread thread;
+    BreakpointModule module;
+    Json request = BreakpointRequest();
+    ModelSetBreakpoints(request);
+    handler.LoadModule(&controller, &module); Pump();
+    NativeBreakpoint& old = module.function.code.created.front();
+    handler.UnloadModule(&controller, &module);
+    handler.Breakpoint(&controller, &thread, &old); Pump();
+    Check(!stoppedController && old.refs == 1, "late breakpoint callback after unload cannot create a stale stop");
+    handler.LoadModule(&controller, &module); Pump();
+    NativeBreakpoint& active = module.function.code.created.back();
+    handler.Breakpoint(&controller, &thread, &active); Pump();
+    Json description = StopDescription();
+    Check(description.contains("HitBreakpoints") && description.at("HitBreakpoints").size() == 1 &&
+          description.at("HitBreakpoints")[0].at("Source") == "fixture.cs" &&
+          description.at("HitBreakpoints")[0].at("Line") == 42,
+          "native stop identifies the stable source request rather than a module or native binding");
+    ContinueStop();
+    ModelSetBreakpoints(request);
+    handler.Breakpoint(&controller, &thread, &active); Pump();
+    Check(!stoppedController, "replaced binding callbacks cannot stop a later source request");
+    ModelDeactivateBreakpoints(); ModelCleanup();
+    Check(controller.refs == 1 && thread.refs == 1 && old.refs == 1 && active.refs == 1,
+          "stale and active callback breakpoint references are consumed exactly once");
+}
 struct StackFunction final : FakeRef<Function> {
     ExceptionModule module;
     HResult GetModule(Module** result) override { module.AddRef(); *result = &module; return 0; }
@@ -436,6 +564,9 @@ int main(int argc, char** argv) {
         else if (std::strcmp(argv[1], "--exceptions") == 0) ExceptionChecks();
         else if (std::strcmp(argv[1], "--stack") == 0) StackChecks();
         else if (std::strcmp(argv[1], "--bounds") == 0) BoundsChecks();
+        else if (std::strcmp(argv[1], "--module-reload") == 0) ModuleReloadChecks();
+        else if (std::strcmp(argv[1], "--module-contexts") == 0) ModuleContextChecks();
+        else if (std::strcmp(argv[1], "--module-callbacks") == 0) ModuleCallbackChecks();
         else throw std::runtime_error("Unknown test selection");
         return 0;
     }
@@ -444,6 +575,9 @@ int main(int argc, char** argv) {
     ExceptionChecks();
     StackChecks();
     BoundsChecks();
+    ModuleReloadChecks();
+    ModuleContextChecks();
+    ModuleCallbackChecks();
     {
         char16_t text[]{'A', 0xd83d, 0xde80, 0xd800};
         Check(Utf8(text, 4) == "A\xf0\x9f\x9a\x80\xef\xbf\xbd", "UTF-16 strings preserve surrogate pairs and replace isolated surrogates");

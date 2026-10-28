@@ -91,6 +91,7 @@ class Remote:
                          "Mvid": "0" * 32, "Generation": 1}]
         self.operations = []
         self.requests = []
+        self.events = queue.Queue()
         self.stack_count = 1
         self.stack_complete = True
         self.stack_omit_last = False
@@ -131,10 +132,13 @@ class Remote:
                     elif op == 3:
                         pending = [{"Kind": "breakpoint", "Generation": generation, "Breakpoint": bp | {"Verified": True}}
                                    for bp in bound_breakpoints] + [{"Kind": "stopped", "Generation": generation, "Stop": {
-                            "Id": generation, "Reason": "breakpoint", "ThreadId": 7}}]
+                            "Id": generation, "Reason": "breakpoint", "ThreadId": 7,
+                            "HitBreakpoints": [bp | {"Verified": True} for bp in bound_breakpoints]}}]
                         error = self.start_error
                     elif op == 11:
                         result, pending = pending, []
+                        while not self.events.empty():
+                            result.append(self.events.get_nowait())
                     elif op == 12:
                         result = [{"Id": 7, "Name": "main"}]
                     elif op == 13:
@@ -387,6 +391,54 @@ class MobileDapTests(unittest.TestCase):
         self.assertEqual(changed["id"], breakpoint["id"])
         self.assertEqual(changed["source"]["path"], str(source))
         self.assertTrue(changed["verified"])
+
+    def test_module_reload_and_context_stops_keep_source_breakpoint_identity(self):
+        self.remote = Remote(self.state, "Android")
+        launch = self.dap.send("launch", {"mobile": self.options("android")})
+        source = ROOT / "tests/RemoteBreakpointApp/Program.cs"
+        line = next(i + 1 for i, text in enumerate(source.read_text().splitlines()) if "// REMOTE_BREAKPOINT" in text)
+        bp = self.dap.request("setBreakpoints", {"source": {"path": str(source)},
+                                               "breakpoints": [{"line": line}]})["breakpoints"][0]
+        self.dap.request("configurationDone")
+        self.dap.response(launch)
+        self.assertEqual(self.dap.event("breakpoint")["breakpoint"]["id"], bp["id"])
+        self.assertEqual(self.dap.event("stopped").get("hitBreakpointIds"), [bp["id"]])
+        initial = self.remote.modules[0]
+        for generation in range(2, 8):
+            with self.subTest(generation=generation):
+                self.dap.request("continue", {"threadId": 7})
+                current = initial | {"Id": f"module-{generation}", "Generation": generation}
+                self.remote.modules = [current]
+                self.remote.events.put({"Kind": "moduleRemoved", "Generation": generation * 10, "Module": initial})
+                self.remote.events.put({"Kind": "breakpoint", "Generation": generation * 10 + 1,
+                                        "Breakpoint": {"Source": str(source), "Line": line, "Verified": False}})
+                self.remote.events.put({"Kind": "module", "Generation": generation * 10 + 2, "Module": current})
+                self.remote.events.put({"Kind": "breakpoint", "Generation": generation * 10 + 3,
+                                        "Breakpoint": {"Source": str(source), "Line": line, "Verified": True}})
+                self.remote.events.put({"Kind": "stopped", "Generation": generation * 10 + 4, "Stop": {
+                    "Id": generation * 10 + 4, "Reason": "breakpoint", "ThreadId": 7,
+                    "HitBreakpoints": [{"Source": str(source), "Line": line, "Verified": True}]}})
+                removed, added = self.dap.event("module"), self.dap.event("module")
+                self.assertEqual((removed["reason"], removed["module"]["id"]), ("removed", initial["Id"]))
+                self.assertEqual((added["reason"], added["module"]["id"]), ("new", current["Id"]))
+                for verified in (False, True):
+                    changed = self.dap.event("breakpoint")["breakpoint"]
+                    self.assertEqual((changed["id"], changed["verified"], changed["source"]["path"]),
+                                     (bp["id"], verified, str(source)))
+                self.assertEqual(self.dap.event("stopped").get("hitBreakpointIds"), [bp["id"]])
+                self.assertEqual([m["id"] for m in self.dap.request("modules")["modules"]], [current["Id"]])
+                initial = current
+
+    def test_removed_source_request_ignores_late_verification_event(self):
+        self.test_source_breakpoint_verification_events_keep_dap_identity()
+        source = str(ROOT / "tests/RemoteBreakpointApp/Program.cs")
+        self.dap.request("setBreakpoints", {"source": {"path": source}, "breakpoints": []})
+        line = next(i + 1 for i, text in enumerate(Path(source).read_text().splitlines()) if "// REMOTE_BREAKPOINT" in text)
+        self.remote.events.put({"Kind": "breakpoint", "Generation": 999,
+                                "Breakpoint": {"Source": source, "Line": line, "Verified": True}})
+        self.remote.events.put({"Kind": "module", "Generation": 1000, "Module": self.remote.modules[0]})
+        self.dap.event("module")
+        self.assertFalse(any(m.get("event") == "breakpoint" for m in self.dap.history))
 
     def test_physical_android_rejected_before_deployment(self):
         options = self.options("android") | {"deviceId": "physical-device"}
@@ -642,6 +694,72 @@ class MobileDapTests(unittest.TestCase):
         self.assert_process_gone(committed["pid"])
         self.assert_process_gone(committed["child"])
         self.assertEqual(self.daemon.mappings(), [])
+
+    def test_daemon_committed_marker_publishes_exact_mapping_snapshot(self):
+        # Pause the writer *after* either direct or atomic marker publication.
+        # A marker reader must already see the committed snapshot at that instant.
+        script = """
+import sys, time
+from pathlib import Path
+from fake_adb import daemon
+state = Path(sys.argv[1])
+write, replace = Path.write_text, Path.replace
+def gate():
+    while not (state / 'release-publication').exists():
+        time.sleep(0.001)
+def write_text(path, *args, **kwargs):
+    result = write(path, *args, **kwargs)
+    if path.name == 'daemon-committed.json':
+        gate()
+    return result
+def replace_file(path, target):
+    result = replace(path, target)
+    if Path(target).name == 'daemon-committed.json':
+        gate()
+    return result
+Path.write_text, Path.replace = write_text, replace_file
+daemon(state, sys.argv[2])
+"""
+        for stage in ("allocation", "rebind"):
+            state = self.state / stage
+            state.mkdir()
+            (state / "endpoint.json").write_text(json.dumps({"Port": 34567}))
+            process = subprocess.Popen([sys.executable, "-c", script, str(state), "hold-" + stage],
+                                       cwd=Path(__file__).parent)
+            def wait_file(name):
+                deadline = time.monotonic() + 5
+                while not (state / name).exists():
+                    self.assertIsNone(process.poll())
+                    self.assertLess(time.monotonic(), deadline, name)
+                    time.sleep(0.001)
+                return json.loads((state / name).read_text())
+
+            def connect(args):
+                port = json.loads((state / "daemon-ready.json").read_text())["port"]
+                connection = socket.create_connection(("127.0.0.1", port), timeout=5)
+                connection.sendall(json.dumps({"args": ["-s", "emulator-5556", "forward", *args]}).encode() + b"\n")
+                return connection
+
+            try:
+                wait_file("daemon-ready.json")
+                baseline = json.loads((state / "daemon-mappings.json").read_text())
+                for iteration in range(20):
+                    with self.subTest(stage=stage, iteration=iteration):
+                        args = ["--no-rebind", "tcp:0", f"localabstract:round-{iteration}"] if stage == "allocation" else ["tcp:34567", "tcp:34567"]
+                        with connect(args):
+                            wait_file("daemon-committed.json")
+                            snapshot = json.loads((state / "daemon-mappings.json").read_text())
+                            (state / "release-publication").touch()
+                        with connect(["--remove", "tcp:34567"]) as connection:
+                            json.loads(connection.makefile("rb").readline())
+                        self.assertEqual(json.loads((state / "daemon-mappings.json").read_text()), baseline)
+                        (state / "daemon-committed.json").unlink()
+                        (state / "release-publication").unlink()
+                        self.assertEqual(snapshot, baseline + [["emulator-5556", "tcp:34567", args[-1]]])
+            finally:
+                (state / "release-publication").touch()
+                process.terminate()
+                process.wait(timeout=5)
 
     def test_exception_filter_conditions_remain_associated_with_stages(self):
         self.launch("android")

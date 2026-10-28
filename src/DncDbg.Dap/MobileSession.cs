@@ -77,6 +77,7 @@ internal sealed class MobileSession : IDisposable
                 supportsSetVariable = false, supportsSetExpression = false, supportsReadMemoryRequest = false,
                 supportsWriteMemoryRequest = false, supportsGotoTargetsRequest = false, supportsStepInTargetsRequest = false,
                 supportsSingleThreadExecutionRequests = false, supportsBreakpointLocationsRequest = false,
+                supportsCancelRequest = false, supportsValueFormattingOptions = false,
                 supportsLoadedSourcesRequest = false, supportsExceptionFilterOptions = true,
                 exceptionBreakpointFilters = new[] {
                     new { filter = "all", label = "Thrown CLR exceptions", @default = false, supportsCondition = true, conditionDescription = "One exact CLR type name, e.g. System.InvalidOperationException" },

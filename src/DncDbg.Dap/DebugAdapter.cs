@@ -153,6 +153,11 @@ internal sealed class DebugAdapter : IDisposable
 
     private void Cancel(DapMessage message)
     {
+        if (_mobile != null)
+        {
+            _connection.SendErrorResponse(message, "Mobile request cancellation is not supported; disconnect to cancel the owned mobile session.");
+            return;
+        }
         int? requestId = message.GetArguments<CancelArguments>()?.RequestId;
         if (requestId != null)
         {
@@ -294,8 +299,15 @@ internal sealed class DebugAdapter : IDisposable
                 if (_launchArguments.Mobile is { } mobile)
                 {
                     if (_launchArguments.NoDebug || _launchArguments.Program != null || _launchArguments.Project != null ||
-                        _launchArguments.StopAtEntry || _launchArguments.Console is not (null or "internalConsole"))
-                        throw new DebuggerException("Mobile launch cannot be combined with desktop program/project/noDebug/stopAtEntry/terminal launch.");
+                        _launchArguments.StopAtEntry || _launchArguments.Console is not (null or "internalConsole") ||
+                        _launchArguments.Args is { Length: > 0 } || _launchArguments.Env is { Count: > 0 } || _launchArguments.Cwd != null ||
+                        _launchArguments.Build || _launchArguments.Configuration != null || _launchArguments.Framework != null ||
+                        _launchArguments.LaunchSettingsProfile != null || _launchArguments.LaunchSettingsFilePath != null ||
+                        _launchArguments.JustMyCode != null || _launchArguments.EnableStepFiltering == true ||
+                        _launchArguments.AllowImplicitFuncEval == true || _launchArguments.ExpressionEvaluationOptions != null ||
+                        _launchArguments.SourceFileMap is { Count: > 0 } || _launchArguments.SymbolOptions != null ||
+                        _launchArguments.SuppressJitOptimizations != null)
+                        throw new DebuggerException("Mobile launch requires built mobile assets and cannot apply desktop launch, build, environment, source-map, evaluation or JIT options.");
                     _mobile = new MobileSession(mobile, _connection, _log, LineToClient, LineFromClient);
                     try { _mobile.Launch(); }
                     catch { _mobile.Dispose(); _mobile = null; throw; }

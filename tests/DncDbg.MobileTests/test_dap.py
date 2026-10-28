@@ -268,6 +268,7 @@ class MobileDapTests(unittest.TestCase):
         self.dap.request("pause", {"threadId": 7})
         self.assertEqual(self.dap.event("stopped")["reason"], "pause")
         self.dap.request("readMemory", {"memoryReference": "0x0", "count": 1}, success=False)
+        self.dap.request("cancel", {"requestId": 999}, success=False)
         self.dap.request("disconnect", {"terminateDebuggee": True})
         self.dap.event("terminated")
         self.dap.close()
@@ -308,6 +309,10 @@ class MobileDapTests(unittest.TestCase):
 
     def test_unknown_tunnel_never_deploys(self):
         self.dap.request("launch", {"mobile": self.options("android") | {"tunnel": {"provider": "physical-device"}}}, success=False)
+        self.assertFalse((self.state / "commands.jsonl").exists())
+
+    def test_desktop_environment_options_are_not_silently_ignored(self):
+        self.dap.request("launch", {"mobile": self.options("android"), "env": {"IGNORED": "not-allowed"}}, success=False)
         self.assertFalse((self.state / "commands.jsonl").exists())
 
     def test_eof_releases_owned_forward(self):

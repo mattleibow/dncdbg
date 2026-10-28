@@ -53,8 +53,9 @@ acquires a fresh session-bound endpoint/token and owns the debugger route.
 `replaceExisting` defaults to false. `uninstallOnDisconnect` defaults to false.
 The startup timeout defaults to 60 seconds (allowed range 1–300).
 
-Do not combine `mobile` with `program`, `project`, `noDebug`, `stopAtEntry` or
-terminal launch. Unsupported options/requests are rejected instead of routed
+Do not combine `mobile` with desktop launch/build/environment/source-map,
+JIT/evaluation, terminal, `noDebug` or `stopAtEntry` options.
+Unsupported options/requests are rejected instead of routed
 to the desktop engine.
 
 ## Transport and lifecycle
@@ -110,6 +111,8 @@ Explicit limitations:
 - No func-eval, property getters, `ToString`, setters, memory reads/writes,
   conditional/hit-count/log/function breakpoints, targeted step-in, single-thread
   execution, set-next-statement, hot reload or async-aware stepping.
+- Per-request DAP cancellation is unsupported and reported as such; disconnect
+  cancels deployment or closes the owned debugger session.
 - Strings over 4096 UTF-16 units, multidimensional/nonzero-based arrays and
   values without supported representations fail explicitly. Missing type
   symbols display an explicit unavailable value, not invented children.

@@ -13,16 +13,17 @@ void Check(bool valid, const char* name) {
 struct Fake final : Controller {
     uint32_t refs = 1;
     int continues = 0;
+    int stops = 0, detaches = 0;
     HResult QueryInterface(const Guid&, void**) override { return Fail; }
     uint32_t AddRef() override { return ++refs; }
     uint32_t Release() override { return --refs; }
-    HResult Stop(uint32_t) override { return 0; }
+    HResult Stop(uint32_t) override { ++stops; return 0; }
     HResult Continue(Bool) override { ++continues; return 0; }
     HResult IsRunning(Bool*) override { return 0; }
     HResult HasQueuedCallbacks(void*, Bool*) override { return 0; }
     HResult EnumerateThreads(void**) override { return 0; }
     HResult SetAllThreadsDebugState(uint32_t, void*) override { return 0; }
-    HResult Detach() override { return 0; }
+    HResult Detach() override { ++detaches; return 0; }
     HResult Terminate(uint32_t) override { return 0; }
     HResult CanCommitChanges(uint32_t, Unknown**, Unknown**) override { return 0; }
     HResult CommitChanges(uint32_t, Unknown**, Unknown**) override { return 0; }
@@ -105,5 +106,43 @@ int main() {
         Check(controller.continues == 1 && controller.refs == 1 && thread.refs == 1 && frame.refs == 1 && frames.empty(),
             "native disconnect while stopped relinquishes every owned lease once");
     }
+    bool malformedBounded = true;
+    for (bool stopped : {false, true}) {
+        Fake controller, thread, frame;
+        int fd = Connect();
+        controller.AddRef(); process = &controller;
+        if (stopped) {
+            Enqueue(&controller, &thread, CallbackKind::Breakpoint); Pump();
+            frame.AddRef(); frames.emplace(NewId(), &frame);
+        }
+        std::thread owner(Run, nullptr);
+        Wire wire{fd, [] {}, Clock::now() + std::chrono::seconds(5)};
+        Send(wire, 1, 1, {{"Token", std::string(64, 'a')}}); wire.Read();
+        wire.deadline = Clock::now() + std::chrono::seconds(1);
+        Send(wire, 2, 8, Json::object()); // Authenticated Release missing Handles.
+        bool bounded = false;
+        try {
+            Json response = wire.Read();
+            bounded = response.at("Version") == 1 && response.at("Sequence") == 2 &&
+                response.at("Operation") == 8 && response.at("Error") == "MalformedPayload";
+        } catch (const std::runtime_error& error) {
+            bounded = std::strcmp(error.what(), "Disconnected") == 0;
+        }
+        bool completedBeforeClientClose = false;
+        while (Clock::now() < wire.deadline) {
+            if (ownerFinished.load()) { completedBeforeClientClose = true; break; }
+            usleep(1000);
+        }
+        close(fd); owner.join();
+        malformedBounded &= bounded && completedBeforeClientClose;
+        Check(controller.continues == (stopped ? 1 : 0) && controller.stops == 1 && controller.detaches == 1 &&
+            controller.refs == 1 && thread.refs == 1 && frame.refs == 1 && frames.empty() && !process &&
+            !stoppedController && !stoppedThread && listener == -1 && ownerFinished.load(),
+            stopped ? "malformed stopped Release cleans/continues/detaches exactly once" :
+                      "malformed idle Release cleans/detaches exactly once");
+        std::cout << (bounded && completedBeforeClientClose ? "PASS" : "FAIL")
+                  << ": malformed " << (stopped ? "stopped" : "idle") << " Release terminates within 1s\n";
+    }
+    Check(malformedBounded, "authenticated malformed Release gets correlated MalformedPayload or EOF and cleanup within 1s");
     std::cout << "Passed " << checks << " native contract checks (fakes, not mobile runtime proof).\n";
 }

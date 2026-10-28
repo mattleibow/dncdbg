@@ -113,7 +113,7 @@ Cannot attach to process <pid>: The .NET runtime could not be debugged:
 the runtime reported the error CORDBG_E_DEBUG_COMPONENT_MISSING.
 ```
 
-The repeatable runner's attach after UI validation, with the debugger's existing
+Before the IPC configuration fix described below, the runner's attach after UI validation, with the debugger's existing
 `10.0.745401` dependency, instead timed out with `the runtime did not answer`;
 the default diagnostic IPC endpoint was also unreachable. Both attempts failed.
 The supplementary helper did not change the debugger's dependency manifest.
@@ -139,6 +139,124 @@ The .NET 11 iOS Debug/Release and Android Debug builds succeeded with zero
 warnings/errors. Release reference evaluation excludes both DevFlow and Remote
 even when the experimental property is supplied.
 Earlier .NET 10 evidence remains below for history only.
+
+## Public startup phase investigation
+
+The startup probe now tests individual public operations rather than treating a
+failed `DebugEngine.Attach` as a single opaque error:
+
+1. Allowlisted target startup environment, working/native/temp directories.
+2. Public `DiagnosticsClient.GetProcessEnvironment` reachability (the returned
+   environment is discarded, never logged).
+3. `EnumerateCLRs` and `CreateVersionStringFromModule`.
+4. `CreateDebuggingInterfaceFromVersionEx`.
+5. `CreateDebuggingInterfaceFromVersion3` with a generated-COM
+   `ICLRDebuggingLibraryProvider3`.
+6. `RegisterForRuntimeStartup`, callback delivery, and deterministic unregister.
+
+Each phase is appended to JSONL before/after native calls, so a failed helper
+still identifies its last operation. Helpers have an external deadline. Native
+library-load probes run in separate processes and call no private export.
+
+### Confirmed iOS DBI failure
+
+Runtime enumeration returns **`S_OK`, one CLR** and creation of its opaque
+version string succeeds. Discovery is not the blocker.
+
+The packaged `libmscordbi.dylib` is arm64 **`IOSSIMULATOR`**, not `MACOS`.
+A separate public `NativeLibrary.Load` test in the macOS host fails with:
+
+```text
+incompatible platform (have 'iOS-simulator', need 'macOS')
+```
+
+The corresponding public dbgshim factory returns
+`CORDBG_E_DEBUG_COMPONENT_MISSING`; the published dbgshim source maps failure
+to load DBI to that HRESULT. Supplying the exact packaged DBI/DAC through the
+public version-3 provider does not change the result.
+
+The provider records and validates its public runtime build-identity request:
+the iOS runtime UUID is `6907233237423C4CB8189F481F1CF5DA`; the same-version
+desktop runtime is `6BB5037327BB336CB48F3CAE461D3F9D`. The latter is rejected.
+A product-version match is not permission to assume compatible native layouts.
+The UUID reader uses public Mach-O `LC_UUID` metadata, not CLR structure offsets.
+Synthetic metadata tests cover accepted identity, mismatch and malformed input.
+
+The official `dotnet-symbol --debugging` lookup also retrieved DBI/DAC indexed by
+the iOS runtime identity. Those files are still tagged **IOSSIMULATOR**. No Mach-O
+platform tags, native identities, runtime binaries or loader checks were patched.
+
+### Confirmed callback timeout cause and public configuration fix
+
+The runtime and host initially use different temp/IPC directories.
+`RegisterForRuntimeStartup` returns `S_OK` and a token, but the post-UI callback
+does not arrive. The published dbgshim PAL tests debugger-transport readiness in
+its selected IPC directory before enumerating modules for the callback.
+
+Setting `SIMCTL_CHILD_TMPDIR` was **not effective**: the target startup snapshot
+still showed its simulator-container directory. The working configuration is the
+documented SDK `AppBundleExtraOptions --setenv=TMPDIR=...`, applied **before**
+CoreCLR initializes, with the helper launched using the same project-owned
+directory. The target snapshot confirms the value and the callback now arrives,
+returning `CORDBG_E_DEBUG_COMPONENT_MISSING` rather than timing out. Its
+registration token is unregistered in both the red and configured cases.
+
+This fixes notification configuration, not the independent DBI ABI failure.
+It is opt-in and does not change the normal debugger or global environment.
+
+### Diagnostics is a separate public transport
+
+The default PID-based diagnostics endpoint and a direct UDS diagnostic-port
+experiment did not connect. Long generated endpoint paths and the separate
+mobile namespace must not be confused with absence of the CLR.
+
+The documented mobile **TCP** route succeeded on both the iOS simulator and
+Android emulator:
+
+```text
+DOTNET_DiagnosticPorts=127.0.0.1:PORT,nosuspend,connect
+    -> dotnet-dsrouter client-server
+    -> short project-owned IPC socket
+    -> dotnet-trace collect
+```
+
+Actual EventPipe traces were collected with exit code zero on both. This demonstrates
+diagnostic connectivity only; EventPipe is **not** an `ICorDebug` execution
+controller and cannot substantiate the breakpoint gate. The runner supports
+the public TCP route for the emulator through an individually owned ADB
+reverse and Debug-only `AndroidEnvironment` file. It never treats an Android
+PID as a host PID.
+
+### Reference and official-source boundaries
+
+The pinned JaneySprings agent loads target-ABI DBI in the target process and
+directly calls `DllMain` and `CoreCLRCreateCordbObject3`. Its native thread also
+avoids suspending a managed execution owner. Those observations explain why
+its topology differs; they do not make those exports public APIs. This branch
+does not call them or adopt its generic vtable invocation.
+
+The inspected published dbgshim source is pinned to
+`dotnet/diagnostics@ad724c4b85e7ae775e42f393c6e95a7557a57954`.
+The runtime pack identifies
+`dotnet/dotnet@3551975be08744f0418857c5bed8ab1545c5dd47`; its
+`src/runtime/docs/workflow/building/coreclr/android.md` explicitly states that
+managed debugging in that CoreCLR Android workflow is not supported. The APK
+contains target DBI/DAC but no target-native public dbgshim. A target-native
+public bootstrap or verified host-compatible cross-debugging payload remains
+missing; it is not replaced with a desktop library of the same version.
+
+Exact red/configured phase logs, allowlisted snapshots, loader results, public
+symbol lookup output and TCP trace evidence are under
+`build/validation/mobile/startup-research/` and
+`build/validation/mobile/net11-default/`. Neither platform's managed breakpoint
+gate is green. No PR or merge is authorized by diagnostic trace success.
+
+The expanded portable/desktop suite passes **52 checks**, and the existing local
+smoke suite still passes **96**. The final configured iOS `DebugEngine.Attach`
+now reports the delivered component-load error instead of `the runtime did not
+answer`. Android UI/capability probes and the TCP trace pass; no host attach
+attempt is made with an emulator PID. DevFlow's Android broker-wait/fallback
+limitation is unchanged and remains separately reported.
 
 ## Historical .NET 10 baseline (superseded for the current fixture)
 

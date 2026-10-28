@@ -109,6 +109,69 @@ taps, queries and screenshots work. However, preview.12 **broker registration /
 contains it. This discrepancy is recorded, not silently counted as a pass.
 The broker was left running and unchanged; no global forwarding reset was used.
 
+## Phase-specific public startup tests
+
+The Debug fixture additionally writes `dncdbg-startup.json` in its private app
+data directory. It contains only an allowlist of diagnostics/profiler environment
+variables and public runtime/directory information, never the remote token or a
+full environment dump. App shutdown/uninstall removes it.
+
+For detailed red/configured evidence:
+
+```sh
+# Install only missing tools into the ignored worktree directory.
+dotnet tool install --tool-path build/tools dotnet-dsrouter
+# dotnet-trace must also be on PATH; use its current
+# dotnet-sampled-thread-time profile, not the collect-linux cpu-sampling profile.
+
+python3 tests/DncDbg.MauiTestApp/validate.py --platform ios \
+  --device YOUR_OWNED_SIMULATOR_UDID \
+  --build-developer-dir /Applications/Xcode-26.6.0.app/Contents/Developer \
+  --startup-probes --shared-debugger-ipc --diagnostic-trace \
+  --public-attach-probe
+
+python3 tests/DncDbg.MauiTestApp/validate.py --platform android \
+  --device YOUR_OWNED_EMULATOR_SERIAL --agent-port 9223 --allow-fallback \
+  --startup-probes --diagnostic-trace
+```
+
+`--shared-debugger-ipc` uses the documented SDK
+`AppBundleExtraOptions --setenv=TMPDIR=...` and the same environment for the
+probe. `SIMCTL_CHILD_TMPDIR` alone was not honored. This fixes callback
+notification timeout, not the target DBI's incompatible iOS-simulator/macOS ABI.
+The directories are newly created beneath the worktree and removed in cleanup;
+no system temp directory is created, scanned or used for scratch artifacts.
+
+`--diagnostic-trace` configures the public mobile TCP diagnostic port before
+runtime startup, routes it through the official `dotnet-dsrouter` CLI to a short
+project-owned IPC socket, and collects a bounded EventPipe trace. Android uses a
+Debug-only `AndroidEnvironment` item and a single owned ADB reverse. The iOS
+negative UDS experiment is retained as `--diagnostic-transport uds`. Tracer,
+router, socket and forward cleanup is tied to this run.
+
+`--startup-probes` calls the documented dbgshim factories, records exact HRESULTs
+and callback delivery, and exercises `ICLRDebuggingLibraryProvider3` against
+target and desktop candidates. The provider requires the exact public Mach-O
+runtime UUID: it refuses to substitute desktop DBI/DAC merely because the product
+version is the same. Android PIDs are never passed to a host attach call.
+
+The lower-level diagnostic commands are available independently:
+
+```sh
+dotnet run --project tests/DncDbg.RemoteTests -- \
+  --load-probe PATH_TO_PACKAGED_DBI
+
+dotnet run --project tests/DncDbg.RemoteTests -- \
+  --startup-probe OWNED_HOST_VISIBLE_PID PATH_TO_LOADED_CORECLR report.json \
+  --libraries PATH_TO_EXPLICIT_DEBUG_COMPONENTS
+```
+
+Use the simulator's host-visible PID only. The loader probe returns 2 on failure;
+the startup phase probe returns 0 only for an initialized factory, otherwise 2.
+Neither constitutes the separate managed-breakpoint/evaluate/continue gate.
+JSONL records identify the last operation even if a native call fails. See the
+architecture audit for red results and why no mobile debugger support is claimed.
+
 ### Completing the actual debugger gate
 
 Once a public native startup/backend is available, the mobile test must:

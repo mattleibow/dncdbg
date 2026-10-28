@@ -106,10 +106,13 @@ jobs:
           manager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           { yes || true; } | "$manager" --licenses > build/validation/android-provision/licenses.log
           "$manager" --channel=0 --install \
-            "cmdline-tools;21.0" "platform-tools" "platforms;android-37" "build-tools;37.0.0" \
+            "cmdline-tools;21.0" "platform-tools" "platforms;android-37.0" "build-tools;37.0.0" \
             "ndk;29.0.14206865" "emulator" \
             "system-images;android-37.1;google_apis_ps16k;x86_64" \
-            > build/validation/android-provision/sdkmanager.log 2>&1
+            > build/validation/android-provision/sdkmanager.log 2>&1 || {
+              cat build/validation/android-provision/sdkmanager.log
+              exit 1
+            }
           "$ANDROID_HOME/emulator/emulator" -accel-check
       - name: Install exact workload and DevFlow CLI
         shell: bash

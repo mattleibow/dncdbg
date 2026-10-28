@@ -18,6 +18,7 @@ internal sealed class EngineBackend(string program, string resultPath) : IRemote
     private Process? target;
     private volatile bool targetExited;
     public int ProcessId { get; private set; }
+    public Exception? CleanupError { get; private set; }
     public RemoteCapabilities Capabilities { get; } = new(".NET desktop / public ICorDebug", "Desktop proof only", true, null);
 
     public ValueTask<RemoteBreakpoint[]> SetBreakpointsAsync(RemoteBreakpoints request, CancellationToken cancellationToken)
@@ -128,10 +129,10 @@ internal sealed class EngineBackend(string program, string resultPath) : IRemote
         }
     }
 
-    public ValueTask DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         if (disposed)
-            return ValueTask.CompletedTask;
+            return;
         disposed = true;
         if (subscribed)
         {
@@ -139,8 +140,23 @@ internal sealed class EngineBackend(string program, string resultPath) : IRemote
             engine.Exited -= OnExited;
         }
         frames.Dispose();
-        try { engine.Detach(); }
+        try
+        {
+            engine.Detach();
+            // Keep the Windows native-debug pipeline and redirected handles alive
+            // until the detached fixture has committed its result and exited.
+            if (target != null)
+            {
+                await target.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+                Console.WriteLine("[desktop-fixture] Detached target exit observed.");
+            }
+        }
+        catch (Exception error)
+        {
+            CleanupError = error;
+            Console.Error.WriteLine("[desktop-fixture] Cleanup failed: " + error);
+            throw;
+        }
         finally { engine.Dispose(); target?.Dispose(); }
-        return ValueTask.CompletedTask;
     }
 }

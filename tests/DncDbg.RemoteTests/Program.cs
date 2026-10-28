@@ -362,6 +362,7 @@ async Task TestDesktopAsync(string fixture, string source, string results)
 
             }
             await agent.DisposeAsync();
+            Check(backend!.CleanupError == null, "desktop fixture cleanup completes without a swallowed failure");
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
             timeout.CancelAfter(TimeSpan.FromSeconds(10));
             try

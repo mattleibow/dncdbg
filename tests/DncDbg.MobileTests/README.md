@@ -64,6 +64,8 @@ their own target frameworks.
   official `sdkmanager`; if its catalog no longer supplies the pinned revision,
   provision a verified retained SDK instead of substituting a newer image.
   The runner invokes `avdmanager`/`emulator` directly and requires acceleration.
+  Console ports stay inside the official **5554–5584 even** range; each paired
+  ADB port must also be free. No daemon reset or out-of-range port is used.
 - **Hosted Android x64:** Linux x86_64, accessible **`/dev/kvm`**, emulator
   **37.2.12**, image
   **`system-images;android-37.1;google_apis_ps16k;x86_64` revision 9**,
@@ -96,6 +98,9 @@ requested RID's architecture against the actual target capability.
 4. Build explicit Debug-only native/managed watchdog fault injection and run
    **all** acquisition, redeployment, running/stopped target-death and watchdog
    faults (plus Android committed allocation/rebind cancellation races).
+   Positive and fault drivers use the same copied fixture/collectible PE+PDB
+   catalog, not thousands of unrelated infrastructure symbol fragments from
+   the complete build directory.
 5. Always restore the ordinary helper/package; require its fault export absent;
    rerun the full real suite. Retain the original direct-client **continue and
    stopped-disconnect** proofs on each platform as additional regressions.

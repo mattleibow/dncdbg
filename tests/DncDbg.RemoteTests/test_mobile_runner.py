@@ -46,6 +46,23 @@ class MobileRunnerTests(unittest.TestCase):
                 self.suite.build("Release")
         self.assertIn("-p:DncDbgMobileTestPlatform=android", evaluate.call_args.args)
 
+    def test_mobile_catalog_copies_only_matching_fixture_symbols(self):
+        from run_device import copy_debug_assets
+        source = self.output / "input"
+        source.mkdir()
+        names = {f"{name}.{extension}" for name in ("DncDbg.MauiTestApp", "DncDbg.ReloadFixture")
+                 for extension in ("dll", "pdb")}
+        for name in names | {"DncDbg.Remote.dll", "DncDbg.Remote.pdb"}:
+            (source / name).write_bytes(name.encode())
+        destination = copy_debug_assets(source, self.output / "catalog")
+        self.assertEqual({p.name for p in destination.iterdir()}, names)
+        for name in names:
+            self.assertEqual((destination / name).read_bytes(), (source / name).read_bytes())
+
+    def test_emulator_ports_stay_inside_the_official_console_and_adb_range(self):
+        from run_suite import ANDROID_CONSOLE_PORTS
+        self.assertEqual(list(ANDROID_CONSOLE_PORTS), list(range(5554, 5586, 2)))
+
     @unittest.skipUnless(os.name == "posix", "Portable no-op console helper")
     def test_remote_console_helper_exits_without_running_contracts(self):
         result = subprocess.run(["dotnet", str(ROOT / "tests/DncDbg.RemoteTests/bin/Release/net10.0/DncDbg.RemoteTests.dll"),

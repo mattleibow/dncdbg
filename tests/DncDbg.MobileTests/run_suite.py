@@ -22,6 +22,7 @@ from process_tools import start_owned, stop_owned
 PIN = json.loads(Path(__file__).with_name("tuple.json").read_text())
 FIXTURE = ROOT / "tests/DncDbg.MauiTestApp"
 APP = "com.dncdbg.mobiletests"
+ANDROID_CONSOLE_PORTS = tuple(range(5554, 5586, 2))
 
 
 def require(condition, message):
@@ -158,7 +159,7 @@ class Suite:
             manager = sdk / f"cmdline-tools/{self.android.get('commandLineTools', 'latest')}/bin/avdmanager"
             self.run(manager, "create", "avd", "--name", name, "--package", self.android["systemImage"],
                      "--device", self.android["deviceType"], input="no\n")
-            ports = list(range(5554, 5682, 2))
+            ports = list(ANDROID_CONSOLE_PORTS)
             random.shuffle(ports)
             for port in ports:
                 try:

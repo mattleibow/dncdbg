@@ -17,6 +17,14 @@ from mobile_tools import adb_path, tool_environment
 from test_dap import Dap, ROOT
 
 
+def copy_debug_assets(source, destination):
+    destination.mkdir(parents=True, exist_ok=True)
+    for name in ("DncDbg.MauiTestApp", "DncDbg.ReloadFixture"):
+        for extension in ("dll", "pdb"):
+            shutil.copyfile(source / f"{name}.{extension}", destination / f"{name}.{extension}")
+    return destination
+
+
 def ios_ui_port(registration, pid, session):
     assert registration["platform"] == "iOS", "Broker returned a different platform"
     assert registration["processId"] == pid, "Broker returned a different process"
@@ -95,11 +103,7 @@ def main():
     parser.add_argument("--ui-session")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
-    assets = args.output / "assets"
-    assets.mkdir(exist_ok=True)
-    for extension in ("dll", "pdb"):
-        shutil.copyfile(args.assets / ("DncDbg.MauiTestApp." + extension), assets / ("DncDbg.MauiTestApp." + extension))
-        shutil.copyfile(args.assets / ("DncDbg.ReloadFixture." + extension), assets / ("DncDbg.ReloadFixture." + extension))
+    assets = copy_debug_assets(args.assets, args.output / "assets")
     adb = adb_path() if args.platform == "android" else None
     env = tool_environment(args.platform) | {"DNCDBG_LOG_DIR": str(args.output.resolve())}
     dap = Dap(env, timeout=120)

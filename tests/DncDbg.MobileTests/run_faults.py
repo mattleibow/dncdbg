@@ -11,7 +11,7 @@ import sys
 import time
 
 from mobile_tools import adb_path, tool_environment
-from run_device import Ui, verify_ui, ios_ui_port
+from run_device import Ui, verify_ui, ios_ui_port, copy_debug_assets
 from test_dap import Dap, ROOT
 
 APP = "com.dncdbg.mobiletests"
@@ -30,12 +30,13 @@ def main():
     args = parser.parse_args()
     args.output = args.output.resolve()
     args.output.mkdir(parents=True, exist_ok=True)
+    assets = copy_debug_assets(args.assets, args.output / "assets")
     adb = adb_path() if args.platform == "android" else None
     xcrun = shutil.which("xcrun")
     base_env = tool_environment(args.platform)
     options = {
         "platform": args.platform, "deviceId": args.device, "applicationId": APP,
-        "appPath": str(args.app.resolve()), "assetsPath": str(args.assets.resolve()),
+        "appPath": str(args.app.resolve()), "assetsPath": str(assets),
         "runtimeIdentifier": args.runtime_identifier or ("android-arm64" if args.platform == "android" else "iossimulator-arm64"),
         "startupTimeoutSeconds": 90, "replaceExisting": False, "uninstallOnDisconnect": False,
     }

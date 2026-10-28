@@ -171,12 +171,14 @@ def main():
         ui.send("MAUI tap --automationId throw-scenario")
         observed_exceptions = []
         for _ in range(32):
-            exception, exception_frame = stack()
+            exception = dap.event("stopped")
+            exception_frames = dap.request("stackTrace", {"threadId": exception["threadId"]})["stackFrames"]
             check(exception["reason"] == "exception", "DAP thrown-exception stop")
             info = dap.request("exceptionInfo", {"threadId": exception["threadId"]})
             observed_exceptions.append(info["exceptionId"])
             evidence["exceptions"] = observed_exceptions
-            if info["exceptionId"] == "System.InvalidOperationException" and exception_frame["name"].endswith("ThrowScenario"):
+            if info["exceptionId"] == "System.InvalidOperationException" and any(f["name"].endswith("ThrowScenario") for f in exception_frames):
+                evidence["exceptionStack"] = exception_frames
                 break
             dap.request("continue", {"threadId": exception["threadId"]})
         else:

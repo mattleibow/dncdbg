@@ -73,7 +73,7 @@ Json VisibleVariables(ILFrame* frame) {
     Require(frame->GetIP(&offset, &mapping));
     if (method.is_null()) throw std::runtime_error("SymbolsUnavailable");
     for (auto& item : method.at("Variables"))
-        if (offset >= item.at("StartOffset").get<uint32_t>() && offset < item.at("EndOffset").get<uint32_t>())
+        if (offset >= item.value("StartOffset", 0u) && offset < item.value("EndOffset", static_cast<uint32_t>(INT32_MAX)))
             variables.push_back(item);
     return variables;
 }
@@ -197,6 +197,36 @@ Json ModelStackFrame(Frame* frame, uint32_t token, uint32_t offset, int64_t hand
     return {{"Handle", handle}, {"Name", method.is_null() ? Json("method " + std::to_string(token)) : method.at("Name")},
         {"Source", point.is_null() ? Json(nullptr) : point.at("Source")}, {"Line", point.is_null() ? Json(0) : point.at("Line")},
         {"StopId", stopId}, {"Mvid", mvid}, {"MethodToken", token}, {"IlOffset", offset}};
+}
+Json ModelFullStack() {
+    Ref<ChainEnum> chains;
+    Require(static_cast<Thread*>(stoppedThread)->EnumerateChains(reinterpret_cast<Unknown**>(&chains.value)));
+    Json result = Json::array();
+    for (int c = 0; c < 128 && result.size() < 128; ++c) {
+        Ref<Chain> chain;
+        uint32_t fetched = 0;
+        Require(chains.value->Next(1, &chain.value, &fetched));
+        if (!fetched) break;
+        Bool managed = 0; Require(chain.value->IsManaged(&managed));
+        if (!managed) continue;
+        Ref<FrameEnum> entries;
+        Require(chain.value->EnumerateFrames(&entries.value));
+        while (result.size() < 128) {
+            Ref<Frame> frame;
+            Require(entries.value->Next(1, &frame.value, &fetched));
+            if (!fetched) break;
+            Ref<ILFrame> il;
+            uint32_t token = 0, offset = 0, mapping = 0;
+            if (frame.value->QueryInterface(ILFrameId, reinterpret_cast<void**>(&il.value)) < 0 ||
+                frame.value->GetFunctionToken(&token) < 0 || il.value->GetIP(&offset, &mapping) < 0) continue;
+            if (frames.size() + modelLeases.size() >= 4096) throw std::runtime_error("HandleLimit");
+            int64_t handle = NewId();
+            Json row = ModelStackFrame(frame.value, token, offset, handle);
+            frame.value->AddRef(); frames.emplace(handle, frame.value);
+            result.push_back(std::move(row));
+        }
+    }
+    return result;
 }
 int64_t Lease(Unknown* value, bool scope = false, Json variables = nullptr) {
     if (modelLeases.size() + frames.size() >= 4096) throw std::runtime_error("HandleLimit");
@@ -522,8 +552,8 @@ void ModelConfigure(const Json& request) {
             for (auto& variable : method.at("Variables"))
                 if (variable.at("Name").get<std::string>().size() > 256 || !variable.at("Parameter").is_boolean() ||
                     variable.at("Index").get<int>() < 0 || variable.at("Index").get<int>() > 65535 ||
-                    variable.at("StartOffset").get<int64_t>() < 0 ||
-                    variable.at("EndOffset").get<int64_t>() < variable.at("StartOffset").get<int64_t>())
+                    variable.value("StartOffset", int64_t{0}) < 0 ||
+                    variable.value("EndOffset", int64_t{INT32_MAX}) < variable.value("StartOffset", int64_t{0}))
                     throw std::runtime_error("InvalidState");
             for (auto& point : method.at("Points"))
                 if (point.at("Offset").get<int64_t>() < 0 || point.at("Offset").get<int64_t>() > UINT32_MAX ||

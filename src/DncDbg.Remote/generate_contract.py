@@ -35,21 +35,53 @@ native = ["// Generated from contract.json by generate_contract.py. Do not edit.
           "#pragma once", '#include "Wire.h"', "namespace dncdbg {", "enum class Operation {"]
 native += [f"    {name} = {number}," for name, number, _, _ in schema["operations"]]
 native += ["};", f"constexpr int ModelVersion = {schema['modelVersion']};",
-           "inline void ValidateRequest(int operation, const Json& body) {",
-           '    if (!body.is_object()) throw std::runtime_error("MalformedPayload");', "    switch (operation) {"]
+           "inline bool ContractInteger(const Json& value, int64_t minimum, int64_t maximum) {",
+           "    if (!value.is_number_integer()) return false;",
+           "    if (value.is_number_unsigned()) { uint64_t number = value.get<uint64_t>();",
+           "        return number <= static_cast<uint64_t>(maximum) && (minimum <= 0 || number >= static_cast<uint64_t>(minimum)); }",
+           "    int64_t number = value.get<int64_t>(); return number >= minimum && number <= maximum;",
+           "}",
+           "inline void ValidateEnvelope(const Json& body) {",
+           '    if (!body.is_object() || !ContractInteger(body.at("Version"), 0, 2147483647LL) ||',
+           '        !ContractInteger(body.at("Operation"), 0, 2147483647LL) ||',
+           '        !ContractInteger(body.at("Sequence"), 1, 9223372036854775807LL)) throw std::runtime_error("MalformedPayload");',
+           "}"]
+native += [f"inline void Validate_{name}(const Json& body);" for name in schema["records"]]
+
+
+def native_check(kind, value, indent):
+    kind = kind.removesuffix("?")
+    if kind.endswith("[]"):
+        return [indent + f'if (!{value}.is_array()) throw std::runtime_error("MalformedPayload");',
+                indent + f"for (const auto& element : {value}) {{",
+                *native_check(kind[:-2], "element", indent + "    "), indent + "}"]
+    if kind in schema["records"]:
+        return [indent + f"Validate_{kind}({value});"]
+    predicate = {
+        "int": f"ContractInteger({value}, -2147483648LL, 2147483647LL)",
+        "long": f"ContractInteger({value}, (-9223372036854775807LL - 1), 9223372036854775807LL)",
+        "string": f"{value}.is_string()", "bool": f"{value}.is_boolean()",
+    }.get(kind, f"{value}.is_object()")
+    return [indent + f'if (!({predicate})) throw std::runtime_error("MalformedPayload");']
+
+
+for name, fields in schema["records"].items():
+    native += [f"inline void Validate_{name}(const Json& body) {{",
+               '    if (!body.is_object()) throw std::runtime_error("MalformedPayload");']
+    for field in fields:
+        kind, name = field.split(" = ")[0].split()
+        optional = " = " in field or kind.endswith("?")
+        nullable = kind.endswith("?")
+        value = f'body.at("{name}")'
+        if optional:
+            condition = f'body.contains("{name}")' + (f" && !{value}.is_null()" if nullable else "")
+            native += [f"    if ({condition}) {{", *native_check(kind, value, "        "), "    }"]
+        else:
+            native += native_check(kind, value, "    ")
+    native += ["}"]
+native += ["inline void ValidateRequest(int operation, const Json& body) {", "    switch (operation) {"]
 for _, number, request, _ in schema["operations"]:
-    native += [f"        case {number}:"]
-    for field in schema["records"][request]:
-        if " = " in field:
-            continue
-        kind, name = field.split()
-        if kind.endswith("?"):
-            continue
-        check = "is_array" if kind.endswith("[]") else {
-            "string": "is_string", "int": "is_number_integer", "long": "is_number_integer",
-            "bool": "is_boolean"}.get(kind, "is_object")
-        native += [f'            if (!body.at("{name}").{check}()) throw std::runtime_error("MalformedPayload");']
-    native += ["            break;"]
+    native += [f"        case {number}: Validate_{request}(body); break;"]
 native += ["        default: break;", "    }", "}", "}", ""]
 outputs = {root / "RemoteContract.g.cs": "\n".join(cs),
            root.parent / "DncDbg.Remote.Target/RemoteContract.g.h": "\n".join(native)}

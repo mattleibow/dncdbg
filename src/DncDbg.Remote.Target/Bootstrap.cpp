@@ -71,6 +71,7 @@ void ModelModule(Unknown*, bool);
 void ModelThread(Unknown*, bool);
 void ModelDeactivateStepper();
 Json ModelStackFrame(Frame*, uint32_t, uint32_t, int64_t);
+Json ModelFullStack();
 Json ModelEvaluate(const Json&);
 constexpr Guid ILFrameId{0x03e26311, 0x4f76, 0x11d3, {0x88, 0xc6, 0, 0x60, 0x97, 0x94, 0x54, 0x18}};
 constexpr Guid GenericValueId{0xcc7bcaf8, 0x8a68, 0x11d2, {0x98, 0x3c, 0, 0, 0xf8, 8, 0x34, 0x2d}};
@@ -312,6 +313,7 @@ void Pump() {
 
 Json Stack() {
     if (!stoppedThread) throw std::runtime_error("InvalidState");
+    if (!catalog.empty()) return ModelFullStack();
     Ref<Frame> active;
     Report("stack-active-frame-enter");
     Require(static_cast<Thread*>(stoppedThread)->GetActiveFrame(&active.value));
@@ -498,6 +500,7 @@ void* Run(void*) {
 #endif
         Wire wire{connection, Pump, Clock::now() + std::chrono::seconds(5)};
         Json hello = wire.Read();
+        ValidateEnvelope(hello);
         if (hello.at("Version") != 1 || hello.at("Sequence") != 1 || hello.at("Operation") != 1) {
             wire.Reply(hello, Json::object(), "ProtocolMismatch");
             throw std::runtime_error("ProtocolMismatch");
@@ -518,6 +521,7 @@ void* Run(void*) {
         while (!done) {
             wire.deadline = Clock::now() + std::chrono::seconds(30);
             Json request = wire.Read();
+            ValidateEnvelope(request);
             if (request.at("Version") != 1 || request.at("Sequence") != ++sequence) throw std::runtime_error("SequenceMismatch");
             auto& body = request.at("Body");
             try {

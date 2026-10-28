@@ -60,6 +60,10 @@ int main() {
         try { ValidateRequest(static_cast<int>(Operation::Step), {{"Stop", 1}}); }
         catch (const std::exception&) { rejected = true; }
         Check(rejected, "generated native schema rejects a malformed typed step before execution");
+        rejected = false;
+        try { ValidateRequest(static_cast<int>(Operation::Variables), {{"Handle", 1}, {"Start", 1.5}, {"Count", 1}}); }
+        catch (const std::exception&) { rejected = true; }
+        Check(rejected, "generated schema rejects fractional optional indices before native integer conversion");
         Fake value;
         int64_t handle = Lease(&value);
         Check(value.refs == 2 && modelLeases.count(handle), "typed value lease retains exactly one native reference");
@@ -142,24 +146,26 @@ int main() {
             "native disconnect while stopped relinquishes every owned lease once");
     }
     bool malformedBounded = true;
-    for (bool stopped : {false, true}) {
-        Fake controller, thread, frame;
+    for (int malformedOperation : {8, 15}) for (bool stopped : {false, true}) {
+        Fake controller, thread, frame, value;
         int fd = Connect();
         controller.AddRef(); process = &controller;
         if (stopped) {
             Enqueue(&controller, &thread, CallbackKind::Breakpoint); Pump();
             frame.AddRef(); frames.emplace(NewId(), &frame);
+            Lease(&value);
         }
         std::thread owner(Run, nullptr);
         Wire wire{fd, [] {}, Clock::now() + std::chrono::seconds(5)};
         Send(wire, 1, 1, {{"Token", std::string(64, 'a')}}); wire.Read();
         wire.deadline = Clock::now() + std::chrono::seconds(1);
-        Send(wire, 2, 8, Json::object()); // Authenticated Release missing Handles.
+        Send(wire, 2, malformedOperation, malformedOperation == 8 ? Json::object() :
+            Json{{"Handle", 1}, {"Start", 1.5}}); // Missing required field or fractional optional index.
         bool bounded = false;
         try {
             Json response = wire.Read();
             bounded = response.at("Version") == 1 && response.at("Sequence") == 2 &&
-                response.at("Operation") == 8 && response.at("Error") == "MalformedPayload";
+                response.at("Operation") == malformedOperation && response.at("Error") == "MalformedPayload";
         } catch (const std::runtime_error& error) {
             bounded = std::strcmp(error.what(), "Disconnected") == 0;
         }
@@ -171,14 +177,14 @@ int main() {
         close(fd); owner.join();
         malformedBounded &= bounded && completedBeforeClientClose;
         Check(controller.continues == (stopped ? 1 : 0) && controller.stops == 1 && controller.detaches == 1 &&
-            controller.refs == 1 && thread.refs == 1 && frame.refs == 1 && frames.empty() && !process &&
+            controller.refs == 1 && thread.refs == 1 && frame.refs == 1 && value.refs == 1 && frames.empty() && modelLeases.empty() && !process &&
             !stoppedController && !stoppedThread && listener == -1 && ownerFinished.load(),
-            stopped ? "malformed stopped Release cleans/continues/detaches exactly once" :
-                      "malformed idle Release cleans/detaches exactly once");
+            stopped ? "malformed stopped typed request cleans/continues/detaches exactly once" :
+                      "malformed idle typed request cleans/detaches exactly once");
         std::cout << (bounded && completedBeforeClientClose ? "PASS" : "FAIL")
-                  << ": malformed " << (stopped ? "stopped" : "idle") << " Release terminates within 1s\n";
+                  << ": malformed " << (stopped ? "stopped" : "idle") << " operation " << malformedOperation << " terminates within 1s\n";
     }
-    Check(malformedBounded, "authenticated malformed Release gets correlated MalformedPayload or EOF and cleanup within 1s");
+    Check(malformedBounded, "authenticated malformed typed requests get correlated MalformedPayload or EOF and cleanup within 1s");
     {
         Fake controller;
         int fd = Connect();

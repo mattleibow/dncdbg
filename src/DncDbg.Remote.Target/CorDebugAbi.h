@@ -98,6 +98,32 @@ struct ILFrame : Frame {
     virtual HResult EnumerateArguments(Unknown**) = 0;
     virtual HResult GetArgument(uint32_t, Value**) = 0;
 };
+struct Enum : Unknown {
+    virtual HResult Skip(uint32_t) = 0;
+    virtual HResult Reset() = 0;
+    virtual HResult Clone(Unknown**) = 0;
+    virtual HResult GetCount(uint32_t*) = 0;
+};
+struct FrameEnum : Enum {
+    virtual HResult Next(uint32_t, Frame**, uint32_t*) = 0;
+};
+struct Chain : Unknown {
+    virtual HResult GetThread(Unknown**) = 0;
+    virtual HResult GetStackRange(uint64_t*, uint64_t*) = 0;
+    virtual HResult GetContext(Unknown**) = 0;
+    virtual HResult GetCaller(Chain**) = 0;
+    virtual HResult GetCallee(Chain**) = 0;
+    virtual HResult GetPrevious(Chain**) = 0;
+    virtual HResult GetNext(Chain**) = 0;
+    virtual HResult IsManaged(Bool*) = 0;
+    virtual HResult EnumerateFrames(FrameEnum**) = 0;
+    virtual HResult GetActiveFrame(Frame**) = 0;
+    virtual HResult GetRegisterSet(Unknown**) = 0;
+    virtual HResult GetReason(uint32_t*) = 0;
+};
+struct ChainEnum : Enum {
+    virtual HResult Next(uint32_t, Chain**, uint32_t*) = 0;
+};
 struct Thread : Unknown {
     virtual HResult GetProcess(Controller**) = 0;
     virtual HResult GetID(uint32_t*) = 0;

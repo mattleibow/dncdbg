@@ -123,6 +123,51 @@ struct GenericValue : Value {
     virtual HResult GetValue(void*) = 0;
     virtual HResult SetValue(void*) = 0;
 };
+struct StepRange { uint32_t start, end; };
+struct Stepper : Unknown {
+    virtual HResult IsActive(Bool*) = 0;
+    virtual HResult Deactivate() = 0;
+    virtual HResult SetInterceptMask(uint32_t) = 0;
+    virtual HResult SetUnmappedStopMask(uint32_t) = 0;
+    virtual HResult Step(Bool) = 0;
+    virtual HResult StepRange(Bool, dncdbg::StepRange*, uint32_t) = 0;
+    virtual HResult StepOut() = 0;
+    virtual HResult SetRangeIL(Bool) = 0;
+};
+struct Class : Unknown {
+    virtual HResult GetModule(Module**) = 0;
+    virtual HResult GetToken(uint32_t*) = 0;
+    virtual HResult GetStaticFieldValue(uint32_t, Frame*, Value**) = 0;
+};
+struct ReferenceValue : Value {
+    virtual HResult IsNull(Bool*) = 0;
+    virtual HResult GetValue(uint64_t*) = 0;
+    virtual HResult SetValue(uint64_t) = 0;
+    virtual HResult Dereference(Value**) = 0;
+    virtual HResult DereferenceStrong(Value**) = 0;
+};
+struct HeapValue : Value {
+    virtual HResult IsValid(Bool*) = 0;
+    virtual HResult CreateRelocBreakpoint(Unknown**) = 0;
+};
+struct ObjectValue : Value {
+    virtual HResult GetClass(Class**) = 0;
+    virtual HResult GetFieldValue(Class*, uint32_t, Value**) = 0;
+};
+struct StringValue : HeapValue {
+    virtual HResult GetLength(uint32_t*) = 0;
+    virtual HResult GetString(uint32_t, uint32_t*, char16_t*) = 0;
+};
+struct ArrayValue : HeapValue {
+    virtual HResult GetElementType(uint32_t*) = 0;
+    virtual HResult GetRank(uint32_t*) = 0;
+    virtual HResult GetCount(uint32_t*) = 0;
+    virtual HResult GetDimensions(uint32_t, uint32_t*) = 0;
+    virtual HResult HasBaseIndicies(Bool*) = 0;
+    virtual HResult GetBaseIndicies(uint32_t, uint32_t*) = 0;
+    virtual HResult GetElement(uint32_t, uint32_t*, Value**) = 0;
+    virtual HResult GetElementAtPosition(uint32_t, Value**) = 0;
+};
 struct MetadataImport : Unknown {
     virtual void CloseEnum(void*) = 0;
     virtual HResult CountEnum(void*, uint32_t*) = 0;
@@ -132,6 +177,8 @@ struct MetadataImport : Unknown {
     virtual HResult EnumTypeRefs(void**, uint32_t*, uint32_t, uint32_t*) = 0;
     virtual HResult FindTypeDefByName(const char16_t*, uint32_t, uint32_t*) = 0;
     virtual HResult GetScopeProps(char16_t*, uint32_t, uint32_t*, Guid*) = 0;
+    virtual HResult GetModuleFromScope(uint32_t*) = 0;
+    virtual HResult GetTypeDefProps(uint32_t, char16_t*, uint32_t, uint32_t*, uint32_t*, uint32_t*) = 0;
 };
 struct CorDebug : Unknown {
     virtual HResult Initialize() = 0;

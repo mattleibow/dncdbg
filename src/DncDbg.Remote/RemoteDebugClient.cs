@@ -7,7 +7,7 @@ namespace DncDbg.Remote;
 /// Host-side typed transport precursor. It is deliberately not advertised as a drop-in ICorDebug COM proxy.
 /// No runtime pointers, process addresses, vtable slots or native handles cross the connection.
 /// </summary>
-public sealed class RemoteDebugClient : IAsyncDisposable
+public sealed partial class RemoteDebugClient : IAsyncDisposable
 {
     private readonly TcpClient client = new();
     private readonly SemaphoreSlim gate = new(1);
@@ -42,6 +42,8 @@ public sealed class RemoteDebugClient : IAsyncDisposable
         CallAsync<RemoteEvaluation, RemoteValue>(RemoteOperation.Evaluate, new(frame, expression), token);
     public Task<RemoteEmpty> ContinueAsync(long stop, CancellationToken token) => CallAsync<RemoteId, RemoteEmpty>(RemoteOperation.Continue, new(stop), token);
     public Task<RemoteEmpty> ReleaseAsync(long[] handles, CancellationToken token) => CallAsync<RemoteHandles, RemoteEmpty>(RemoteOperation.Release, new(handles), token);
+    public Task<RemoteEmpty> DisconnectAsync(CancellationToken token) =>
+        CallAsync<RemoteEmpty, RemoteEmpty>(RemoteOperation.Disconnect, new(), token);
 
     private async Task<TResponse> CallAsync<TRequest, TResponse>(RemoteOperation operation, TRequest body, CancellationToken token)
     {

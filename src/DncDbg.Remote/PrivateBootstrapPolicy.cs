@@ -24,12 +24,12 @@ public static class PrivateBootstrapPolicy
 
     public static string? Validate(PrivateBootstrapIdentity observed, IReadOnlyCollection<string> exports)
     {
-        PrivateBootstrapIdentity? expected = SupportedBuilds.SingleOrDefault(x =>
-            x.Platform == observed.Platform && x.Architecture == observed.Architecture);
-        if (expected is null)
+        PrivateBootstrapIdentity[] candidates = SupportedBuilds.Where(x =>
+            x.Platform == observed.Platform && x.Architecture == observed.Architecture).ToArray();
+        if (candidates.Length == 0)
             return $"Unsupported private bootstrap platform/architecture {observed.Platform}/{observed.Architecture}. Only pinned arm64 simulator/emulator builds are allowed; no desktop DBI fallback.";
-        if (observed != expected)
-            return $"Private bootstrap build mismatch. Expected {expected}; observed {observed}. Rebuild with the exact pinned packs; do not bypass the allowlist or substitute desktop DBI.";
+        if (!candidates.Contains(observed))
+            return $"Private bootstrap build mismatch. Expected one of [{string.Join(", ", candidates.Select(x => x.ToString()))}]; observed {observed}. Rebuild with the exact pinned packs; do not bypass the allowlist or substitute desktop DBI.";
         foreach (string required in new[] { "DllMain", "CoreCLRCreateCordbObject3" })
             if (!exports.Contains(required))
                 return $"Pinned target DBI is missing required private export '{required}'. Activation refused; never substitute desktop DBI.";

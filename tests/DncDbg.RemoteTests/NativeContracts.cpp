@@ -53,6 +53,27 @@ void Send(Wire& wire, int64_t sequence, int operation, Json body, int version = 
 }
 
 int main() {
+    {
+        char16_t text[]{'A', 0xd83d, 0xde80, 0xd800};
+        Check(Utf8(text, 4) == "A\xf0\x9f\x9a\x80\xef\xbf\xbd", "UTF-16 strings preserve surrogate pairs and replace isolated surrogates");
+        bool rejected = false;
+        try { ValidateRequest(static_cast<int>(Operation::Step), {{"Stop", 1}}); }
+        catch (const std::exception&) { rejected = true; }
+        Check(rejected, "generated native schema rejects a malformed typed step before execution");
+        Fake value;
+        int64_t handle = Lease(&value);
+        Check(value.refs == 2 && modelLeases.count(handle), "typed value lease retains exactly one native reference");
+        ClearFrames();
+        Check(value.refs == 1 && modelLeases.empty(), "stop invalidation releases typed values/scopes exactly once");
+        rejected = false;
+        try { ModelVariables({{"Handle", handle}}); }
+        catch (const std::runtime_error& error) { rejected = std::strcmp(error.what(), "InvalidState") == 0; }
+        Check(rejected && value.refs == 1, "stale typed value generation cannot read or release a new stop");
+        rejected = false;
+        try { ModelConfigure({{"Modules", Json::array({{{"Mvid", "bad"}}})}}); }
+        catch (const std::exception&) { rejected = true; }
+        Check(rejected && catalog.empty(), "invalid module catalog cannot partially configure the owner");
+    }
     Check(!PlatformAllowed() && dncdbg_runtime_path() == nullptr &&
         dncdbg_start("unused", std::string(64, 'a').c_str(), "{}") == 0, "host cannot activate target private ABI");
     {

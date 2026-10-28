@@ -10,6 +10,15 @@ using DncDbg.Remote;
 using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(60));
 CancellationToken token = deadline.Token;
 int passed = 0;
+if (args is ["--symbols", var symbolAssets])
+{
+    var symbols = new RemoteSymbols(symbolAssets);
+    var chunks = symbols.ConfigurationChunks().ToArray();
+    int largest = chunks.Max(chunk => System.Text.Encoding.UTF8.GetByteCount(RemoteProtocol.Pack(chunk).GetRawText()));
+    Check(largest < RemoteProtocol.MaximumPayload - 1024, "symbol configuration chunks preserve the strict frame limit");
+    Console.WriteLine(JsonSerializer.Serialize(new { Modules = symbols.Modules.Length, Chunks = chunks.Length, Largest = largest }));
+    return;
+}
 if (args is ["--mobile-proof", var mobileDescriptor, var mobileSource, var mobileAssembly, var mobilePdb, var mobileAgentPort, var mobileMode])
 {
     await MobileBreakpointProof.RunAsync(mobileDescriptor, mobileSource, mobileAssembly, mobilePdb, mobileAgentPort,

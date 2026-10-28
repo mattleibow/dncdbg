@@ -1,6 +1,7 @@
 // Experimental private DBI startup. MIT adaptation attribution: THIRD-PARTY-NOTICES.md.
 #include "CorDebugAbi.h"
 #include "Wire.h"
+#include "RemoteContract.g.h"
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -33,7 +34,7 @@ std::atomic<bool> ownerFinished{false};
 std::atomic<bool> cancel{false};
 std::mutex queueMutex, reportMutex;
 std::condition_variable queueReady;
-enum class CallbackKind { Other, Breakpoint, Module, Domain };
+enum class CallbackKind { Other, Breakpoint, Step, Pause, ExceptionThrown, ExceptionUnhandled, ThreadAdded, ThreadRemoved, Module, ModuleRemoved, Domain };
 struct Callback { Controller* controller; Unknown* object; CallbackKind kind; };
 std::deque<Callback> callbacks;
 Controller* callbackProcess = nullptr;
@@ -59,6 +60,16 @@ int64_t stopId = 0, nextId = 0;
 bool stopReported = false;
 bool cleaning = false;
 std::unordered_map<int64_t, Unknown*> frames;
+Json catalog = Json::array(), mobileEvents = Json::array();
+std::string stopReason = "breakpoint";
+bool breakThrown = false, breakUnhandled = true;
+void ModelClear();
+void ModelBind(Unknown*);
+void ModelModule(Unknown*, bool);
+void ModelThread(Unknown*, bool);
+void ModelDeactivateStepper();
+Json ModelStackFrame(Frame*, uint32_t, uint32_t, int64_t);
+Json ModelEvaluate(const Json&);
 constexpr Guid ILFrameId{0x03e26311, 0x4f76, 0x11d3, {0x88, 0xc6, 0, 0x60, 0x97, 0x94, 0x54, 0x18}};
 constexpr Guid GenericValueId{0xcc7bcaf8, 0x8a68, 0x11d2, {0x98, 0x3c, 0, 0, 0xf8, 8, 0x34, 0x2d}};
 constexpr Guid MetadataId{0x7dac8207, 0xd3ae, 0x4c75, {0x9b, 0x67, 0x92, 0x80, 0x1a, 0x49, 0x7d, 0x44}};
@@ -126,9 +137,11 @@ public:
     uint32_t AddRef() override { return references.fetch_add(1) + 1; }
     uint32_t Release() override { return references.fetch_sub(1) - 1; }
     HResult Breakpoint(Controller* c, Unknown* thread, Unknown*) override { return Enqueue(c, thread, CallbackKind::Breakpoint); }
-    HResult StepComplete(Controller* c, Unknown*, Unknown*, uint32_t) override { return Enqueue(c); }
-    HResult Break(Controller* c, Unknown*) override { return Enqueue(c); }
-    HResult Exception(Controller* c, Unknown*, Bool) override { return Enqueue(c); }
+    HResult StepComplete(Controller* c, Unknown* t, Unknown*, uint32_t) override { return Enqueue(c, t, CallbackKind::Step); }
+    HResult Break(Controller* c, Unknown* t) override { return Enqueue(c, t, CallbackKind::Pause); }
+    HResult Exception(Controller* c, Unknown* t, Bool unhandled) override {
+        return Enqueue(c, t, unhandled ? CallbackKind::ExceptionUnhandled : CallbackKind::ExceptionThrown);
+    }
     HResult EvalComplete(Controller* c, Unknown*, Unknown*) override { return Enqueue(c); }
     HResult EvalException(Controller* c, Unknown*, Unknown*) override { return Enqueue(c); }
     HResult CreateProcess(Controller* c) override {
@@ -145,10 +158,10 @@ public:
         queueReady.notify_one();
         return 0;
     }
-    HResult CreateThread(Controller* c, Unknown*) override { return Enqueue(c); }
-    HResult ExitThread(Controller* c, Unknown*) override { return Enqueue(c); }
+    HResult CreateThread(Controller* c, Unknown* t) override { return Enqueue(c, t, CallbackKind::ThreadAdded); }
+    HResult ExitThread(Controller* c, Unknown* t) override { return Enqueue(c, t, CallbackKind::ThreadRemoved); }
     HResult LoadModule(Controller* c, Unknown* module) override { return Enqueue(c, module, CallbackKind::Module); }
-    HResult UnloadModule(Controller* c, Unknown*) override { return Enqueue(c); }
+    HResult UnloadModule(Controller* c, Unknown* module) override { return Enqueue(c, module, CallbackKind::ModuleRemoved); }
     HResult LoadClass(Controller* c, Unknown*) override { return Enqueue(c); }
     HResult UnloadClass(Controller* c, Unknown*) override { return Enqueue(c); }
     HResult DebuggerError(Controller*, HResult error, uint32_t) override {
@@ -172,7 +185,11 @@ public:
     HResult CreateConnection(Controller* c, uint32_t, const char16_t*) override { return Enqueue(c); }
     HResult ChangeConnection(Controller* c, uint32_t) override { return Enqueue(c); }
     HResult DestroyConnection(Controller* c, uint32_t) override { return Enqueue(c); }
-    HResult Exception(Controller* c, Unknown*, Unknown*, uint32_t, uint32_t, uint32_t) override { return Enqueue(c); }
+    HResult Exception(Controller* c, Unknown* t, Unknown*, uint32_t, uint32_t type, uint32_t) override {
+        if (type == 1 || type == 4)
+            return Enqueue(c, t, type == 4 ? CallbackKind::ExceptionUnhandled : CallbackKind::ExceptionThrown);
+        return Enqueue(c);
+    }
     HResult ExceptionUnwind(Controller* c, Unknown*, uint32_t, uint32_t) override { return Enqueue(c); }
     HResult FunctionRemapComplete(Controller* c, Unknown*, Unknown*) override { return Enqueue(c); }
     HResult MDANotification(Controller* c, Unknown*, Unknown*) override { return Enqueue(c); }
@@ -197,6 +214,7 @@ std::string Hex(const void* bytes, size_t count) {
 void ClearFrames() {
     for (auto& frame : frames) frame.second->Release();
     frames.clear();
+    ModelClear();
 }
 
 void ContinueStop() {
@@ -234,6 +252,7 @@ bool MatchesFrame(Unknown* frame, uint32_t token) {
 }
 
 void BindModule(Unknown* module) {
+    ModelBind(module);
     if (location.is_null() || functionBreakpoint || !MatchesModule(module)) return;
     Ref<Function> function;
     Ref<Code> code;
@@ -250,7 +269,7 @@ void BindModule(Unknown* module) {
 void Pump() {
     heartbeat.store(Milliseconds());
     if (cancel.load()) throw std::runtime_error("Canceled");
-    if (exited.load()) throw std::runtime_error("TargetExited");
+    if (exited.load()) return;
     for (int i = 0; i < 256; ++i) {
         Callback callback{};
         {
@@ -261,16 +280,27 @@ void Pump() {
         }
         Ref<Controller> controller{callback.controller};
         Ref<> object{callback.object};
-        if (callback.kind == CallbackKind::Breakpoint && !stoppedController && !cleaning) {
+        bool exception = callback.kind == CallbackKind::ExceptionThrown || callback.kind == CallbackKind::ExceptionUnhandled;
+        bool shouldStop = callback.kind == CallbackKind::Breakpoint || callback.kind == CallbackKind::Step ||
+            callback.kind == CallbackKind::Pause || (exception && (callback.kind == CallbackKind::ExceptionThrown ? breakThrown : breakUnhandled));
+        if (shouldStop && !stoppedController && !cleaning) {
             stoppedController = callback.controller;
             stoppedThread = callback.object;
             controller.value = nullptr; object.value = nullptr;
             stopId = NewId();
+            stopReason = exception ? "exception" : callback.kind == CallbackKind::Step ? "step" :
+                callback.kind == CallbackKind::Pause ? "pause" : "breakpoint";
+            ModelDeactivateStepper();
             Report("managed-breakpoint-callback");
             return;
         }
-        if (callback.kind == CallbackKind::Module) BindModule(callback.object);
-        if (callback.kind == CallbackKind::Domain) Require(static_cast<AppDomain*>(callback.object)->Attach());
+        if (!cleaning) {
+            if (callback.kind == CallbackKind::Module) { ModelModule(callback.object, true); BindModule(callback.object); }
+            if (callback.kind == CallbackKind::ModuleRemoved) ModelModule(callback.object, false);
+            if (callback.kind == CallbackKind::ThreadAdded) ModelThread(callback.object, true);
+            if (callback.kind == CallbackKind::ThreadRemoved) ModelThread(callback.object, false);
+            if (callback.kind == CallbackKind::Domain) Require(static_cast<AppDomain*>(callback.object)->Attach());
+        }
         HResult hr = callback.controller->Continue(0);
         Report("callback-continue-return", hr);
         Require(hr);
@@ -294,17 +324,19 @@ Json Stack() {
         Report("stack-il-ip-enter");
         if (tokenHr >= 0 && ilHr >= 0 && il.value->GetIP(&offset, &mapping) >= 0) {
             Report("stack-module-identity-enter");
-            bool matches = MatchesFrame(active.value, token);
+            bool matches = !location.is_null() && MatchesFrame(active.value, token);
             int64_t handle = NewId();
             if (frames.size() >= 4096) throw std::runtime_error("HandleLimit");
             active.value->AddRef();
             frames.emplace(handle, active.value);
             char fallback[32];
             std::snprintf(fallback, sizeof(fallback), "method 0x%08x", token);
-            result.push_back({{"Handle", handle}, {"Name", matches ? location.at("Method").get<std::string>() : std::string(fallback)},
+            Json row{{"Handle", handle}, {"Name", matches ? location.at("Method").get<std::string>() : std::string(fallback)},
                 {"Source", matches ? breakpoints.at("Source") : Json(nullptr)},
                 {"Line", matches && offset == location.at("IlOffset").get<uint32_t>() ? breakpoints.at("Lines")[0] : Json(0)},
-                {"MethodToken", token}, {"IlOffset", offset}, {"Mapping", mapping}});
+                {"MethodToken", token}, {"IlOffset", offset}, {"Mapping", mapping}, {"StopId", stopId}};
+            if (!catalog.empty()) row = ModelStackFrame(active.value, token, offset, handle);
+            result.push_back(row);
         }
         Ref<Frame> caller;
         Report("stack-caller-enter");
@@ -318,6 +350,7 @@ Json Stack() {
 }
 
 Json Evaluate(const Json& request) {
+    if (!catalog.empty()) return ModelEvaluate(request);
     int64_t handle = request.at("Frame").get<int64_t>();
     auto found = frames.find(handle);
     if (!stoppedController || found == frames.end()) throw std::runtime_error("InvalidState");
@@ -361,8 +394,10 @@ Json Evaluate(const Json& request) {
     return {{"Value", std::to_string(answer)}, {"Type", "int"}};
 }
 
+#include "MobileModel.h"
+
 void StartDebugging() {
-    if (debug || location.is_null()) throw std::runtime_error("InvalidState");
+    if (debug) throw std::runtime_error("InvalidState");
     Report("dllmain-enter");
     Bool initialized = dllMain(nullptr, 1, nullptr);
     Report("dllmain-return", initialized ? 0 : Fail);
@@ -396,6 +431,7 @@ void Cleanup() {
     cancel.store(false);
     if (stoppedController) ContinueStop();
     ClearFrames();
+    ModelDeactivateBreakpoints();
     if (functionBreakpoint) {
         HResult hr = functionBreakpoint->Activate(0);
         Report("breakpoint-deactivate-return", hr);
@@ -413,6 +449,7 @@ void Cleanup() {
         Require(hr);
     }
     if (process) { process->Release(); process = nullptr; }
+    ModelCleanup();
     if (ownsInitialize) {
         Report("terminate-enter");
         HResult hr = debug->Terminate();
@@ -471,9 +508,13 @@ void* Run(void*) {
             if (request.at("Version") != 1 || request.at("Sequence") != ++sequence) throw std::runtime_error("SequenceMismatch");
             auto& body = request.at("Body");
             try {
+                ValidateRequest(request.at("Operation").get<int>(), body);
                 Json result = Json::object();
                 switch (request.at("Operation").get<int>()) {
                     case 2:
+                        if (body.contains("Locations") && !body.at("Locations").is_null()) {
+                            result = ModelSetBreakpoints(body); break;
+                        }
                         if (debug || body.at("Source").get<std::string>().size() > 8192 || body.at("Lines").size() != 1 ||
                             body.at("Lines")[0].get<int>() <= 0 || body.at("Location").is_null()) throw std::runtime_error("InvalidState");
                         breakpoints = body;
@@ -493,6 +534,7 @@ void* Run(void*) {
                         if (!debug || stopReported) throw std::runtime_error("InvalidState");
                         while (!stoppedController) {
                             Pump();
+                            if (exited.load()) throw std::runtime_error("TargetExited");
                             if (Clock::now() >= wire.deadline) throw std::runtime_error("BreakpointTimeout");
                             char test;
                             if (recv(connection, &test, 1, MSG_PEEK) == 0) throw std::runtime_error("Disconnected");
@@ -501,7 +543,7 @@ void* Run(void*) {
                         {
                             uint32_t thread = 0;
                             Require(static_cast<Thread*>(stoppedThread)->GetID(&thread));
-                            result = {{"Id", stopId}, {"Reason", "breakpoint"}, {"ThreadId", thread}};
+                            result = {{"Id", stopId}, {"Reason", stopReason}, {"ThreadId", thread}};
                             stopReported = true;
                         }
                         break;
@@ -517,11 +559,42 @@ void* Run(void*) {
                         if (handles.size() > 4096) throw std::runtime_error("InvalidState");
                         std::unordered_map<int64_t, bool> seen;
                         for (auto handle : handles)
-                            if (!frames.count(handle) || !seen.emplace(handle, true).second) throw std::runtime_error("InvalidState");
-                        for (auto handle : handles) { frames.at(handle)->Release(); frames.erase(handle); }
+                            if ((!frames.count(handle) && !modelLeases.count(handle)) || !seen.emplace(handle, true).second)
+                                throw std::runtime_error("InvalidState");
+                        for (auto handle : handles) {
+                            if (frames.count(handle)) { frames.at(handle)->Release(); frames.erase(handle); }
+                            else { modelLeases.at(handle).value->Release(); modelLeases.erase(handle); }
+                        }
                         break;
                     }
                     case 9: done = true; break;
+                    case 10: ModelConfigure(body); break;
+                    case 11:
+                        if (!debug) throw std::runtime_error("InvalidState");
+                        result = ModelPoll(); break;
+                    case 12:
+                        result = Json::array();
+                        for (auto& thread : modelThreads)
+                            result.push_back({{"Id", thread.first}, {"Name", "Managed thread " + std::to_string(thread.first)}});
+                        break;
+                    case 13:
+                        result = Json::array();
+                        for (auto& module : modelModules) result.push_back(module.second);
+                        break;
+                    case 14: result = ModelScopes(body.at("Id").get<int64_t>()); break;
+                    case 15: result = ModelVariables(body); break;
+                    case 16: ModelStep(body); break;
+                    case 17: ModelPause(); break;
+                    case 18: {
+                        const auto filters = body.at("Filters").get<std::vector<std::string>>();
+                        if (filters.size() > 2 || std::any_of(filters.begin(), filters.end(),
+                            [](const std::string& value) { return value != "all" && value != "unhandled"; }))
+                            throw std::runtime_error("UnsupportedOperation");
+                        breakThrown = std::find(filters.begin(), filters.end(), "all") != filters.end();
+                        breakUnhandled = std::find(filters.begin(), filters.end(), "unhandled") != filters.end();
+                        break;
+                    }
+                    case 19: result = ModelException(body.at("Id").get<int64_t>()); break;
                     default: wire.Reply(request, Json::object(), "UnsupportedOperation"); continue;
                 }
                 wire.Reply(request, result);
@@ -530,8 +603,8 @@ void* Run(void*) {
                 // EOF and owner cleanup, never consume a sequence and silently wait.
                 throw std::runtime_error("MalformedPayload");
             } catch (const std::exception& error) {
-                if (std::strcmp(error.what(), "InvalidState") != 0) throw;
-                wire.Reply(request, Json::object(), "InvalidState");
+                if (!std::strcmp(error.what(), "MalformedPayload")) throw;
+                wire.Reply(request, Json::object(), error.what());
             }
         }
     } catch (const std::exception& error) {

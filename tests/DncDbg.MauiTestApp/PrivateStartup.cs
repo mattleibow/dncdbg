@@ -75,7 +75,10 @@ internal static class PrivateStartup
         Blocker = Endpoint != null ? null : status + $" Native state={(nativeAvailable ? Native.Status() : 0)}.",
         Bootstrap = PrivateBootstrapPolicy.Bootstrap,
         SupportedBuild = identity,
-        Scope = "Single-module portable-PDB-bound int32 breakpoint proof only; not a general mobile engine or COM proxy.",
+        Scope = "Experimental typed mobile debugger; no func-eval, property getters, setters, memory writes, or physical-device support.",
+        ModelVersion = RemoteContract.ModelVersion,
+        Provider = "private-coreclr",
+        Features = ["sourceBreakpoints", "threads", "modules", "scopes", "variables", "safeEvaluate", "pause", "stepIn", "next", "stepOut", "exceptions"],
     };
 
     public static void Cancel() => Native.Cancel();

@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT / "tests/DncDbg.MobileTests"))
 from argparse import Namespace
 from mobile_tools import android_sdk
 from run_suite import PIN, Suite
+from run_device import verify_ui
 from assert_artifacts import verify
 
 
@@ -31,6 +32,37 @@ class MobileRunnerTests(unittest.TestCase):
     def test_android_tools_require_explicit_sdk(self):
         with patch.dict(os.environ, {}, clear=True), self.assertRaisesRegex(RuntimeError, "ANDROID_HOME"):
             android_sdk()
+
+    def test_android_x64_tuple_is_explicit_and_separate_from_local_arm64(self):
+        args = Namespace(platform="android", output=self.output, xcode_dir=None, android_abi="x86_64")
+        hosted = Suite(args)
+        self.assertEqual(hosted.android["rid"], "android-x64")
+        self.assertEqual(hosted.android["abi"], "x86_64")
+        self.assertEqual(hosted.android["hostSystem"], "Linux")
+        self.assertEqual(hosted.android["hostArchitecture"], "x86_64")
+        self.assertTrue(hosted.android["systemImage"].endswith(";x86_64"))
+        self.assertEqual(self.suite.android["rid"], "android-arm64")
+        self.assertEqual(self.suite.android["hostSystem"], "Darwin")
+        self.assertEqual(PIN["android"]["imageRevision"], "8")
+
+    def test_android_tuple_rejects_nonmatching_host_instead_of_substituting_abi(self):
+        with patch("run_suite.platform.system", return_value="Linux"), \
+                patch("run_suite.platform.machine", return_value="x86_64"), \
+                self.assertRaisesRegex(RuntimeError, "Darwin/arm64"):
+            self.suite.preflight()
+
+    def test_ui_rejects_another_app_platform_or_pid_before_any_tree_or_mutation(self):
+        baseline = {"app": {"packageId": "com.dncdbg.mobiletests", "processId": 42}, "device": {"platform": "iOS"}}
+        for field, value in (("app", {"packageId": "unrelated.app", "processId": 42}),
+                             ("app", {"packageId": "com.dncdbg.mobiletests", "processId": 43}),
+                             ("device", {"platform": "Android"})):
+            status = baseline | {field: value}
+            with self.subTest(status=status), patch("run_device.subprocess.run", return_value=subprocess.CompletedProcess(
+                    [], 0, json.dumps(status), "")) as run:
+                with self.assertRaises(AssertionError):
+                    verify_ui(12345, "iosSimulator", 42)
+                self.assertEqual(run.call_count, 1)
+                self.assertEqual(run.call_args.args[0][-2:], ["agent", "status"])
 
     def test_rejects_output_outside_checkout_build(self):
         with self.assertRaisesRegex(RuntimeError, "build/"):

@@ -68,6 +68,7 @@ public sealed class InitializeArguments
 public sealed class LaunchArguments
 {
     public MobileLaunchArguments? Mobile { get; set; }
+    public NativeHostLaunchArguments? Remote { get; set; }
     public string? Program { get; set; }
     public string[]? Args { get; set; }
     public string? Cwd { get; set; }

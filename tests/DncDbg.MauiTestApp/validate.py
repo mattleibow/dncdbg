@@ -14,6 +14,7 @@ import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "DncDbg.MobileTests"))
 from mobile_tools import adb_path
+from process_tools import start_owned, stop_owned, native_listener_closed, run_owned
 
 ROOT = Path(__file__).resolve().parents[2]
 APP = "com.dncdbg.mobiletests"
@@ -21,91 +22,22 @@ PROJECT = "tests/DncDbg.MauiTestApp"
 EVIDENCE = ROOT / "build/validation/mobile/net11-default"
 
 
-def start_owned(*args, **kwargs):
-    if os.name != "posix":
-        raise RuntimeError("The mobile runner requires POSIX process-group ownership")
-    return subprocess.Popen(*args, start_new_session=True, **kwargs)
-
-
-def stop_owned(process):
-    def group_exists():
-        process.poll()
-        groups = subprocess.run(["ps", "-axo", "pgid="], check=True, capture_output=True,
-                                text=True, timeout=5).stdout.split()
-        return str(process.pid) in groups
-
-    def signal_group(value):
-        if value == 0:
-            return group_exists()
-        try:
-            os.killpg(process.pid, value)
-            return True
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            # macOS can return EPERM rather than ESRCH for a group that just vanished.
-            # Never suppress it while ps still observes any member of the owned group.
-            if not group_exists():
-                return False
-            raise
-
-    # The leader may already have exited while its debugger/CLI child is alive.
-    if signal_group(signal.SIGTERM):
-        deadline = time.monotonic() + 1
-        while time.monotonic() < deadline:
-            process.poll()
-            if not signal_group(0):
-                break
-            time.sleep(0.02)
-        else:
-            signal_group(signal.SIGKILL)
-    process.wait(timeout=1)
-    deadline = time.monotonic() + 1
-    while signal_group(0):
-        if time.monotonic() >= deadline:
-            raise RuntimeError(f"Owned process group {process.pid} remained after termination")
-        time.sleep(0.02)
-
-
 def run(*args, env=None, check=True, input=None, timeout=180, log=None, cwd=ROOT):
-    with start_owned(args, cwd=cwd, env=env, text=True, stdin=subprocess.PIPE if input is not None else None,
-                     stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
-        try:
-            stdout, stderr = process.communicate(input, timeout=timeout)
-            result = subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
-        finally:
-            stop_owned(process)
-    if log:
-        (EVIDENCE / log).write_text(result.stdout + result.stderr)
-    if check and result.returncode:
-        raise RuntimeError(f"{args[0]} failed ({result.returncode}): {result.stderr[-2000:]}")
-    return result
-
-
-def native_listener_closed(port, forwarded):
-    with socket.socket() as verify:
-        verify.settimeout(1)
-        if verify.connect_ex(("127.0.0.1", port)) != 0:
-            return True
-        if forwarded:
-            # ADB still accepts on the host after the target listener closes,
-            # then signals target connection refusal with EOF.
-            try:
-                return verify.recv(1) == b""
-            except socket.timeout:
-                return False
-        return False
+    return run_owned(*args, env=env, check=check, input=input, timeout=timeout, cwd=cwd,
+                     log=EVIDENCE / log if log else None)
 
 
 def main():
     global EVIDENCE
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--platform", required=True, choices=["ios", "android"])
+    parser.add_argument("--runtime-identifier", choices=["iossimulator-arm64", "android-arm64", "android-x64"])
     parser.add_argument("--device", required=True, help="An already booted, dedicated simulator UDID or emulator serial")
     parser.add_argument("--runtime", choices=["default", "coreclr", "mono"], default="default",
                         help="Default leaves UseMonoRuntime unset; explicit overrides are separate experiments")
     parser.add_argument("--build-developer-dir", help="Scoped iOS build Xcode selection; simctl remains unchanged")
     parser.add_argument("--agent-port", type=int, help="Explicit Android fallback DevFlow port, normally 9223")
+    parser.add_argument("--ui-session", help="Run-owned DevFlow build identity")
     parser.add_argument("--allow-fallback", action="store_true", help="Collect UI proof even when broker wait fails")
     parser.add_argument("--replace-fixture", action="store_true", help="Permit replacing this fixture on the dedicated target")
     parser.add_argument("--public-attach-probe", action="store_true",
@@ -200,8 +132,12 @@ def main():
         if args.build_developer_dir:
             env["DEVELOPER_DIR"] = args.build_developer_dir
         tfm = f"net11.0-{prefix}"
-        rid = "iossimulator-arm64" if prefix == "ios" else "android-arm64"
+        rid = args.runtime_identifier or ("iossimulator-arm64" if prefix == "ios" else "android-arm64")
         properties = [f"-p:RuntimeIdentifier={rid}", "-p:EnableExperimentalRemoteDebugging=true"]
+        if args.agent_port:
+            properties.append(f"-p:MauiDevFlowPort={args.agent_port}")
+        if args.ui_session:
+            properties.append(f"-p:MauiDevFlowSessionId={args.ui_session}")
         if args.private_bootstrap:
             run(sys.executable, "src/DncDbg.Remote.Target/build.py", rid, env=env, log=f"{prefix}-native-build.log")
             properties.append("-p:EnableExperimentalPrivateBootstrap=true")

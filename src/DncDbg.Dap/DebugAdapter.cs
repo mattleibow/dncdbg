@@ -12,7 +12,7 @@ internal sealed class DebugAdapter : IDisposable
     private readonly DapConnection _connection;
     private readonly Action<string> _log;
     private DebugEngine _engine;
-    private MobileSession? _mobile;
+    private RemoteSession? _remote;
 
     // what a restart has to bring back
     private LaunchArguments? _launchArguments;
@@ -153,9 +153,9 @@ internal sealed class DebugAdapter : IDisposable
 
     private void Cancel(DapMessage message)
     {
-        if (_mobile != null)
+        if (_remote != null)
         {
-            _connection.SendErrorResponse(message, "Mobile request cancellation is not supported; disconnect to cancel the owned mobile session.");
+            _connection.SendErrorResponse(message, "Remote request cancellation is not supported; disconnect to cancel the owned remote session.");
             return;
         }
         int? requestId = message.GetArguments<CancelArguments>()?.RequestId;
@@ -219,9 +219,9 @@ internal sealed class DebugAdapter : IDisposable
 
     private object? Dispatch(DapMessage request)
     {
-        if (_mobile != null && request.Command is not ("initialize" or "configurationDone"))
+        if (_remote != null && request.Command is not ("initialize" or "configurationDone"))
         {
-            object? result = _mobile.Dispatch(request, out Action? after);
+            object? result = _remote.Dispatch(request, out Action? after);
             _afterResponse = after;
             return result;
         }
@@ -229,8 +229,8 @@ internal sealed class DebugAdapter : IDisposable
         {
             case "initialize":
             {
-                _mobile?.Dispose();
-                _mobile = null;
+                _remote?.Dispose();
+                _remote = null;
                 if (_initialized)
                 {
                     DebugEngine old = _engine;
@@ -296,8 +296,10 @@ internal sealed class DebugAdapter : IDisposable
             case "launch":
             {
                 _launchArguments = request.GetArguments<LaunchArguments>() ?? throw new DebuggerException("Missing launch arguments.");
-                if (_launchArguments.Mobile is { } mobile)
+                if (_launchArguments.Mobile != null || _launchArguments.Remote != null)
                 {
+                    if (_launchArguments.Mobile != null && _launchArguments.Remote != null)
+                        throw new DebuggerException("Select exactly one remote target provider.");
                     if (_launchArguments.NoDebug || _launchArguments.Program != null || _launchArguments.Project != null ||
                         _launchArguments.StopAtEntry || _launchArguments.Console is not (null or "internalConsole") ||
                         _launchArguments.Args is { Length: > 0 } || _launchArguments.Env is { Count: > 0 } || _launchArguments.Cwd != null ||
@@ -307,10 +309,13 @@ internal sealed class DebugAdapter : IDisposable
                         _launchArguments.AllowImplicitFuncEval == true || _launchArguments.ExpressionEvaluationOptions != null ||
                         _launchArguments.SourceFileMap is { Count: > 0 } || _launchArguments.SymbolOptions != null ||
                         _launchArguments.SuppressJitOptimizations != null)
-                        throw new DebuggerException("Mobile launch requires built mobile assets and cannot apply desktop launch, build, environment, source-map, evaluation or JIT options.");
-                    _mobile = new MobileSession(mobile, _connection, _log, LineToClient, LineFromClient);
-                    try { _mobile.Launch(); }
-                    catch { _mobile.Dispose(); _mobile = null; throw; }
+                        throw new DebuggerException("Remote launch requires built target assets and cannot apply desktop launch, build, environment, source-map, evaluation or JIT options.");
+                    RemoteLaunchArguments options = (RemoteLaunchArguments?)_launchArguments.Mobile ?? _launchArguments.Remote!;
+                    Func<RemoteLifecycle> create = _launchArguments.Mobile is { } mobile
+                        ? RemoteProviderFactory.Mobile(mobile) : RemoteProviderFactory.NativeHost(_launchArguments.Remote!);
+                    _remote = new RemoteSession(options, create, _connection, _log, LineToClient, LineFromClient);
+                    try { _remote.Launch(); }
+                    catch { _remote.Dispose(); _remote = null; throw; }
                     return null;
                 }
                 Launch(_launchArguments);
@@ -367,9 +372,9 @@ internal sealed class DebugAdapter : IDisposable
             }
 
             case "configurationDone":
-                if (_mobile != null)
+                if (_remote != null)
                 {
-                    try { _mobile.Start(); }
+                    try { _remote.Start(); }
                     catch (Exception e)
                     {
                         if (_pendingStartResponse is { } pending)
@@ -377,8 +382,8 @@ internal sealed class DebugAdapter : IDisposable
                             _pendingStartResponse = null;
                             _connection.SendErrorResponse(pending.Request, e.Message);
                         }
-                        MobileSession failed = _mobile;
-                        _mobile = null;
+                        RemoteSession failed = _remote;
+                        _remote = null;
                         try { failed.Dispose(); }
                         catch (Exception cleanup) { _log($"Mobile startup cleanup failed: {cleanup}"); }
                         throw;
@@ -393,7 +398,7 @@ internal sealed class DebugAdapter : IDisposable
                         _connection.SendResponse(pending.Request, pending.Body);
                         pending.AfterResponse?.Invoke();
                     }
-                    if (_mobile == null) _engine.ConfigurationDone();
+                    if (_remote == null) _engine.ConfigurationDone();
                 };
                 return null;
 
@@ -912,7 +917,7 @@ internal sealed class DebugAdapter : IDisposable
     private void StopWorker()
     {
         _stopping = true;
-        _mobile?.Cancel();
+        _remote?.Cancel();
         _engine.CancelCurrentRequest(sessionEnds: true);
         _connection.CancelPendingRequests();
         if (!_queue.IsAddingCompleted)
@@ -923,7 +928,7 @@ internal sealed class DebugAdapter : IDisposable
     public void Dispose()
     {
         StopWorker();
-        _mobile?.Dispose();
+        _remote?.Dispose();
         _engine.Dispose();
         _disposed = true;
     }

@@ -221,17 +221,17 @@ void ModuleReloadChecks() {
     Json request = BreakpointRequest();
     Check(!ModelSetBreakpoints(request)[0].at("Verified").get<bool>(), "source request is pending before its module loads");
     handler.LoadModule(&controller, &module); Pump();
-    Json first = mobileEvents[0].at("Module");
+    Json first = remoteEvents[0].at("Module");
     Check(module.function.code.created.size() == 1, "initial module load binds the existing source request");
     handler.UnloadModule(&controller, &module); Pump();
     Check(module.function.code.created[0].refs == 1, "module unload releases its native breakpoint without retaining a stale binding");
     Check(module.function.code.created[0].deactivations == 0, "module unload never calls a neutered native breakpoint");
-    Check(mobileEvents.back().at("Kind") == "breakpoint" && !mobileEvents.back().at("Breakpoint").at("Verified").get<bool>(),
+    Check(remoteEvents.back().at("Kind") == "breakpoint" && !remoteEvents.back().at("Breakpoint").at("Verified").get<bool>(),
           "last matching module unload truthfully marks the retained source request pending");
     handler.LoadModule(&controller, &module); Pump();
     Check(module.function.code.created.size() == 2, "same module identity reloaded receives the existing source breakpoint");
     Json last;
-    for (auto& event : mobileEvents) if (event.at("Kind") == "module") last = event.at("Module");
+    for (auto& event : remoteEvents) if (event.at("Kind") == "module") last = event.at("Module");
     Check(last.at("Id") != first.at("Id") && last.at("Generation") > first.at("Generation"),
           "reload publishes a fresh module identity/load generation");
     ModelDeactivateBreakpoints(); ModelCleanup();
@@ -256,7 +256,7 @@ void ModuleContextChecks() {
     handler.LoadModule(&controller, &first); Pump();
     Check(first.function.code.created.size() == 1 && modelModules.size() == 2,
           "duplicate load callbacks create neither duplicate module events nor native bindings");
-    size_t before = mobileEvents.size();
+    size_t before = remoteEvents.size();
     handler.UnloadModule(&controller, &first); handler.UnloadModule(&controller, &first); Pump();
     Check(first.function.code.created[0].refs == 1 && second.function.code.created[0].refs == 2,
           "unloading one context releases only that context's binding");
@@ -264,7 +264,7 @@ void ModuleContextChecks() {
     Check(stoppedController && StopDescription().at("HitBreakpoints")[0].at("Line") == 42,
           "the surviving context still stops after its sibling unloads");
     ContinueStop();
-    Check(mobileEvents.size() == before + 1 && mobileEvents.back().at("Kind") == "moduleRemoved",
+    Check(remoteEvents.size() == before + 1 && remoteEvents.back().at("Kind") == "moduleRemoved",
           "unload leaves the surviving request verified and duplicate unload emits no stale event");
     handler.LoadModule(&controller, &first); Pump();
     Check(first.function.code.created.size() == 2 && second.function.code.created.size() == 1,
@@ -572,6 +572,7 @@ void ExceptionChecks() {
 }
 
 int main(int argc, char** argv) {
+    Check(dncdbg_contract_version() == ModelVersion, "native ABI export reports the generated model version");
     if (argc == 2) {
         if (std::strcmp(argv[1], "--floating") == 0) FloatingChecks();
         else if (std::strcmp(argv[1], "--variables") == 0) VariableChecks();

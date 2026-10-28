@@ -6,7 +6,7 @@ using DncDbg.Remote;
 
 namespace DncDbg.Dap;
 
-internal sealed class MobileCommands
+internal sealed class PlatformCommands
 {
     public async Task<string> RunAsync(string executable, IEnumerable<string> arguments, CancellationToken token,
         bool allowFailure = false, IReadOnlyDictionary<string, string>? environment = null, string? input = null)
@@ -46,23 +46,8 @@ internal sealed class MobileCommands
     }
 }
 
-/// <summary>Owns one connection route, never device-global forwarding state or DevFlow's broker reverse.</summary>
-internal interface IMobileTunnel : IAsyncDisposable
-{
-    Task<RemoteEndpoint> OpenAsync(RemoteEndpoint target, CancellationToken token);
-}
-
-internal sealed class SimulatorTunnel : IMobileTunnel
-{
-    public Task<RemoteEndpoint> OpenAsync(RemoteEndpoint target, CancellationToken token)
-    {
-        token.ThrowIfCancellationRequested();
-        return Task.FromResult(target);
-    }
-    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
-}
-
-internal sealed class AdbTunnel(MobileCommands commands, string device) : IMobileTunnel
+/// <summary>ADB syntax and transactional daemon mapping ownership; no debugger/model logic.</summary>
+internal sealed class AdbForwardProvider(PlatformCommands commands, string device) : ITunnelProvider
 {
     private int ownedPort;
     public async Task<RemoteEndpoint> OpenAsync(RemoteEndpoint target, CancellationToken token)
@@ -129,68 +114,33 @@ internal sealed class AdbTunnel(MobileCommands commands, string device) : IMobil
     }
 }
 
-/// <summary>Replaceable provider boundary. Public remote components must not silently fall back to private exports.</summary>
-internal interface IMobileDebuggerProvider
-{
-    Task<IRemoteDebugModel> ConnectAsync(RemoteEndpoint endpoint, MobileLaunchArguments options, CancellationToken token);
-}
-
-internal sealed class PrivateCoreClrProvider : IMobileDebuggerProvider
-{
-    public async Task<IRemoteDebugModel> ConnectAsync(RemoteEndpoint endpoint, MobileLaunchArguments options, CancellationToken token)
-    {
-        RemoteDebugClient client = await RemoteDebugClient.ConnectAsync(endpoint, token);
-        try { Validate(client.Capabilities, options); return client; }
-        catch
-        {
-            try { await client.DisconnectAsync(token); }
-            catch (Exception) { }
-            finally { await client.DisposeAsync(); }
-            throw;
-        }
-    }
-
-    private static void Validate(RemoteCapabilities capabilities, MobileLaunchArguments options)
-    {
-        string expected = options.Platform == "android" ? "AndroidEmulator" : "iOSSimulator";
-        if (!capabilities.ManagedDebugging || capabilities.ModelVersion != RemoteContract.ModelVersion ||
-            capabilities.Provider != "private-coreclr" || capabilities.Bootstrap != PrivateBootstrapPolicy.Bootstrap ||
-            capabilities.SupportedBuild is not { } identity || identity.Platform != expected ||
-            PrivateBootstrapPolicy.Validate(identity, ["DllMain", "CoreCLRCreateCordbObject3"]) is { })
-            throw new PlatformNotSupportedException(capabilities.Blocker ??
-                "The target does not provide the exact pinned private CoreCLR runtime/DBI/DAC and typed debugger model.");
-    }
-}
-
 internal sealed class MobileInstallation
 {
     public string Id { get; } = Guid.NewGuid().ToString("N");
     public bool Owned { get; set; }
 }
 
-internal sealed class MobileLifecycle : IAsyncDisposable
+internal sealed class MobileTargetProvider : IRemoteTargetProvider
 {
     private readonly MobileLaunchArguments options;
-    private readonly MobileCommands commands = new();
-    private readonly IMobileTunnel tunnel;
+    private readonly PlatformCommands commands = new();
     private readonly MobileInstallation installation;
-    private readonly object gate = new();
-    private readonly CancellationTokenSource acquisitionCancellation = new();
-    private Task? acquisition, closing;
     private bool installed, started;
-    private bool disposed;
     private string? dataContainer;
-    public string SessionId { get; } = Guid.NewGuid().ToString("N");
-    public int ProcessId { get; private set; }
-    public IRemoteDebugModel? Client { get; private set; }
+    private string SessionId { get; set; } = "";
+    public string Name => options.ApplicationId;
+    public string ExpectedPlatform => options.Platform == "android" ? "AndroidEmulator" : "iOSSimulator";
+    public string ExpectedArchitecture => options.RuntimeIdentifier == "android-x64" ? "X64" : "Arm64";
+    public string? ArtifactsPath => null;
 
-    public MobileLifecycle(MobileLaunchArguments options, MobileInstallation installation)
+    public MobileTargetProvider(MobileLaunchArguments options, MobileInstallation installation)
     {
         this.options = options;
         this.installation = installation;
         if (options.Platform is not ("android" or "iosSimulator") ||
-            options.RuntimeIdentifier != (options.Platform == "android" ? "android-arm64" : "iossimulator-arm64"))
-            throw new PlatformNotSupportedException("Only pinned android-arm64 emulators and iossimulator-arm64 simulators are implemented.");
+            !(options.Platform == "android" ? options.RuntimeIdentifier is "android-arm64" or "android-x64" :
+                options.RuntimeIdentifier == "iossimulator-arm64"))
+            throw new PlatformNotSupportedException("Only pinned android-arm64/android-x64 emulators and iossimulator-arm64 simulators are implemented.");
         if (!Regex.IsMatch(options.DeviceId, @"\A[A-Za-z0-9-]+\z") ||
             options.Platform == "android" && !Regex.IsMatch(options.DeviceId, @"\Aemulator-[0-9]+\z"))
             throw new PlatformNotSupportedException("An exact simulator/emulator device ID is required; physical devices are not supported.");
@@ -202,13 +152,6 @@ internal sealed class MobileLifecycle : IAsyncDisposable
             throw new ArgumentException("mobile.appPath must be a built .apk/.app and mobile.assetsPath a directory containing matching assemblies and portable PDBs.");
         if (options.StartupTimeoutSeconds is < 1 or > 300)
             throw new ArgumentException("mobile.startupTimeoutSeconds must be between 1 and 300.");
-        if (options.Provider != "private-coreclr")
-            throw new PlatformNotSupportedException($"Mobile debugger provider '{options.Provider}' is not installed. " +
-                "vsdbgremotecoreclrtarget/remotemscordbihost can replace the private provider when available; no fallback is permitted.");
-        string route = options.Platform == "android" ? "adb" : "host";
-        if (options.Tunnel is { Provider.Length: > 0 } requested && requested.Provider != route)
-            throw new PlatformNotSupportedException($"Tunnel provider '{requested.Provider}' is not implemented for {options.Platform}.");
-        tunnel = route == "adb" ? new AdbTunnel(commands, options.DeviceId) : new SimulatorTunnel();
     }
 
     private Task<string> Adb(CancellationToken token, bool allowFailure = false, params string[] args) =>
@@ -216,21 +159,14 @@ internal sealed class MobileLifecycle : IAsyncDisposable
     private Task<string> Sim(CancellationToken token, bool allowFailure = false, params string[] args) =>
         commands.RunAsync("xcrun", new[] { "simctl" }.Concat(args), token, allowFailure);
 
-    public Task ConnectAsync(CancellationToken token)
+    public Task AcquireAsync(string sessionId, CancellationToken token)
     {
-        lock (gate)
-        {
-            ObjectDisposedException.ThrowIf(disposed, this);
-            if (acquisition != null) throw new InvalidOperationException("Mobile acquisition has already started.");
-            return acquisition = ConnectCoreAsync(token);
-        }
+        SessionId = sessionId;
+        return AcquireCoreAsync(token);
     }
 
-    private async Task ConnectCoreAsync(CancellationToken token)
+    private async Task AcquireCoreAsync(CancellationToken token)
     {
-        using var startup = CancellationTokenSource.CreateLinkedTokenSource(token, acquisitionCancellation.Token);
-        startup.CancelAfter(TimeSpan.FromSeconds(options.StartupTimeoutSeconds));
-        token = startup.Token;
         string? container = null;
         if (options.Platform == "android")
         {
@@ -287,66 +223,24 @@ internal sealed class MobileLifecycle : IAsyncDisposable
             await commands.RunAsync("xcrun", ["simctl", "launch", options.DeviceId, options.ApplicationId], token,
                 environment: new Dictionary<string, string> { ["SIMCTL_CHILD_DNCDBG_SESSION_ID"] = SessionId });
         }
-        RemoteEndpoint? endpoint = null;
-        while (endpoint == null)
-        {
-            token.ThrowIfCancellationRequested();
-            string descriptor = options.Platform == "android"
-                ? await Adb(token, true, "exec-out", "run-as", options.ApplicationId, "cat", "files/dncdbg-remote.json")
-                : File.Exists(Path.Combine(container!, "Library/dncdbg-remote.json"))
-                    ? await File.ReadAllTextAsync(Path.Combine(container!, "Library/dncdbg-remote.json"), token) : "";
-            try
-            {
-                var candidate = descriptor.Length > 0
-                    ? JsonSerializer.Deserialize(descriptor, RemoteJson.Default.RemoteEndpoint) : null;
-                if (candidate is { Port: > 0 and <= 65535, Token.Length: 64 } && candidate.SessionId == SessionId)
-                    endpoint = candidate;
-            }
-            catch (JsonException) { }
-            if (endpoint == null) await Task.Delay(100, token);
-        }
-        ProcessId = endpoint.ProcessId;
-        token.ThrowIfCancellationRequested();
-        RemoteEndpoint routeEndpoint = await tunnel.OpenAsync(endpoint, token);
-        token.ThrowIfCancellationRequested();
-        Client = await new PrivateCoreClrProvider().ConnectAsync(routeEndpoint, options, token);
-        token.ThrowIfCancellationRequested();
     }
 
-    public Task CloseAsync(bool terminate)
+    public async Task<string?> ReadDescriptorAsync(CancellationToken token)
     {
-        lock (gate)
-        {
-            if (closing != null) return closing;
-            disposed = true;
-            acquisitionCancellation.Cancel();
-            return closing = CloseCoreAsync(terminate);
-        }
+        if (options.Platform == "android")
+            return await Adb(token, true, "exec-out", "run-as", options.ApplicationId, "cat", "files/dncdbg-remote.json");
+        string path = Path.Combine(dataContainer!, "Library/dncdbg-remote.json");
+        return File.Exists(path) ? await File.ReadAllTextAsync(path, token) : null;
     }
 
-    private async Task CloseCoreAsync(bool terminate)
+    public async Task CloseAsync(bool terminate, CancellationToken cancellationToken)
     {
-        // Acquisition may publish an installed app, route or client as cancellation
-        // arrives. Settle it before taking the final resource snapshot.
-        if (acquisition != null)
-        {
-            try { await acquisition; }
-            catch (Exception) { }
-        }
         var failures = new List<Exception>();
         async Task Attempt(Func<CancellationToken, Task> action)
         {
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(TimeSpan.FromSeconds(10));
             try { await action(timeout.Token); }
-            catch (Exception e) { failures.Add(e); }
-        }
-        if (Client != null)
-        {
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
-            try { await Client.RequestDisconnectAsync(new(), timeout.Token); }
-            catch (Exception e) when (e is ObjectDisposedException or IOException) { }
-            catch (Exception e) { failures.Add(e); }
-            try { await Client.DisposeAsync(); }
             catch (Exception e) { failures.Add(e); }
         }
         await Attempt(async token =>
@@ -387,11 +281,7 @@ internal sealed class MobileLifecycle : IAsyncDisposable
                 installation.Owned = false;
             }
         });
-        try { await tunnel.DisposeAsync(); }
-        catch (Exception e) { failures.Add(e); }
-        acquisitionCancellation.Dispose();
         if (failures.Count > 0) throw new AggregateException("Mobile cleanup failed.", failures);
     }
 
-    public ValueTask DisposeAsync() => new(CloseAsync(terminate: true));
 }

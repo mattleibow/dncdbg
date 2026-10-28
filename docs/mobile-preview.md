@@ -1,10 +1,14 @@
 # Mobile DAP preview (private, build-pinned)
 
 This is an **experimental preview**, not supported general mobile debugging.
-Only the exact .NET 11 RC1 **arm64 iOS simulator and Android emulator** builds
+Only the exact .NET 11 RC1 **arm64 iOS simulator and arm64/x64 Android emulator** builds
 in `PrivateBootstrapPolicy.SupportedBuilds` are admitted. No physical device,
 Mono, NativeAOT, arbitrary .NET 11 build, or public remote-COM compatibility is
 claimed. The desktop launch path still uses the existing local engine.
+The **generic remote** path additionally has a required native-hosted desktop
+gate using the same target agent and DAP/model:
+[provider architecture](remote-architecture.md). Mobile is a deployment/path/
+tunnel provider, not a separate remote debugger engine.
 
 ## Launch
 
@@ -84,7 +88,7 @@ to the desktop engine.
   Rollback has an independent 10-second budget, not the canceled startup token.
   No fixed debugger port, `--remove-all`, global reset, or debugger `reverse`.
 - **iOS simulator:** direct host loopback networking, without a tunnel process.
-- `IMobileTunnel` is the route-ownership boundary for future device transports;
+- `ITunnelProvider` is the shared route-ownership boundary for local proxy and future device transports;
   unimplemented providers and physical-device selections fail explicitly.
 - **DevFlow is separate:** its broker `adb reverse tcp:19223 tcp:19223`, agent
   forwarding and explicit Android `9223` fallback are UI-automation plumbing.
@@ -180,8 +184,9 @@ Exact platform/architecture/version, runtime/DBI/DAC build IDs and code hashes,
 and required private exports are validated before activation. Product version
 or matching filenames alone are insufficient. There is no desktop-DBI fallback.
 
-`IMobileDebuggerProvider` separates provider validation from deployment and
-transport. An official provider can replace the private provider when its
+`IRemoteTargetProvider` and `ITunnelProvider` separate deployment and transport
+from the shared `RemoteLifecycle`/`RemoteSession` model. An official runtime
+provider can replace the private provider when its
 components/API/licensing permit it; selecting one now reports unavailability,
 without quietly activating the private implementation.
 
@@ -217,8 +222,15 @@ Host-only contracts (explicit fake device tools/runtime, not mobile proof):
 dotnet run --project tests/DncDbg.MobileTests -c Release -- --platform contracts
 ```
 
-Real runtime proof uses the **same console entrypoint** with `--platform ios`
-or `--platform android`; see the [mobile runner guide](../tests/DncDbg.MobileTests/README.md)
+The canonical **real-runtime**, MAUI-independent correctness gate is:
+
+```sh
+dotnet run --project tests/DncDbg.NativeHostTests -c Release
+```
+
+Device runtime proof uses the **mobile console entrypoint**
+(`dotnet run --project tests/DncDbg.MobileTests -c Release --`) with
+`--platform ios` or `--platform android`; see the [mobile runner guide](../tests/DncDbg.MobileTests/README.md)
 for exact prerequisites, provisioning, one-command invocations and CI blockers.
 It creates and owns its dedicated device, builds/inspects Release isolation,
 builds the Debug fixture, launches the actual adapter, leaves
@@ -247,9 +259,11 @@ additional regressions and are called by the same entrypoint.
 Portable contracts live under `tests/DncDbg.RemoteTests`, built by the normal
 solution; mobile is not an upstream native parity project. Nothing is added to
 `test-suite/Test*` auto-discovery. `Mobile proof` triggers both required named
-mobile checks on PRs to `main`. Hosted iOS is pinned; the arm64-only Android job
-requires the documented isolated self-hosted label. A queued/unprovisioned job
-or unavailable Xcode/image is a blocker, not proof from generic CI.
+mobile checks on PRs to `main`. iOS uses hosted `macos-26`; Android uses hosted
+`ubuntu-24.04` with an explicitly pinned x86_64 image, `android-x64` CoreCLR,
+x86_64 native agent and required KVM. The original local arm64 tuple remains
+separate. Capacity cancellation, inaccessible KVM or an unavailable pinned
+Xcode/image is a red blocker, not a skip or proof from generic CI.
 
 **Keep PR #11 draft.** Full local/CI, current-main integration, both real mobile
 gates and full independent review are required before merge. No automatic

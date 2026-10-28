@@ -4,10 +4,11 @@ using DncDbg.Remote;
 
 namespace DncDbg.Dap;
 
-/// <summary>Mobile DAP translation only. Execution is owned by the single target-native provider thread.</summary>
-internal sealed class MobileSession : IDisposable
+/// <summary>Platform-independent DAP/model translation; execution belongs to the target-native owner.</summary>
+internal sealed class RemoteSession : IDisposable
 {
-    private readonly MobileLaunchArguments options;
+    private readonly RemoteLaunchArguments options;
+    private readonly Func<RemoteLifecycle> createLifecycle;
     private readonly DapConnection connection;
     private readonly Action<string> log;
     private readonly Func<int, int> toClientLine;
@@ -17,28 +18,28 @@ internal sealed class MobileSession : IDisposable
     private int nextBreakpoint;
     private readonly object stateGate = new();
     private readonly object acquisitionGate = new(), closeGate = new();
-    private readonly MobileInstallation installation = new();
     private int terminatedSent;
     private readonly Dictionary<string, int[]> breakpoints = new(StringComparer.Ordinal);
     private int nextHandle;
     private RemoteStop? stop;
     private RemoteSymbols symbols = null!;
-    private MobileLifecycle lifecycle = null!;
+    private RemoteLifecycle lifecycle = null!;
     private readonly CancellationTokenSource lifetime = new();
     private CancellationTokenSource pollStop = new();
     private Task? polling;
     private RemoteExceptionRule[] exceptionRules = [new("unhandled")];
     private volatile bool closed;
     private bool started;
-    private IRemoteDebugModel Client => lifecycle.Client ?? throw new InvalidOperationException("The mobile debugger is not connected.");
+    private IRemoteDebugModel Client => lifecycle.Client ?? throw new InvalidOperationException("The remote debugger is not connected.");
     private CancellationToken Token => lifetime.Token;
     private T Wait<T>(Task<T> task) => task.GetAwaiter().GetResult();
     private void Wait(Task task) => task.GetAwaiter().GetResult();
 
-    public MobileSession(MobileLaunchArguments options, DapConnection connection, Action<string> log,
+    public RemoteSession(RemoteLaunchArguments options, Func<RemoteLifecycle> createLifecycle, DapConnection connection, Action<string> log,
         Func<int, int> toClientLine, Func<int, int> fromClientLine)
     {
         this.options = options;
+        this.createLifecycle = createLifecycle;
         this.connection = connection;
         this.log = log;
         this.toClientLine = toClientLine;
@@ -59,7 +60,7 @@ internal sealed class MobileSession : IDisposable
     private void LaunchCore()
     {
         CheckOpen();
-        lifecycle = new MobileLifecycle(options, installation);
+        lifecycle = createLifecycle();
         try
         {
             symbols = new RemoteSymbols(options.AssetsPath);
@@ -81,7 +82,7 @@ internal sealed class MobileSession : IDisposable
             CheckOpen();
             connection.SendEvent("process", new
             {
-                name = options.ApplicationId, systemProcessId = lifecycle.ProcessId > 0 ? (int?)lifecycle.ProcessId : null,
+                name = lifecycle.Name, systemProcessId = lifecycle.ProcessId > 0 ? (int?)lifecycle.ProcessId : null,
                 isLocalProcess = false, startMethod = "launch",
             });
             connection.SendEvent("capabilities", new
@@ -108,7 +109,7 @@ internal sealed class MobileSession : IDisposable
     private bool Has(string feature) => Client.Capabilities.Features?.Contains(feature, StringComparer.Ordinal) == true;
     private void Require(string feature)
     {
-        if (!Has(feature)) throw new NotSupportedException($"Mobile provider does not support '{feature}'.");
+        if (!Has(feature)) throw new NotSupportedException($"Remote provider does not support '{feature}'.");
     }
 
     public void Start()
@@ -122,9 +123,9 @@ internal sealed class MobileSession : IDisposable
 
     private void StartCore()
     {
-        if (started) throw new InvalidOperationException("Mobile configuration has already completed.");
+        if (started) throw new InvalidOperationException("Remote configuration has already completed.");
         if (Has("exceptions")) Wait(Client.RequestExceptionsAsync(new(exceptionRules), Token));
-        else if (exceptionRules.Length > 0) throw new NotSupportedException("The mobile provider does not support exception filters.");
+        else if (exceptionRules.Length > 0) throw new NotSupportedException("The remote provider does not support exception filters.");
         Wait(Client.RequestStartAsync(new(), Token));
         started = true;
         polling = PollAsync();
@@ -173,7 +174,7 @@ internal sealed class MobileSession : IDisposable
                             if (item.ExitCode is { } exitCode)
                                 connection.SendEvent("exited", new ExitedEventBody { ExitCode = exitCode });
                             else
-                                connection.SendEvent("output", new OutputEventBody { Category = "console", Output = "The mobile target exited; its exit code is unavailable.\n" });
+                                connection.SendEvent("output", new OutputEventBody { Category = "console", Output = "The remote target exited; its exit code is unavailable.\n" });
                             await lifecycle.CloseAsync(terminate: false);
                             SendTerminated();
                             return;
@@ -188,10 +189,10 @@ internal sealed class MobileSession : IDisposable
             e is OperationCanceledException or IOException or ObjectDisposedException) { }
         catch (Exception e)
         {
-            log($"Mobile event stream failed: {e}");
-            connection.SendEvent("output", new OutputEventBody { Category = "stderr", Output = $"Mobile debugger disconnected: {e.Message}\n" });
+            log($"Remote event stream failed: {e}");
+            connection.SendEvent("output", new OutputEventBody { Category = "stderr", Output = $"Remote debugger disconnected: {e.Message}\n" });
             try { await lifecycle.CloseAsync(terminate: true); }
-            catch (Exception cleanup) { log($"Mobile cleanup failed: {cleanup}"); }
+            catch (Exception cleanup) { log($"Remote cleanup failed: {cleanup}"); }
             SendTerminated();
         }
     }
@@ -205,8 +206,8 @@ internal sealed class MobileSession : IDisposable
         return id;
     }
     private long Resolve(int id, bool frame) => handles.TryGetValue(id, out var item) && item.Frame == frame
-        ? item.Remote : throw new InvalidOperationException("Stale or invalid mobile frame/variable reference.");
-    private RemoteStop Current() => stop ?? throw new InvalidOperationException("The mobile debuggee is not stopped.");
+        ? item.Remote : throw new InvalidOperationException("Stale or invalid remote frame/variable reference.");
+    private RemoteStop Current() => stop ?? throw new InvalidOperationException("The remote debuggee is not stopped.");
     private void Thread(int id)
     {
         if (Current().ThreadId != id) throw new NotSupportedException("Inspection/execution is limited to the currently stopped thread.");
@@ -221,7 +222,7 @@ internal sealed class MobileSession : IDisposable
         breakpointIds.ContainsKey((source, breakpoint.Line));
     private DncDbg.Protocol.Breakpoint Breakpoint(RemoteBreakpoint breakpoint, string? source = null)
     {
-        string path = source ?? breakpoint.Source ?? throw new InvalidDataException("A mobile breakpoint update is missing its source identity.");
+        string path = source ?? breakpoint.Source ?? throw new InvalidDataException("A remote breakpoint update is missing its source identity.");
         int id = breakpointIds.GetOrAdd((path, breakpoint.Line), _ => Interlocked.Increment(ref nextBreakpoint));
         if (id <= 0) throw new InvalidOperationException("DAP breakpoint ID limit exceeded.");
         return new()
@@ -251,7 +252,7 @@ internal sealed class MobileSession : IDisposable
     {
         after = null;
         if (request.Arguments is { } json && json.TryGetProperty("singleThread", out var single) && single.ValueKind == System.Text.Json.JsonValueKind.True)
-            throw new NotSupportedException("Single-thread execution is not supported by the mobile provider.");
+            throw new NotSupportedException("Single-thread execution is not supported by the remote provider.");
         switch (request.Command)
         {
             case "setBreakpoints":
@@ -259,7 +260,7 @@ internal sealed class MobileSession : IDisposable
                 Require("sourceBreakpoints");
                 var args = request.GetArguments<SetBreakpointsArguments>()!;
                 if ((args.Breakpoints ?? []).Any(b => b.Condition != null || b.HitCondition != null || b.LogMessage != null || b.Column != null))
-                    throw new NotSupportedException("Mobile supports source line breakpoints, not conditions, hit counts, logpoints or columns.");
+                    throw new NotSupportedException("Remote supports source line breakpoints, not conditions, hit counts, logpoints or columns.");
                 string path = args.Source.Path ?? throw new ArgumentException("A local source path is required.");
                 int[] lines = (args.Breakpoints ?? []).Select(b => fromClientLine(b.Line)).ToArray();
                 RemoteBreakpoints bound = symbols.Bind(path, lines);
@@ -276,7 +277,7 @@ internal sealed class MobileSession : IDisposable
                     .Concat(filterOptions.Select(f => new RemoteExceptionRule(f.FilterId, f.Condition))).Distinct().ToArray();
                 if (rules.Any(r => r.Filter is not ("all" or "unhandled")) ||
                     rules.Any(r => r.Type != null && !System.Text.RegularExpressions.Regex.IsMatch(r.Type, @"\A[A-Za-z_][A-Za-z0-9_.+`]*\z")))
-                    throw new NotSupportedException("Mobile exception filters support first-chance 'all' and 'unhandled', each with an optional exact CLR type; user-unhandled and wildcards are not supported.");
+                    throw new NotSupportedException("Remote exception filters support first-chance 'all' and 'unhandled', each with an optional exact CLR type; user-unhandled and wildcards are not supported.");
                 Wait(Client.RequestExceptionsAsync(new(rules), Token));
                 exceptionRules = rules;
                 return null;
@@ -328,7 +329,7 @@ internal sealed class MobileSession : IDisposable
             {
                 Require("variables");
                 var args = request.GetArguments<VariablesArguments>()!;
-                if (args.Format?.Hex == true) throw new NotSupportedException("Mobile hexadecimal formatting is not implemented.");
+                if (args.Format?.Hex == true) throw new NotSupportedException("Remote hexadecimal formatting is not implemented.");
                 return new VariablesResponseBody
                 {
                     Variables = Wait(Client.RequestVariablesAsync(new(Resolve(args.VariablesReference, false),
@@ -340,7 +341,7 @@ internal sealed class MobileSession : IDisposable
                 Require("safeEvaluate");
                 var args = request.GetArguments<EvaluateArguments>()!;
                 if (args.FrameId == null || args.Format?.Hex == true)
-                    throw new NotSupportedException("Mobile evaluation requires a stopped frame and decimal formatting.");
+                    throw new NotSupportedException("Remote evaluation requires a stopped frame and decimal formatting.");
                 RemoteValue value = Wait(Client.RequestEvaluateAsync(new(Resolve(args.FrameId.Value, true), args.Expression), Token));
                 return new EvaluateResponseBody
                 {
@@ -360,7 +361,7 @@ internal sealed class MobileSession : IDisposable
                 {
                     Require(request.Command);
                     if (request.Command == "stepIn" && request.GetArguments<StepInArguments>()?.TargetId != null)
-                        throw new NotSupportedException("Mobile targeted step-in is not implemented.");
+                        throw new NotSupportedException("Remote targeted step-in is not implemented.");
                     Wait(Client.RequestStepAsync(new(id, thread, request.Command), Token));
                 }
                 else Wait(Client.RequestContinueAsync(new(id), Token));
@@ -369,7 +370,7 @@ internal sealed class MobileSession : IDisposable
             }
             case "pause":
                 Require("pause");
-                if (stop != null) throw new InvalidOperationException("The mobile debuggee is already stopped.");
+                if (stop != null) throw new InvalidOperationException("The remote debuggee is already stopped.");
                 Wait(Client.RequestPauseAsync(new(), Token));
                 return null;
             case "exceptionInfo":
@@ -381,10 +382,16 @@ internal sealed class MobileSession : IDisposable
                 return new ExceptionInfoResponseBody { ExceptionId = exception.Type, Description = exception.Description, BreakMode = exception.BreakMode };
             }
             case "dotnet/info":
-                return new { mobile = Client.Capabilities, debuggeeProcessId = lifecycle.ProcessId };
+                return new { remote = Client.Capabilities, debuggeeProcessId = lifecycle.ProcessId,
+                    sessionId = lifecycle.SessionId, artifactsPath = lifecycle.ArtifactsPath, route = lifecycle.Route };
+#if DNCDBG_REMOTE_TEST_HOOKS
+            case "dotnet/testCloseTunnel":
+                Wait(lifecycle.CloseTunnelAsync());
+                return null;
+#endif
             case "restart":
                 if (request.Arguments is { } restart && restart.TryGetProperty("arguments", out _))
-                    throw new NotSupportedException("Changing mobile launch configuration during restart is not implemented; start a new session.");
+                    throw new NotSupportedException("Changing remote launch configuration during restart is not implemented; start a new session.");
                 Restart();
                 return null;
             case "terminate":
@@ -399,7 +406,7 @@ internal sealed class MobileSession : IDisposable
                 after = () => CloseAfterResponse(request.GetArguments<DisconnectArguments>()?.TerminateDebuggee ?? true);
                 return null;
             default:
-                throw new NotSupportedException($"Mobile request '{request.Command}' is not supported. No desktop-engine fallback is used.");
+                throw new NotSupportedException($"Remote request '{request.Command}' is not supported. No desktop-engine fallback is used.");
         }
     }
 
@@ -425,6 +432,7 @@ internal sealed class MobileSession : IDisposable
             pollStop.Dispose();
             pollStop = new();
             Invalidate();
+            Interlocked.Exchange(ref terminatedSent, 0);
             started = false;
             Launch();
             foreach (var (path, lines) in breakpoints) Wait(Client.RequestSetBreakpointsAsync(symbols.Bind(path, lines), Token));
@@ -448,6 +456,7 @@ internal sealed class MobileSession : IDisposable
     }
     private void SendTerminated()
     {
+        lock (stateGate) Invalidate();
         if (Interlocked.Exchange(ref terminatedSent, 1) == 0) connection.SendEvent("terminated");
     }
     private void CloseAfterResponse(bool terminate)
@@ -455,8 +464,8 @@ internal sealed class MobileSession : IDisposable
         try { Close(terminate); }
         catch (Exception e)
         {
-            log($"Mobile cleanup failed: {e}");
-            connection.SendEvent("output", new OutputEventBody { Category = "stderr", Output = $"Mobile cleanup failed: {e.Message}\n" });
+            log($"Remote cleanup failed: {e}");
+            connection.SendEvent("output", new OutputEventBody { Category = "stderr", Output = $"Remote cleanup failed: {e.Message}\n" });
         }
     }
     public void Dispose()

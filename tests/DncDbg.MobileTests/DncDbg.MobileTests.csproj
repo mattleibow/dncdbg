@@ -7,6 +7,7 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../CommonRunner.cs" Link="CommonRunner.cs" />
     <ProjectReference Include="../../src/DncDbg.Dap/DncDbg.Dap.csproj" ReferenceOutputAssembly="false" />
     <ProjectReference Include="../DncDbg.RemoteTests/DncDbg.RemoteTests.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>

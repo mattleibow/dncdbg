@@ -19,6 +19,10 @@ from fake_adb import FakeAdbDaemon
 ROOT = Path(__file__).resolve().parents[2]
 ADAPTER = ROOT / "src/DncDbg.Dap/bin/Release/net10.0/dncdbg-dap.dll"
 IDENTITIES = {
+    "AndroidX64": [
+        "AndroidEmulator", "A3ABA7AECC5E3B02CEF376BA080FEEFD5D3C992F", "CEB01AE9B0CCCE2437C768CB2EE1BE0E719D6B60903F5521AEDFA1C7D16FD736",
+        "6182AB42360380FF67C9F829EBCEBEFE500D51D2", "911AEE78E1143BD419228C4D2B768DE7092DEC2586867AF07CB08F274935C3A1",
+        "7EB51F456695097C1DCD69996D6929B605F9685A", "FD0CA02BF29CB75A23C7E96F53E1B10CAFB5ED0829A9DD39E3C7AB1C20B8C6E8"],
     "Android": [
         "AndroidEmulator", "F741D77EAE68D01DA37161129423DEC3AA9DFBF9", "E2FAE5E1F10FA61CDE54D9CC8E6E4537C3EDCE24B8E0216E078F655B04EACC92",
         "25A4607527A49B76F797C582AFB6D45338D2DB85", "363A647DCADB9D8200F2098B9C4313A6EC38735D970B6F2890D7A9951932A52A",
@@ -121,7 +125,8 @@ class Remote:
                             "Provider": "private-coreclr", "Bootstrap": "private-dbi-v1 (experimental; runtime-version-fragile)",
                             "SupportedBuild": dict(zip(
                                 ["Platform", "RuntimeBuildId", "RuntimeHash", "DbiBuildId", "DbiHash", "DacBuildId", "DacHash"],
-                                identity)) | {"Architecture": "Arm64", "RuntimeVersion": "11.0.0-rc.1.26425.128"},
+                                identity)) | {"Architecture": "X64" if self.platform == "AndroidX64" else "Arm64",
+                                              "RuntimeVersion": "11.0.0-rc.1.26425.128"},
                             "Features": [
                                 "sourceBreakpoints", "threads", "modules", "scopes", "variables",
                                 "safeEvaluate", "pause", "stepIn", "next", "stepOut", "exceptions"],
@@ -189,11 +194,12 @@ class Remote:
 
 
 class Dap:
-    def __init__(self, env, timeout=15):
-        self.process = subprocess.Popen(["dotnet", str(ADAPTER)], cwd=ROOT, env=env,
+    def __init__(self, env, timeout=15, adapter=None, arguments=()):
+        self.process = subprocess.Popen(["dotnet", str(adapter or ADAPTER), *arguments], cwd=ROOT, env=env,
                                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.messages = queue.Queue()
         self.history = []
+        self.transcript = []
         self.sequence = 0
         self.timeout = timeout
         self.stderr = ""
@@ -205,12 +211,15 @@ class Dap:
                 continue
             length = int(line.split(b":")[1])
             self.process.stdout.readline()
-            self.messages.put(json.loads(self.process.stdout.read(length)))
+            message = json.loads(self.process.stdout.read(length))
+            self.transcript.append(message)
+            self.messages.put(message)
 
     def send(self, command, arguments=None):
         self.sequence += 1
-        data = json.dumps({"seq": self.sequence, "type": "request", "command": command,
-                           "arguments": arguments or {}}).encode()
+        message = {"seq": self.sequence, "type": "request", "command": command, "arguments": arguments or {}}
+        self.transcript.append(message)
+        data = json.dumps(message).encode()
         self.process.stdin.write(f"Content-Length: {len(data)}\r\n\r\n".encode() + data)
         self.process.stdin.flush()
         return self.sequence
@@ -332,6 +341,22 @@ class MobileDapTests(unittest.TestCase):
                                      f"tcp:{self.remote.endpoint['Port']}"]])
         self.assertFalse(any("reverse" in c or "--remove-all" in c for c in commands))
         self.assertTrue(any("uninstall" in c for c in commands))
+
+    def test_android_x64_uses_the_same_mobile_provider(self):
+        self.remote = Remote(self.state, "AndroidX64")
+        launch = self.dap.send("launch", {"mobile": self.options("android") | {"runtimeIdentifier": "android-x64"}})
+        self.dap.request("setExceptionBreakpoints", {"filters": []})
+        self.dap.request("configurationDone")
+        self.dap.response(launch)
+        self.dap.event("stopped")
+        self.assertEqual(self.dap.request("threads")["threads"][0]["id"], 7)
+        self.dap.request("disconnect", {"terminateDebuggee": True})
+        self.dap.event("terminated")
+
+    def test_android_x64_rejects_an_arm64_target_identity(self):
+        self.remote = Remote(self.state, "Android")
+        launch = self.dap.send("launch", {"mobile": self.options("android") | {"runtimeIdentifier": "android-x64"}})
+        self.dap.response(launch, success=False)
 
     def test_ios_host_networking_detach(self):
         self.launch("iosSimulator")

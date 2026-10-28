@@ -1,4 +1,4 @@
-// Typed preview model on the existing native execution owner; never arbitrary COM dispatch.
+// Shared typed model on the native execution owner; never arbitrary COM dispatch.
 #pragma once
 #include <algorithm>
 #include <cctype>
@@ -41,8 +41,8 @@ std::string Utf8(const char16_t* text, size_t count) {
     return result;
 }
 void Event(Json event) {
-    if (mobileEvents.size() >= 4096) throw std::runtime_error("EventLimit");
-    mobileEvents.push_back(std::move(event));
+    if (remoteEvents.size() >= 4096) throw std::runtime_error("EventLimit");
+    remoteEvents.push_back(std::move(event));
 }
 std::string ModuleMvid(Module* module) {
     Ref metadata;
@@ -104,7 +104,7 @@ void ModelCleanup() {
     modelThreads.clear();
     for (auto& entry : modelModules) { entry.second.value->Release(); entry.first->Release(); }
     modelModules.clear();
-    catalog = Json::array(); mobileEvents = Json::array();
+    catalog = Json::array(); remoteEvents = Json::array();
 }
 void ModelThread(Unknown* thread, bool added) {
     uint32_t id = 0;
@@ -236,9 +236,9 @@ Json ModelSetBreakpoints(const Json& request) {
         }
         it = modelBreakpoints.erase(it);
     }
-    mobileEvents.erase(std::remove_if(mobileEvents.begin(), mobileEvents.end(), [&](const auto& event) {
+    remoteEvents.erase(std::remove_if(remoteEvents.begin(), remoteEvents.end(), [&](const auto& event) {
         return event.at("Kind") == "breakpoint" && event.at("Breakpoint").at("Source") == source;
-    }), mobileEvents.end());
+    }), remoteEvents.end());
     for (size_t i = 0; i < lines.size(); ++i) modelBreakpoints.push_back({NewId(), locations[i], source, lines[i].get<int>()});
     for (auto& module : modelModules) ModelBind(module.second.value);
     Json result = Json::array();
@@ -585,8 +585,8 @@ Json ModelPoll() {
     if (exited.load()) {
         Event({{"Kind", "exited"}, {"Generation", NewId()}});
     }
-    Json events = std::move(mobileEvents);
-    mobileEvents = Json::array();
+    Json events = std::move(remoteEvents);
+    remoteEvents = Json::array();
     return events;
 }
 void ModelStep(const Json& request) {

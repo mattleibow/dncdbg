@@ -11,7 +11,7 @@ import sys
 import time
 
 from mobile_tools import adb_path, tool_environment
-from run_device import Ui
+from run_device import Ui, verify_ui
 from test_dap import Dap, ROOT
 
 APP = "com.dncdbg.mobiletests"
@@ -24,6 +24,8 @@ def main():
     parser.add_argument("--app", type=Path, required=True)
     parser.add_argument("--assets", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--ui-port", type=int, default=9223)
+    parser.add_argument("--runtime-identifier", choices=["iossimulator-arm64", "android-arm64", "android-x64"])
     args = parser.parse_args()
     args.output = args.output.resolve()
     args.output.mkdir(parents=True, exist_ok=True)
@@ -33,7 +35,7 @@ def main():
     options = {
         "platform": args.platform, "deviceId": args.device, "applicationId": APP,
         "appPath": str(args.app.resolve()), "assetsPath": str(args.assets.resolve()),
-        "runtimeIdentifier": "android-arm64" if args.platform == "android" else "iossimulator-arm64",
+        "runtimeIdentifier": args.runtime_identifier or ("android-arm64" if args.platform == "android" else "iossimulator-arm64"),
         "startupTimeoutSeconds": 90, "replaceExisting": False, "uninstallOnDisconnect": False,
     }
 
@@ -148,7 +150,9 @@ def main():
                 if args.platform == "android":
                     ui_port = int(device("forward", "--no-rebind", "tcp:0", "tcp:9223").stdout)
                 else:
-                    ui_port = json.loads(wait.stdout)["port"]
+                    assert json.loads(wait.stdout)["port"] == args.ui_port, "Fault UI broker selected a different port"
+                    ui_port = args.ui_port
+                report["uiIdentity"] = verify_ui(ui_port, args.platform, pid)
                 ui = Ui(ui_port, output)
                 ui.command("MAUI tree --depth 15")
                 if scenario == "crash-stopped":
@@ -199,7 +203,7 @@ def main():
             if dap:
                 dap.close()
                 (output / "adapter-stderr.log").write_text(dap.stderr)
-                report["dapMessages"] = dap.history
+                report["dapMessages"] = dap.transcript
             cleanup()
             if ui_port and args.platform == "android":
                 device("forward", "--remove", f"tcp:{ui_port}", check=False)

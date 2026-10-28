@@ -17,8 +17,7 @@ import uuid
 
 from mobile_tools import ROOT, adb_path, android_sdk, tool_environment
 
-sys.path.insert(0, str(ROOT / "tests/DncDbg.MauiTestApp"))
-from validate import start_owned, stop_owned
+from process_tools import start_owned, stop_owned
 
 PIN = json.loads(Path(__file__).with_name("tuple.json").read_text())
 FIXTURE = ROOT / "tests/DncDbg.MauiTestApp"
@@ -48,6 +47,7 @@ class Suite:
         self.emulator = None
         self.emulator_log = None
         self.broker_process = None
+        self.android = PIN["androidX64" if getattr(args, "android_abi", "arm64-v8a") == "x86_64" else "android"]
 
     def save(self):
         self.state_path.write_text(json.dumps(self.state, indent=2))
@@ -86,8 +86,10 @@ class Suite:
 
     def preflight(self):
         require(os.name == "posix", "Device orchestration requires POSIX process ownership.")
-        require(platform.system() == "Darwin" and platform.machine() == "arm64",
-                "The pinned private ABI requires Apple Silicon: iOS simulator or accelerated Android arm64 emulator.")
+        system, architecture = (("Darwin", "arm64") if self.args.platform == "ios" else
+                                (self.android["hostSystem"], self.android["hostArchitecture"]))
+        require(platform.system() == system and platform.machine() == architecture,
+                f"The selected pinned tuple requires {system}/{architecture}; never substitute another ABI.")
         self.env = tool_environment(self.args.platform)
         scratch = self.output / "work/scratch"
         scratch.mkdir(parents=True)
@@ -111,25 +113,35 @@ class Suite:
         else:
             sdk = android_sdk()
             self.env["PATH"] = str(sdk / "emulator") + os.pathsep + self.env["PATH"]
-            image = properties(sdk / "system-images" / Path(*PIN["android"]["systemImage"].split(";")[1:]) /
+            image = properties(sdk / "system-images" / Path(*self.android["systemImage"].split(";")[1:]) /
                                "source.properties")
-            require(image.get("Pkg.Revision") == PIN["android"]["imageRevision"] and
-                    image.get("AndroidVersion.ApiLevel") == "37.1" and
-                    image.get("SystemImage.TagId") == "google_apis,page_size_16kb" and
-                    image.get("SystemImage.Abi") == "arm64-v8a",
-                    "Required Android API/image revision/ABI unavailable; never substitute x86_64.")
+            require(image.get("Pkg.Revision") == self.android["imageRevision"] and
+                    image.get("AndroidVersion.ApiLevel") == self.android["apiLevel"] and
+                    image.get("SystemImage.TagId") == self.android["tag"] and
+                    image.get("SystemImage.Abi") == self.android["abi"],
+                    "Required Android API/image revision/ABI unavailable; never substitute another tuple.")
             emulator_properties = properties(sdk / "emulator/source.properties")
-            require(emulator_properties.get("Pkg.Revision") == PIN["android"]["emulatorVersion"],
-                    f"Required Android emulator {PIN['android']['emulatorVersion']} unavailable.")
-            require(properties(sdk / f"ndk/{PIN['android']['ndk']}/source.properties").get("Pkg.Revision") == PIN["android"]["ndk"],
+            require(emulator_properties.get("Pkg.Revision") == self.android["emulatorVersion"],
+                    f"Required Android emulator {self.android['emulatorVersion']} unavailable.")
+            require(properties(sdk / f"ndk/{self.android['ndk']}/source.properties").get("Pkg.Revision") == self.android["ndk"],
                     "Pinned Android NDK unavailable.")
+            if system == "Linux":
+                require(os.access("/dev/kvm", os.R_OK | os.W_OK), "Hosted Android requires accessible /dev/kvm; no software fallback.")
             self.run(sdk / "emulator/emulator", "-accel-check")
+            (self.output / "android-prerequisites.json").write_text(json.dumps({
+                "runtimeIdentifier": self.android["rid"], "hostSystem": system, "hostArchitecture": architecture,
+                "image": image, "emulator": emulator_properties,
+                "ndk": properties(sdk / f"ndk/{self.android['ndk']}/source.properties"),
+            }, indent=2))
         self.state["pins"] = PIN
         self.save()
 
     def boot(self):
         name = "dncdbg-" + uuid.uuid4().hex
         self.state["name"] = name
+        with socket.socket() as reserve:
+            reserve.bind(("127.0.0.1", 0))
+            self.state["uiPort"] = reserve.getsockname()[1] if self.args.platform == "ios" else 9223
         self.save()
         if self.args.platform == "ios":
             device = self.run("xcrun", "simctl", "create", name, PIN["ios"]["deviceType"],
@@ -143,9 +155,9 @@ class Suite:
             avd.mkdir()
             self.env["ANDROID_AVD_HOME"] = str(avd)
             sdk = android_sdk()
-            manager = sdk / "cmdline-tools/latest/bin/avdmanager"
-            self.run(manager, "create", "avd", "--name", name, "--package", PIN["android"]["systemImage"],
-                     "--device", PIN["android"]["deviceType"], input="no\n")
+            manager = sdk / f"cmdline-tools/{self.android.get('commandLineTools', 'latest')}/bin/avdmanager"
+            self.run(manager, "create", "avd", "--name", name, "--package", self.android["systemImage"],
+                     "--device", self.android["deviceType"], input="no\n")
             ports = list(range(5554, 5682, 2))
             random.shuffle(ports)
             for port in ports:
@@ -177,7 +189,7 @@ class Suite:
                 time.sleep(2)
             else:
                 raise TimeoutError("Dedicated emulator did not boot in 240 seconds.")
-            require(self.run(adb_path(), "-s", device, "shell", "getprop", "ro.product.cpu.abi").stdout.strip() == "arm64-v8a",
+            require(self.run(adb_path(), "-s", device, "shell", "getprop", "ro.product.cpu.abi").stdout.strip() == self.android["abi"],
                     "Emulator booted the wrong ABI.")
             require(self.run(adb_path(), "-s", device, "shell", "getprop", "ro.kernel.qemu").stdout.strip() == "1",
                     "Refusing a physical Android device.")
@@ -199,7 +211,7 @@ class Suite:
         # Android's 9223 fallback is explicitly UI-only. No reverse/discovery claim is needed.
 
     def build(self, configuration="Debug", faults=False):
-        rid = "iossimulator-arm64" if self.args.platform == "ios" else "android-arm64"
+        rid = "iossimulator-arm64" if self.args.platform == "ios" else self.android["rid"]
         tfm = "net11.0-" + self.args.platform
         if configuration == "Debug":
             command = [sys.executable, "src/DncDbg.Remote.Target/build.py", rid, "--configuration", "Debug"]
@@ -209,6 +221,7 @@ class Suite:
         properties = [f"-p:RuntimeIdentifier={rid}", "-p:EnableExperimentalRemoteDebugging=true",
                       "-p:EnableExperimentalPrivateBootstrap=true", f"-p:EnableExperimentalTestFaults={str(faults).lower()}",
                       "-p:EmbedAssembliesIntoApk=true", "-p:UseMonoRuntime=false"]
+        properties += [f"-p:MauiDevFlowPort={self.state['uiPort']}", f"-p:MauiDevFlowSessionId={self.state['name']}"]
         result = self.json("dotnet", "msbuild", ".", f"-p:TargetFramework={tfm}", f"-p:Configuration={configuration}",
                            *properties, "-getProperty:MauiVersion,DefineConstants",
                            "-getItem:NativeReference,AndroidNativeLibrary,PackageReference,ProjectReference", cwd=FIXTURE)
@@ -235,7 +248,10 @@ class Suite:
     def proof(self, helper, app, assets, name):
         self.run(sys.executable, str(Path(__file__).with_name(helper)), "--platform",
                  "iosSimulator" if self.args.platform == "ios" else "android", "--device", self.state["device"],
-                 "--app", app, "--assets", assets, "--output", self.output / name, timeout=900)
+                 "--app", app, "--assets", assets, "--output", self.output / name,
+                 "--ui-port", str(self.state["uiPort"]),
+                 "--runtime-identifier", "iossimulator-arm64" if self.args.platform == "ios" else self.android["rid"],
+                 timeout=900)
 
     def execute(self):
         self.preflight()
@@ -254,9 +270,10 @@ class Suite:
         for disconnect in (False, True):
             command = [sys.executable, str(FIXTURE / "validate.py"), "--platform", self.args.platform,
                        "--device", self.state["device"], "--private-bootstrap", "--output",
-                       str(self.output / ("direct-disconnect" if disconnect else "direct-continue"))]
+                       str(self.output / ("direct-disconnect" if disconnect else "direct-continue")),
+                       "--agent-port", str(self.state["uiPort"]), "--ui-session", self.state["name"]]
             if self.args.platform == "android":
-                command += ["--agent-port", "9223", "--allow-fallback"]
+                command += ["--allow-fallback", "--runtime-identifier", self.android["rid"]]
             else:
                 command += ["--build-developer-dir", str(self.args.xcode_dir.resolve())]
             if disconnect:
@@ -377,6 +394,8 @@ class Suite:
                     "platform": self.args.platform, "pins": PIN, "passed": passed, "error": error,
                     "cleanup": self.state.get("cleanupDone", False),
                     "cleanupErrors": self.state.get("cleanupErrors", []), "files": {}}
+        if self.args.platform == "android":
+            manifest["runtimeIdentifier"] = self.android["rid"]
         total = 0
         for path in self.output.rglob("*"):
             relative = path.relative_to(self.output)
@@ -408,6 +427,8 @@ def main():
     parser.add_argument("--platform", required=True, choices=["contracts", "ios", "android"])
     parser.add_argument("--output", type=Path)
     parser.add_argument("--xcode-dir", type=Path)
+    parser.add_argument("--android-abi", choices=["arm64-v8a", "x86_64"], default="arm64-v8a",
+                        help="Explicit separate local Apple Silicon or hosted Linux/KVM tuple; no automatic substitution")
     parser.add_argument("--cleanup", action="store_true", help="Idempotent recovery using this run's ownership journal")
     args = parser.parse_args()
     args.output = args.output or ROOT / "build/mobile-tests" / f"{args.platform}-{uuid.uuid4().hex}"

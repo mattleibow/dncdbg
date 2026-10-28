@@ -1,5 +1,11 @@
 # Mobile proof: one entrypoint
 
+Run the [native-host architecture gate](../DncDbg.NativeHostTests/README.md)
+first for shared agent/model/protocol/lifecycle changes. It exercises the same
+C++ bootstrap through generic remote DAP and real TCP routing without a MAUI
+workload or device. This entrypoint adds packaging/startup/platform-routing and
+DevFlow/device-cleanup proof; mobile is a thin provider layer.
+
 From the checkout, **one .NET 10 console command owns the complete run**. It is
 part of `DncDbg.slnx`; it does not add mobile workloads to ordinary solution
 builds. All low-level Python scripts are internal helpers, not separate required
@@ -19,6 +25,10 @@ dotnet run --project tests/DncDbg.MobileTests -c Release -- \
 ANDROID_HOME="$HOME/Library/Android/sdk" \
 dotnet run --project tests/DncDbg.MobileTests -c Release -- \
   --platform android --output build/validation/mobile-android-RUN
+
+# Complete hosted Linux x64/KVM proof (separate pinned runtime and image):
+dotnet run --project tests/DncDbg.MobileTests -c Release -- \
+  --platform android --android-abi x86_64 --output build/validation/mobile-android-x64-RUN
 ```
 
 Use a **new output directory** for each run. Exit **0** means every requested
@@ -41,18 +51,30 @@ portable projects still select the root .NET 10 SDK.
 - **iOS:** Apple Silicon, Xcode **26.6 / 17F113**, simulator runtime
   **iOS 26.5 / 23F77**, device type **iPhone 17 Pro**. `DEVELOPER_DIR` is scoped;
   no global `xcode-select` change, runtime download or nearest-device fallback.
-- **Android:** Apple Silicon/Hypervisor.framework, emulator **37.1.11**, image
+- **Local Android arm64:** Apple Silicon/Hypervisor.framework, emulator **37.1.11**, image
   **`system-images;android-37.1;google_apis_ps16k;arm64-v8a` revision 8**, device
   definition `pixel_6`, NDK **29.0.14206865**, Java and SDK CLI tools.
   `ANDROID_HOME` is required. The exact image/NDK may be provisioned using the
   official `sdkmanager`; if its catalog no longer supplies the pinned revision,
   provision a verified retained SDK instead of substituting a newer image.
   The runner invokes `avdmanager`/`emulator` directly and requires acceleration.
+- **Hosted Android x64:** Linux x86_64, accessible **`/dev/kvm`**, emulator
+  **37.2.12**, image
+  **`system-images;android-37.1;google_apis_ps16k;x86_64` revision 9**,
+  device `pixel_6`, NDK **29.0.14206865**, command-line tools **21.0**.
+  `--android-abi x86_64` explicitly selects `net11.0-android` / `android-x64`;
+  there is no ABI or software-emulation fallback. The workflow provisions with
+  official `sdkmanager`, `avdmanager`, `emulator` and ADB only.
 
-These OS/tool pins supplement, not replace, the unchanged **runtime/DBI/DAC
+These OS/tool pins supplement, not replace, the exact **runtime/DBI/DAC
 build IDs and code hashes** in `PrivateBootstrapPolicy.SupportedBuilds`. Actual
 capability/preflight/DAP requests must pass that policy; filenames or product
-versions alone are insufficient.
+versions alone are insufficient. Android x64 was derived from
+`Microsoft.NETCore.App.Runtime.android-x64/11.0.0-rc.1.26425.128`:
+the three ELF machine IDs are **62**, and the DBI exports both `DllMain` and
+`CoreCLRCreateCordbObject3`. Its build IDs/full-file SHA-256 values are pinned
+separately from local arm64 and desktop Linux, and the adapter verifies the
+requested RID's architecture against the actual target capability.
 
 ## What the command owns and proves
 
@@ -80,6 +102,10 @@ Android **9223 is explicitly DevFlow UI-only**; broker reverse 19223 is also
 UI-only. The Android suite records broker failure separately and requires the
 explicit-port UI assertions/screenshots; it never relabels fallback as discovery
 success. No debugger fixed port, global forward removal or device wipe.
+The iOS UI port and DevFlow build session are run-scoped. Before querying or
+mutating any UI, both DAP/fault helpers verify exact package, platform and native
+process ID. A reachable unrelated agent/ADB port is an error, never a fallback
+UI target.
 
 `state.json` journals ownership for recovery. The workflow repeats cleanup with
 the **same command/options plus `--cleanup`** in an `always()` step after timeout/
@@ -104,21 +130,18 @@ Failed gates preserve evidence, not successful-looking partial results.
   SDK/workload and requires the pinned Xcode/runtime already listed by the
   [official runner image](https://github.com/actions/runner-images/blob/main/images/macos/macos-26-arm64-Readme.md).
   Image rotation/removal is a red infrastructure gate, never a silent skip.
-- **`Mobile Android emulator (pinned)`** requires an **ephemeral, isolated
-  self-hosted** runner labeled
-  **`self-hosted`, `macOS`, `ARM64`, `dncdbg-android-arm64-api37-rc1`** with that
-  exact retained SDK/image/emulator. Do not attach this label to a personal/shared
-  workstation: PR code executes on it. Use a disposable machine with no secrets
-  or production network access and destroy it after the job.
+- **`Mobile Android emulator (pinned)`** uses hosted **`ubuntu-24.04`**,
+  explicitly enables/checks KVM and runs the **entire same** unified suite with
+  the separate x64 pins. It does not merely cross-build an APK, run host fakes,
+  or pass an arm64 image to x64 KVM. Catalog revision drift fails preflight;
+  emulator boot failure or missing KVM fails the job.
 
-**Hosted Android blocker:** [GitHub documents no nested virtualization on hosted
-arm64 macOS](https://docs.github.com/en/actions/reference/runners/github-hosted-runners#limitations-for-arm64-macos-runners).
-[Android requires matching host/image architecture for VM acceleration](https://developer.android.com/studio/run/emulator-acceleration).
-Hosted x64 Linux KVM therefore cannot prove this arm64-only private ABI; swapping
-in x86_64 would weaken the gate. Linux arm64 with KVM is not an established
-official emulator/NDK host tuple here. The required self-hosted job remains
-pending until provisioned. Generic desktop CI/fakes and historical local evidence
-**do not make it green**.
+[.NET 11 Android supports `android-x64` CoreCLR](https://github.com/dotnet/android/blob/main/Documentation/docs-mobile/building-apps/build-properties.md).
+[Android requires matching host/image architecture for acceleration](https://developer.android.com/studio/run/emulator-acceleration);
+the new Linux/image/agent/runtime tuple satisfies that without changing local
+arm64 admission. No permanently queued self-hosted job remains.
+Hosted capacity cancellation is infrastructure red, not a successful skip.
+Generic desktop CI/fakes and historical local evidence **do not make mobile green**.
 
 Require **both named mobile jobs** in branch protection alongside all existing
 Debugger Windows/Linux/macOS, Docker and VS Code checks. Workflow triggers create
@@ -128,8 +151,8 @@ mandatory. This PR remains draft/unmerged.
 
 ## Why native code exists
 
-Normal DNCDbg is C# 14/.NET 10. Only the opted-in **Debug mobile fixture's private
-experimental provider** compiles/links `src/DncDbg.Remote.Target`. Low-level
+Normal DNCDbg is C# 14/.NET 10. Only the opted-in **Debug mobile/native-host
+experimental fixtures** compile/link `src/DncDbg.Remote.Target`. Low-level
 pre-managed startup hooks and private DBI/`ICorDebug` initialization require
 target-native ABI access independent of managed execution. This fixture requests
 activation through a P/Invoke (it does not claim a native pre-main constructor);

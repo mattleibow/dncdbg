@@ -36,12 +36,12 @@ internal static class ExperimentalStartup
             return;
         }
         agent = new DncDbg.Remote.RemoteAgent(enableExperimental: true,
-            () => DncDbg.Remote.MobileRuntimeCapability.CreateUnavailableBackend(runtime, PrivateStartup.Capabilities));
+            () => DncDbg.Remote.RemoteRuntimeCapability.CreateUnavailableBackend(runtime, PrivateStartup.Capabilities));
         Status = PrivateStartup.Capabilities.Blocker!;
 #else
         agent = new DncDbg.Remote.RemoteAgent(enableExperimental: true,
-            () => DncDbg.Remote.MobileRuntimeCapability.CreateUnavailableBackend(runtime));
-        Status = DncDbg.Remote.MobileRuntimeCapability.Detect(runtime).Blocker!;
+            () => DncDbg.Remote.RemoteRuntimeCapability.CreateUnavailableBackend(runtime));
+        Status = DncDbg.Remote.RemoteRuntimeCapability.Detect(runtime).Blocker!;
 #endif
         File.WriteAllText(DescriptorPath, System.Text.Json.JsonSerializer.Serialize(agent.Endpoint, DncDbg.Remote.RemoteJson.Default.RemoteEndpoint));
         File.WriteAllText(Path.Combine(FileSystem.AppDataDirectory, "dncdbg-startup.json"),

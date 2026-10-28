@@ -100,11 +100,14 @@
 	<ItemGroup Condition="'$(Configuration)' == 'Debug' And '$(EnableExperimentalRemoteDebugging)' == 'true' And '$(EnableExperimentalPrivateBootstrap)' == 'true' And '$(RuntimeIdentifier)' == 'android-arm64'">
 		<AndroidNativeLibrary Include="../../build/native-private/android-arm64/libdncdbg_target.so" Abi="arm64-v8a" />
 	</ItemGroup>
+	<ItemGroup Condition="'$(Configuration)' == 'Debug' And '$(EnableExperimentalRemoteDebugging)' == 'true' And '$(EnableExperimentalPrivateBootstrap)' == 'true' And '$(RuntimeIdentifier)' == 'android-x64'">
+		<AndroidNativeLibrary Include="../../build/native-private/android-x64/libdncdbg_target.so" Abi="x86_64" />
+	</ItemGroup>
 	<Target Name="ValidatePrivateBootstrapConfiguration" BeforeTargets="PrepareForBuild" Condition="'$(Configuration)' == 'Debug' And '$(EnableExperimentalPrivateBootstrap)' == 'true' And '$(TargetFramework)' != ''">
 		<Error Condition="'$(EnableExperimentalRemoteDebugging)' != 'true' Or '$(UseMonoRuntime)' == 'true' Or '$(PublishAot)' == 'true'"
 		       Text="Private DBI startup requires explicit experimental remote debugging and CoreCLR (not Mono/NativeAOT)." />
-		<Error Condition="'$(RuntimeIdentifier)' != 'iossimulator-arm64' And '$(RuntimeIdentifier)' != 'android-arm64'"
-		       Text="Private DBI startup only permits the pinned arm64 iOS simulator/Android emulator tuples." />
+		<Error Condition="'$(RuntimeIdentifier)' != 'iossimulator-arm64' And '$(RuntimeIdentifier)' != 'android-arm64' And '$(RuntimeIdentifier)' != 'android-x64'"
+		       Text="Private DBI startup only permits the pinned iOS arm64 simulator and Android arm64/x64 emulator tuples." />
 	</Target>
 	<PropertyGroup Condition="'$(Configuration)' == 'Debug' And $([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'ios'">
 		<CodesignEntitlements>Platforms/iOS/Entitlements.Debug.plist</CodesignEntitlements>

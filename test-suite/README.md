@@ -7,6 +7,10 @@ auto-discovered set. Portable remote contracts live in
 `DncDbg.slnx`; the [mobile entrypoint](../tests/DncDbg.MobileTests/README.md)
 owns separate simulator/emulator DAP, DevFlow and fault proof. Neither replaces
 or relaxes this parity suite.
+The [native-host architecture gate](../tests/DncDbg.NativeHostTests/README.md)
+uses the real shared C++ target agent through generic remote DAP providers on
+macOS/Linux/Docker. It is also under `tests/`, never an auto-discovered parity
+`Test*` project.
 
 Use PowerShell 7 (`pwsh`) on Windows, Linux, and macOS. From the repository root:
 

@@ -20,6 +20,8 @@ internal static class PrivateStartup
             string platform = OperatingSystem.IsIOS() ? "iOSSimulator" : "AndroidEmulator";
             if (DeviceInfo.DeviceType != DeviceType.Virtual)
                 throw new PlatformNotSupportedException("The private bootstrap only permits simulators/emulators.");
+            if (Native.ContractVersion() != RemoteContract.ModelVersion)
+                throw new PlatformNotSupportedException("Native agent/generated contract mismatch; rebuild the helper and fixture together.");
             string runtime = Marshal.PtrToStringUTF8(Native.RuntimePath())
                 ?? throw new PlatformNotSupportedException("Pinned target-native helper could not locate the running CoreCLR, or rejected the platform/architecture.");
             nativeAvailable = true;
@@ -69,7 +71,7 @@ internal static class PrivateStartup
     private static void SavePreflight() => File.WriteAllText(Path.Combine(FileSystem.AppDataDirectory, "dncdbg-private-preflight.json"),
         JsonSerializer.Serialize(Capabilities, RemoteJson.Default.RemoteCapabilities));
 
-    public static RemoteCapabilities Capabilities => MobileRuntimeCapability.Detect(RemoteRuntimeKind.CoreClr) with
+    public static RemoteCapabilities Capabilities => RemoteRuntimeCapability.Detect(RemoteRuntimeKind.CoreClr) with
     {
         ManagedDebugging = Endpoint != null,
         Blocker = Endpoint != null ? null : status + $" Native state={(nativeAvailable ? Native.Status() : 0)}.",
@@ -95,6 +97,8 @@ internal static class PrivateStartup
 #endif
         [DllImport(Library, EntryPoint = "dncdbg_runtime_path")]
         internal static extern nint RuntimePath();
+        [DllImport(Library, EntryPoint = "dncdbg_contract_version")]
+        internal static extern int ContractVersion();
         [DllImport(Library, EntryPoint = "dncdbg_prepare")]
         internal static extern int Prepare([MarshalAs(UnmanagedType.LPUTF8Str)] string runtime,
             [MarshalAs(UnmanagedType.LPUTF8Str)] string dbi, [MarshalAs(UnmanagedType.LPUTF8Str)] string dac);

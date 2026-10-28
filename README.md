@@ -17,7 +17,7 @@ The engine uses ClrDebug and the public CLR debugging APIs directly. It does not
 wrap another debugger executable. Native CLR debugging libraries and the Windows
 PDB reader remain runtime dependencies supplied through NuGet and the target
 runtime; no C++ compiler, CMake build, or vendored native source is required.
-The separate, opt-in **Debug mobile fixture** is the sole exception: its private
+The separate, opt-in **Debug mobile/native-host fixtures** are the exception: their private
 target provider uses native startup/ICorDebug code, never shipped in ordinary
 desktop adapter artifacts. Normal DNCDbg remains C#.
 
@@ -85,12 +85,26 @@ See [Docker and WSL debugging](docs/docker_wsl.md) for prerequisites, cleanup,
 source mapping and host-client transport configuration. Linux CI requires Docker;
 without `--require-docker`, local runs skip when Docker is unavailable.
 
+### Generic remote architecture proof
+
+```sh
+dotnet run --project tests/DncDbg.NativeHostTests -c Release
+```
+
+This required fast gate uses a C++ nethost/hostfxr fixture, the **same** private
+target agent/bootstrap/generated model as mobile, and the shared C# DAP session.
+Direct and real TCP-proxy paths prove debugger behavior and transactional
+transport/lifecycle failures without MAUI workloads or devices. Normal macOS/
+Linux CI and the existing Docker gate run the same suite. See the
+[test guide](tests/DncDbg.NativeHostTests/README.md) and
+[provider architecture/reference comparison](docs/remote-architecture.md).
+
 ### Experimental mobile DAP preview
 
 The opt-in [`mobile` launch configuration](docs/mobile-preview.md) adds
 adapter-owned deployment, scoped transport, a generated typed debugger model
 and a private CoreCLR provider for **exactly pinned .NET 11 RC1 arm64 iOS
-simulator/Android emulator** builds. It is not general supported mobile
+simulator and arm64/x64 Android emulator** builds. It is not general supported mobile
 debugging and makes no physical-device claim. The separately built
 [MAUI fixture](tests/DncDbg.MauiTestApp/README.md) remains on a local .NET 11
 SDK pin; the debugger and ordinary desktop launch remain on .NET 10.
@@ -104,6 +118,8 @@ dotnet run --project tests/DncDbg.MobileTests -c Release -- --platform contracts
 Portable remote/contract projects belong in `tests/` and `DncDbg.slnx`, like
 SmokeTests and DockerTests. Mobile orchestration is not an upstream native
 parity project and is deliberately outside `test-suite/Test*` auto-discovery.
+Common debugger correctness is established by the native-host gate first;
+mobile providers add exact deployment/path/routing and device/UI proof.
 The separate `Mobile proof` PR workflow requires actual pinned runtime suites;
 generic desktop CI and fake contracts do not prove mobile debugging.
 Runtime capabilities explicitly exclude func-eval and other unsupported

@@ -66,9 +66,7 @@ jobs:
 
   android:
     name: Mobile Android emulator (pinned)
-    # Hosted macOS cannot nest Hypervisor.framework; x64 Linux KVM cannot run this arm64 ABI.
-    # This required job deliberately stays queued until an isolated, ephemeral Apple Silicon runner exists.
-    runs-on: [self-hosted, macOS, ARM64, dncdbg-android-arm64-api37-rc1]
+    runs-on: ubuntu-24.04
     timeout-minutes: 50
     env:
       DOTNET_INSTALL_DIR: ${{ github.workspace }}/build/mobile-sdk
@@ -83,33 +81,60 @@ jobs:
           dotnet-version: |
             10.0.401
             11.0.100-rc.1.26425.128
+      - name: Enable hosted KVM (required; no software-emulation fallback)
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          test -c /dev/kvm
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-dncdbg-kvm.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          test -r /dev/kvm && test -w /dev/kvm
+      - name: Provision pinned SDK image using official Android CLI only
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${ANDROID_HOME:?Hosted image must expose the Android SDK}"
+          export ANDROID_SDK_ROOT="$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+          mkdir -p build/validation/android-provision
+          manager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          { yes || true; } | "$manager" --licenses > build/validation/android-provision/licenses.log
+          "$manager" --channel=0 --install \
+            "cmdline-tools;21.0" "platform-tools" "platforms;android-37" "build-tools;37.0.0" \
+            "ndk;29.0.14206865" "emulator" \
+            "system-images;android-37.1;google_apis_ps16k;x86_64" \
+            > build/validation/android-provision/sdkmanager.log 2>&1
+          "$ANDROID_HOME/emulator/emulator" -accel-check
       - name: Install exact workload and DevFlow CLI
         shell: bash
         run: |
           set -euo pipefail
-          : "${ANDROID_HOME:?Ephemeral runner must expose its pinned Android SDK}"
           mkdir -p build/mobile-tools build/workload-scratch
           cd tests/DncDbg.MauiTestApp
           dotnet workload install maui-android --version 11.0.100-rc.1.26460.1 --temp-dir ../../build/workload-scratch
           cd ../..
           dotnet tool install Microsoft.Maui.Cli --version 0.1.0-preview.12.26421.1 --tool-path build/mobile-tools
           echo "$PWD/build/mobile-tools" >> "$GITHUB_PATH"
-      - name: Build, provision and prove exact Android arm64 emulator tuple
+      - name: Build and prove exact Android x64 emulator tuple
         run: >-
           dotnet run --project tests/DncDbg.MobileTests -c Release --
-          --platform android --output build/validation/mobile-ci/android
+          --platform android --android-abi x86_64 --output build/validation/mobile-ci/android
       - name: Recover owned emulator, forwards and processes even after cancellation
         if: always()
         timeout-minutes: 3
         run: >-
           dotnet run --project tests/DncDbg.MobileTests -c Release --no-build --
-          --platform android --output build/validation/mobile-ci/android --cleanup
+          --platform android --android-abi x86_64 --output build/validation/mobile-ci/android --cleanup
       - name: Upload bounded Android evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: mobile-android-${{ github.run_id }}-${{ github.run_attempt }}
-          path: build/validation/mobile-ci/android/evidence/
+          path: |
+            build/validation/mobile-ci/android/evidence/
+            build/validation/android-provision/
           if-no-files-found: error
           retention-days: 7
           compression-level: 6

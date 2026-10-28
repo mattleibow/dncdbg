@@ -11,10 +11,30 @@
     "deviceType": "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro"
   },
   "android": {
+    "rid": "android-arm64",
+    "abi": "arm64-v8a",
+    "hostSystem": "Darwin",
+    "hostArchitecture": "arm64",
+    "apiLevel": "37.1",
+    "tag": "google_apis,page_size_16kb",
     "systemImage": "system-images;android-37.1;google_apis_ps16k;arm64-v8a",
     "imageRevision": "8",
     "emulatorVersion": "37.1.11",
     "ndk": "29.0.14206865",
     "deviceType": "pixel_6"
+  },
+  "androidX64": {
+    "rid": "android-x64",
+    "abi": "x86_64",
+    "hostSystem": "Linux",
+    "hostArchitecture": "x86_64",
+    "apiLevel": "37.1",
+    "tag": "google_apis,page_size_16kb",
+    "systemImage": "system-images;android-37.1;google_apis_ps16k;x86_64",
+    "imageRevision": "9",
+    "emulatorVersion": "37.2.12",
+    "ndk": "29.0.14206865",
+    "deviceType": "pixel_6",
+    "commandLineTools": "21.0"
   }
 }

@@ -10,6 +10,18 @@ using DncDbg.Remote;
 using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(60));
 CancellationToken token = deadline.Token;
 int passed = 0;
+if (args is ["--tunnel-contracts"])
+{
+    await TunnelChecks.RunAsync(Check, token);
+    Console.WriteLine($"Passed {passed} real TCP tunnel architecture contracts.");
+    return;
+}
+if (args is ["--native-host-capabilities", var nativeRuntime])
+{
+    Console.WriteLine(JsonSerializer.Serialize(PrivateBootstrapPolicy.NativeHostCapabilities(nativeRuntime),
+        RemoteJson.Default.RemoteCapabilities));
+    return;
+}
 if (args is ["--symbols", var symbolAssets])
 {
     var symbols = new RemoteSymbols(symbolAssets);
@@ -352,9 +364,6 @@ async Task TestDesktopAsync(string fixture, string source, string results)
             await agent.DisposeAsync();
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
             timeout.CancelAfter(TimeSpan.FromSeconds(10));
-            while (!File.Exists(resultPath))
-                await Task.Delay(20, timeout.Token);
-            Check(File.ReadAllText(resultPath) == "42", dropWhileStopped ? "disconnect relinquishes callback stop" : "continue executes debuggee to completion");
             try
             {
                 using Process process = Process.GetProcessById(backend!.ProcessId);
@@ -362,6 +371,8 @@ async Task TestDesktopAsync(string fixture, string source, string results)
             }
             catch (ArgumentException) { }
             Check(true, "owned debuggee exits without being killed");
+            Check(File.Exists(resultPath) && File.ReadAllText(resultPath) == "42",
+                dropWhileStopped ? "disconnect relinquishes callback stop" : "continue executes debuggee to completion");
         }
         finally
         {

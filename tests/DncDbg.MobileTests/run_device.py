@@ -17,6 +17,22 @@ from mobile_tools import adb_path, tool_environment
 from test_dap import Dap, ROOT
 
 
+def verify_ui(port, platform, pid):
+    deadline = time.monotonic() + 30
+    while True:
+        result = subprocess.run(["maui", "devflow", "--agent-port", str(port), "agent", "status"],
+                                cwd=ROOT, capture_output=True, text=True, timeout=15)
+        if result.returncode == 0:
+            status = json.loads(result.stdout)
+            assert status["app"]["packageId"] == "com.dncdbg.mobiletests", "DevFlow port belongs to another application"
+            assert status["app"]["processId"] == pid, "DevFlow selected a different app process"
+            assert status["device"]["platform"].lower() == ("android" if platform == "android" else "ios"), "Wrong DevFlow platform"
+            return status
+        if time.monotonic() >= deadline:
+            raise TimeoutError("The exact fixture DevFlow agent did not become reachable")
+        time.sleep(0.1)
+
+
 class Ui:
     def __init__(self, port, output):
         self.errors = (output / "devflow-stderr.log").open("a")
@@ -66,6 +82,8 @@ def main():
     parser.add_argument("--app", type=Path, required=True)
     parser.add_argument("--assets", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--ui-port", type=int, default=9223, help="UI-only fixture port, never the debugger endpoint")
+    parser.add_argument("--runtime-identifier", choices=["iossimulator-arm64", "android-arm64", "android-x64"])
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     assets = args.output / "assets"
@@ -114,7 +132,7 @@ def main():
         launch = dap.send("launch", {"mobile": {
             "platform": args.platform, "appPath": str(args.app.resolve()), "applicationId": "com.dncdbg.mobiletests",
             "deviceId": args.device, "assetsPath": str(assets.resolve()),
-            "runtimeIdentifier": "android-arm64" if args.platform == "android" else "iossimulator-arm64",
+            "runtimeIdentifier": args.runtime_identifier or ("android-arm64" if args.platform == "android" else "iossimulator-arm64"),
             "replaceExisting": False, "uninstallOnDisconnect": False, "startupTimeoutSeconds": 90}})
         breakpoint = dap.request("setBreakpoints", {"source": {"path": str(source)},
                                                   "breakpoints": [{"line": line}, {"line": deep_line}]})["breakpoints"][0]
@@ -130,7 +148,8 @@ def main():
         check(changed["id"] == breakpoint["id"] and changed["verified"] and changed["source"]["path"] == str(source),
               "DAP breakpoint identity survives asynchronous module binding")
         check(dap.event("breakpoint")["breakpoint"]["line"] == deep_line, "deep inspection breakpoint bound before execution")
-        evidence["provider"] = dap.request("dotnet/info")["mobile"]
+        details = dap.request("dotnet/info")
+        evidence["provider"] = details.get("remote", details.get("mobile"))
         wait = subprocess.run(["maui", "devflow", "--device", args.device, "wait", "--wait-platform",
                                "Android" if args.platform == "android" else "iOS", "--timeout", "20"],
                               cwd=ROOT, capture_output=True, text=True, timeout=30)
@@ -141,8 +160,10 @@ def main():
             evidence["devflowBroker"] = wait.returncode == 0
         else:
             registration = json.loads(wait.stdout)
-            ui_port = registration["port"]
+            assert registration["port"] == args.ui_port, "Broker returned a different UI port"
+            ui_port = args.ui_port
             evidence["devflowBroker"] = True
+        evidence["uiIdentity"] = verify_ui(ui_port, args.platform, details["debuggeeProcessId"])
         ui = Ui(ui_port, args.output)
         ui.command("MAUI tree --depth 15")
         ui.command("MAUI tap --automationId reset-scenario")
@@ -354,7 +375,9 @@ def main():
                                "Android" if args.platform == "android" else "iOS", "--timeout", "20"],
                               cwd=ROOT, capture_output=True, text=True, timeout=30)
         if args.platform == "iosSimulator":
-            ui_port = json.loads(wait.stdout)["port"]
+            assert json.loads(wait.stdout)["port"] == args.ui_port, "Restart selected a different UI port"
+            ui_port = args.ui_port
+        verify_ui(ui_port, args.platform, dap.request("dotnet/info")["debuggeeProcessId"])
         ui = Ui(ui_port, args.output)
         ui.command("MAUI tree --depth 15")
         ui.send("MAUI tap --automationId run-scenario")
@@ -394,7 +417,7 @@ def main():
         dap.close()
         (args.output / "adapter-stderr.log").write_text(dap.stderr)
         evidence["checks"] = checks
-        evidence["dapMessages"] = dap.history
+        evidence["dapMessages"] = dap.transcript
         # Ensure no target or UI route is left by this gate, including on an assertion failure.
         if args.platform == "android":
             device("shell", "am", "force-stop", "com.dncdbg.mobiletests", check=False)

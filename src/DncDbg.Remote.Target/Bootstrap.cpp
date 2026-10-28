@@ -68,7 +68,7 @@ int64_t stopId = 0, nextId = 0;
 bool stopReported = false;
 bool cleaning = false;
 std::unordered_map<int64_t, Unknown*> frames;
-Json catalog = Json::array(), mobileEvents = Json::array();
+Json catalog = Json::array(), remoteEvents = Json::array();
 Json stopBreakpoints = Json::array();
 std::string stopReason = "breakpoint";
 struct ExceptionRule { CallbackKind stage; std::string type; };
@@ -106,12 +106,16 @@ void Report(const char* phase, HResult result = 0) {
 bool PlatformAllowed() {
 #if defined(__aarch64__) && defined(__APPLE__) && TARGET_OS_SIMULATOR && TARGET_OS_IOS
     return true;
-#elif defined(__aarch64__) && defined(__ANDROID__)
+#elif (defined(__aarch64__) || defined(__x86_64__)) && defined(__ANDROID__)
     char value[PROP_VALUE_MAX]{};
     __system_property_get("ro.kernel.qemu", value);
     if (std::strcmp(value, "1") == 0) return true;
     __system_property_get("ro.boot.qemu", value);
     return std::strcmp(value, "1") == 0;
+#elif defined(DNCDBG_NATIVE_HOST) && defined(__APPLE__) && !TARGET_OS_IPHONE && defined(__aarch64__)
+    return true;
+#elif defined(DNCDBG_NATIVE_HOST) && defined(__linux__) && !defined(__ANDROID__) && (defined(__aarch64__) || defined(__x86_64__))
+    return true;
 #else
     return false;
 #endif
@@ -388,7 +392,7 @@ Json Evaluate(const Json& request) {
     return {{"Value", std::to_string(answer)}, {"Type", "int"}};
 }
 
-#include "MobileModel.h"
+#include "RemoteModel.h"
 
 void StartDebugging() {
     if (debug) throw std::runtime_error("InvalidState");
@@ -640,6 +644,8 @@ void* Watchdog(void*) {
 EXPORT void dncdbg_test_stall_owner() { testStallOwner.store(true); }
 #endif
 
+EXPORT int dncdbg_contract_version() { return ModelVersion; }
+
 EXPORT const char* dncdbg_runtime_path() {
     if (!PlatformAllowed()) return nullptr;
     void* symbol = dlsym(RTLD_DEFAULT, "coreclr_initialize");
@@ -691,6 +697,10 @@ EXPORT int dncdbg_prepare(const char* expectedRuntime, const char* expectedDbi, 
 }
 
 EXPORT int dncdbg_start(const char* report, const char* token, const char* capabilityJson) {
+    if (!capabilityJson || std::strlen(capabilityJson) > 16384) return 0;
+    try {
+        if (Json::parse(capabilityJson).at("ModelVersion").get<int>() != ModelVersion) return 0;
+    } catch (const std::exception&) { return 0; }
     int expected = 0;
     if (!PlatformAllowed() || !dllMain || !factory || !report || !token || !capabilityJson ||
         std::strlen(token) != 64 || std::strlen(capabilityJson) > 16384 || !state.compare_exchange_strong(expected, 1)) return 0;

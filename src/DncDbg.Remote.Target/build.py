@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build only the explicitly pinned arm64 simulator/emulator experimental helper."""
+"""Build only explicitly pinned simulator/emulator/native-host Debug fixture agents."""
 import argparse
 import hashlib
 import json
@@ -11,7 +11,7 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[2]
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("rid", nargs="?", choices=["iossimulator-arm64", "android-arm64"])
+parser.add_argument("rid", nargs="?", choices=["iossimulator-arm64", "android-arm64", "android-x64", "osx-arm64", "linux-x64", "linux-arm64"])
 parser.add_argument("--test-host", action="store_true", help="Run native contract fakes without loading a runtime or DBI")
 parser.add_argument("--test-faults", action="store_true", help="Explicit fixture-only watchdog fault injection; excluded from normal helpers")
 parser.add_argument("--configuration", choices=["Debug", "Release"], default="Debug")
@@ -45,7 +45,17 @@ if args.test_host:
     subprocess.run(command, cwd=ROOT, check=True)
     subprocess.run([str(test)], cwd=ROOT, check=True, timeout=30)
     raise SystemExit(0)
-if args.rid == "iossimulator-arm64":
+if args.rid in ("osx-arm64", "linux-x64", "linux-arm64"):
+    expected = ("osx-" if platform.system() == "Darwin" else "linux-") + (
+        "arm64" if platform.machine() in ("arm64", "aarch64") else "x64")
+    if args.rid != expected:
+        raise SystemExit(f"Native host RID {args.rid} does not match this host ({expected}).")
+    library = out / ("libdncdbg_target.dylib" if platform.system() == "Darwin" else "libdncdbg_target.so")
+    command = ["c++", "-DDNCDBG_NATIVE_HOST", *common, "-pthread",
+               "-dynamiclib" if platform.system() == "Darwin" else "-shared", "-o", str(library)]
+    if platform.system() != "Darwin":
+        command.append("-ldl")
+elif args.rid == "iossimulator-arm64":
     sdk = subprocess.check_output(["xcrun", "--sdk", "iphonesimulator", "--show-sdk-path"], text=True).strip()
     library = out / "libdncdbg_target.a"
     obj = out / "Bootstrap.o"
@@ -59,7 +69,8 @@ else:
     host = {"Darwin": "darwin-x86_64", "Linux": "linux-x86_64"}.get(platform.system())
     if host is None:
         raise SystemExit("Native mobile helpers require macOS or Linux.")
-    compiler = ndk / f"toolchains/llvm/prebuilt/{host}/bin/aarch64-linux-android24-clang++"
+    target = "x86_64-linux-android" if args.rid == "android-x64" else "aarch64-linux-android"
+    compiler = ndk / f"toolchains/llvm/prebuilt/{host}/bin/{target}24-clang++"
     library = out / "libdncdbg_target.so"
     command = [str(compiler), *common, "-shared", "-static-libstdc++", "-ldl", "-o", str(library)]
 subprocess.run(command, cwd=ROOT, check=True)

@@ -4,7 +4,7 @@ namespace DncDbg.Remote;
 
 public enum RemoteRuntimeKind { Unspecified, Mono, CoreClr, NativeAot }
 
-public static class MobileRuntimeCapability
+public static class RemoteRuntimeCapability
 {
     public static RemoteCapabilities Detect(RemoteRuntimeKind runtime = RemoteRuntimeKind.Unspecified)
     {

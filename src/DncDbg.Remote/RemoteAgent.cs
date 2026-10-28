@@ -19,7 +19,7 @@ public sealed class RemoteAgent : IAsyncDisposable
     {
         if (!enableExperimental)
             throw new InvalidOperationException("Remote debugging must be explicitly enabled as experimental.");
-        this.createBackend = createBackend ?? (() => MobileRuntimeCapability.CreateUnavailableBackend());
+        this.createBackend = createBackend ?? (() => RemoteRuntimeCapability.CreateUnavailableBackend());
         listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start(1);
         Endpoint = new(((IPEndPoint)listener.LocalEndpoint).Port, Convert.ToHexString(RandomNumberGenerator.GetBytes(32)));

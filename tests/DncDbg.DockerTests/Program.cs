@@ -33,6 +33,8 @@ string id = Guid.NewGuid().ToString("N");
 string context = Path.Combine(root, "build", "docker-tests", id);
 string image = $"dncdbg-docker-tests:{id}";
 string container = $"dncdbg-docker-tests-{id}";
+string nativeImage = image + "-native-host";
+string nativeContainer = container + "-native-host";
 string label = "org.dncdbg.docker-tests=" + (Environment.GetEnvironmentVariable("DNCDBG_DOCKER_TEST_RUN") ?? id);
 var failures = new List<Exception>();
 try
@@ -58,6 +60,49 @@ try
     Require(running.Trim() == "true", "The test container must be running.");
 
     await DebugContainer(container, fixture);
+    await DebugNativeHost();
+
+    async Task DebugNativeHost()
+    {
+        string source = Path.Combine(context, "native-host");
+        Directory.CreateDirectory(source);
+        foreach (string file in new[] { "global.json", "DncDbg.slnx", "LICENSE", "THIRD-PARTY-NOTICES.md" })
+            File.Copy(Path.Combine(root, file), Path.Combine(source, file));
+        CopySource(Path.Combine(root, "src"), Path.Combine(source, "src"));
+        foreach (string name in new[] { "DncDbg.NativeHostTests", "DncDbg.RemoteTests", "RemoteBreakpointApp" })
+            CopySource(Path.Combine(root, "tests", name), Path.Combine(source, "tests", name));
+        File.Copy(Path.Combine(root, "tests/CommonRunner.cs"), Path.Combine(source, "tests/CommonRunner.cs"));
+        File.Copy(Path.Combine(root, "tests/DncDbg.NativeHostTests/Dockerfile"), Path.Combine(source, "Dockerfile"));
+        await Commands.Run("docker", ["build", "--platform", platform, "--label", label, "--tag", nativeImage, source], 600);
+        string head = (await Commands.Run("git", ["rev-parse", "HEAD"], 15)).Trim();
+        bool dirty = !string.IsNullOrWhiteSpace(await Commands.Run("git", ["status", "--porcelain"], 15));
+        try
+        {
+            Console.WriteLine(await Commands.Run("docker", ["run", "--name", nativeContainer, "--label", label,
+                "--platform", platform, "--network", "none", "--cap-add", "SYS_PTRACE", "--security-opt", "seccomp=unconfined",
+                "--env", "DNCDBG_SOURCE_HEAD=" + head, "--env", "DNCDBG_SOURCE_DIRTY=" + dirty.ToString().ToLowerInvariant(),
+                nativeImage], 600));
+        }
+        finally
+        {
+            string evidence = Path.Combine(root, "build/validation/native-host-docker", id);
+            Directory.CreateDirectory(evidence);
+            await Commands.Run("docker", ["cp", nativeContainer + ":/workspace/build/validation/native-host-docker/evidence", evidence], 30);
+        }
+    }
+
+    static void CopySource(string from, string to)
+    {
+        Directory.CreateDirectory(to);
+        foreach (string file in Directory.EnumerateFiles(from))
+            File.Copy(file, Path.Combine(to, Path.GetFileName(file)));
+        foreach (string directory in Directory.EnumerateDirectories(from))
+        {
+            string name = Path.GetFileName(directory);
+            if (name is not ("bin" or "obj" or "build" or ".git" or "__pycache__" or "node_modules"))
+                CopySource(directory, Path.Combine(to, name));
+        }
+    }
 
     async Task Publish(string project, string output, params string[] properties)
     {
@@ -76,7 +121,9 @@ finally
     foreach (string[] command in new[]
     {
         new[] { "container", "ls", "--all", "--quiet", "--filter", "name=^/" + container + "$" },
+        new[] { "container", "ls", "--all", "--quiet", "--filter", "name=^/" + nativeContainer + "$" },
         new[] { "image", "ls", "--quiet", image },
+        new[] { "image", "ls", "--quiet", nativeImage },
     })
     {
         try

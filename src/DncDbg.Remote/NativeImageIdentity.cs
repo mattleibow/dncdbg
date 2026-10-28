@@ -22,8 +22,9 @@ public sealed record NativeImageIdentity(string BuildId, string CodeHash)
         {
             return platform switch
             {
-                "iOSSimulator" => MachO(image),
-                "AndroidEmulator" => Elf(image),
+                "iOSSimulator" => MachO(image, 7),
+                "MacOSNativeHost" => MachO(image, 1),
+                "AndroidEmulator" or "LinuxNativeHost" => Elf(image),
                 _ => throw new InvalidDataException("Unsupported native image platform."),
             };
         }
@@ -33,7 +34,7 @@ public sealed record NativeImageIdentity(string BuildId, string CodeHash)
         }
     }
 
-    private static NativeImageIdentity MachO(byte[] b)
+    private static NativeImageIdentity MachO(byte[] b, uint platform)
     {
         if (U32(b, 0) != 0xfeedfacf || U32(b, 4) != 0x0100000c)
             throw new InvalidDataException("Expected thin arm64 Mach-O.");
@@ -41,7 +42,7 @@ public sealed record NativeImageIdentity(string BuildId, string CodeHash)
         if (commands > 4096 || commandEnd > b.Length)
             throw new InvalidDataException("Invalid Mach-O commands.");
         string? uuid = null, hash = null;
-        bool simulator = false;
+        bool matchesPlatform = false;
         for (int i = 0; i < commands; i++)
         {
             uint command = U32(b, offset);
@@ -51,7 +52,7 @@ public sealed record NativeImageIdentity(string BuildId, string CodeHash)
             if (command == 0x1b && size == 24)
                 uuid = Convert.ToHexString(b.AsSpan(offset + 8, 16));
             if (command == 0x32 && size >= 24)
-                simulator = U32(b, offset + 8) == 7; // PLATFORM_IOSSIMULATOR, not MACOS or IOS.
+                matchesPlatform = U32(b, offset + 8) == platform;
             if (command == 0x19 && size >= 72)
             {
                 int count = checked((int)U32(b, offset + 64));
@@ -69,15 +70,15 @@ public sealed record NativeImageIdentity(string BuildId, string CodeHash)
             }
             offset += size;
         }
-        return simulator && uuid != null && hash != null
-            ? new(uuid, hash) : throw new InvalidDataException("Missing simulator platform, UUID or executable code.");
+        return matchesPlatform && uuid != null && hash != null
+            ? new(uuid, hash) : throw new InvalidDataException("Missing expected platform, UUID or executable code.");
     }
 
     private static NativeImageIdentity Elf(byte[] b)
     {
         if (!b.AsSpan(0, 6).SequenceEqual(new byte[] { 0x7f, (byte)'E', (byte)'L', (byte)'F', 2, 1 }) ||
-            BinaryPrimitives.ReadUInt16LittleEndian(b.AsSpan(18)) != 183)
-            throw new InvalidDataException("Expected little-endian arm64 ELF.");
+            BinaryPrimitives.ReadUInt16LittleEndian(b.AsSpan(18)) is not (183 or 62))
+            throw new InvalidDataException("Expected a little-endian 64-bit ELF for the explicit target platform.");
         int table = checked((int)U64(b, 32));
         int stride = BinaryPrimitives.ReadUInt16LittleEndian(b.AsSpan(54));
         int count = BinaryPrimitives.ReadUInt16LittleEndian(b.AsSpan(56));

@@ -149,16 +149,18 @@ def main():
                 if scenario == "watchdog":
                     ui.command("MAUI tap --automationId watchdog-scenario")
                 elif args.platform == "android":
-                    device("shell", "run-as", APP, "kill", "-ABRT", str(pid))
+                    device("shell", "run-as", APP, "kill", "-KILL", str(pid))
                 else:
-                    os.kill(pid, signal.SIGABRT)
+                    os.kill(pid, signal.SIGKILL)
+                dap.timeout = 35
                 dap.event("terminated")
                 verify(time.monotonic() - started < 35, "abrupt target death releases DAP within 35 seconds")
                 if args.platform == "android":
                     verify(not device("shell", "pidof", APP, check=False).stdout.strip(), "owned app process is gone")
-                    descriptor = device("exec-out", "run-as", APP, "cat", "files/dncdbg-remote.json", check=False)
+                    descriptor = device("shell", "run-as", APP, "sh", "-c",
+                                        "'test ! -e files/dncdbg-remote.json'", check=False)
                     text = device("exec-out", "run-as", APP, "cat", "files/dncdbg-private-startup.jsonl", check=False).stdout
-                    verify(not descriptor.stdout.strip(), "owned endpoint token/descriptor removed")
+                    verify(descriptor.returncode == 0, "owned endpoint token/descriptor removed")
                 else:
                     try:
                         os.kill(pid, 0)

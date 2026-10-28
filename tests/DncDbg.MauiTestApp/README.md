@@ -23,8 +23,9 @@ and removes only its own UI mapping, including on failure.
 
 `tests/DncDbg.MobileTests/run_faults.py` takes the same arguments. It gates a
 **real completed install** before the adapter can launch, then terminates during
-initial deployment and restart redeployment. It also crashes real running and
-stopped targets and verifies DAP/endpoint/forward cleanup. Its watchdog scenario
+initial deployment and restart redeployment. It also uses uncatchable SIGKILL
+to simulate abrupt crashes of real running and stopped targets and verifies
+DAP/endpoint/forward cleanup. Its watchdog scenario
 requires explicit test-only builds:
 
 ```sh
@@ -38,7 +39,7 @@ macro and the managed Debug-only property are required. The extra fixture
 button asks the native owner to stall; the actual 20-second watchdog must exit
 the app, and the adapter must clean its route/credentials within 35 seconds.
 The fault export is absent from ordinary native helpers, and the button/import
-are inactive without the managed opt-in. Release excludes both, even when
+are inactive without the managed opt-in. Release never enables either, even when
 all experimental properties are supplied. Fault injection is not a DAP operation
 and does not broaden the remote protocol.
 

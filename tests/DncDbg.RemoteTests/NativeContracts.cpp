@@ -12,8 +12,8 @@ void Check(bool valid, const char* name) {
 }
 struct Fake final : Controller {
     uint32_t refs = 1;
-    int continues = 0;
-    int stops = 0, detaches = 0;
+    std::atomic<int> continues{0};
+    std::atomic<int> stops{0}, detaches{0};
     HResult QueryInterface(const Guid&, void**) override { return Fail; }
     uint32_t AddRef() override { return ++refs; }
     uint32_t Release() override { return --refs; }
@@ -73,6 +73,20 @@ int main() {
         try { ModelConfigure({{"Modules", Json::array({{{"Mvid", "bad"}}})}}); }
         catch (const std::exception&) { rejected = true; }
         Check(rejected && catalog.empty(), "invalid module catalog cannot partially configure the owner");
+        Json point{{"Offset", 0}, {"Source", "fixture.cs"}, {"Line", 1}, {"Checksum", "AA"}, {"Algorithm", "SHA256"}};
+        Json method{{"Token", 0x06000001}, {"Name", "Fixture.Main"}, {"Variables", Json::array()}, {"Points", Json::array({point})}};
+        Json module{{"Mvid", std::string(32, 'A')}, {"Name", "fixture"}, {"Types", Json::array()}, {"Methods", Json::array({method})}};
+        ModelConfigure({{"Modules", Json::array({module})}});
+        module["Methods"][0]["Points"][0]["Offset"] = 1;
+        ModelConfigure({{"Modules", Json::array({module})}, {"Append", true}});
+        Check(catalog.size() == 1 && catalog[0]["Methods"].size() == 1 && catalog[0]["Methods"][0]["Points"].size() == 2,
+            "bounded symbol fragments merge by exact MVID and method identity");
+        Json original = catalog;
+        rejected = false;
+        try { ModelConfigure({{"Modules", Json::array({module})}, {"Append", true}}); }
+        catch (const std::runtime_error&) { rejected = true; }
+        Check(rejected && catalog == original, "duplicate symbol fragment fails without partially mutating the catalog");
+        ModelCleanup();
     }
     Check(!PlatformAllowed() && dncdbg_runtime_path() == nullptr &&
         dncdbg_start("unused", std::string(64, 'a').c_str(), "{}") == 0, "host cannot activate target private ABI");
@@ -165,5 +179,19 @@ int main() {
                   << ": malformed " << (stopped ? "stopped" : "idle") << " Release terminates within 1s\n";
     }
     Check(malformedBounded, "authenticated malformed Release gets correlated MalformedPayload or EOF and cleanup within 1s");
+    {
+        Fake controller;
+        int fd = Connect();
+        controller.AddRef(); process = &controller;
+        std::thread owner(Run, nullptr);
+        Wire wire{fd, [] {}, Clock::now() + std::chrono::seconds(5)};
+        Send(wire, 1, 1, {{"Token", std::string(64, 'a')}}); wire.Read();
+        Send(wire, 2, 9, Json::object());
+        Json response = wire.Read();
+        bool detachedBeforeAck = controller.detaches == 1 && controller.stops == 1;
+        close(fd); owner.join();
+        Check(response.at("Error").is_null() && detachedBeforeAck && !process && controller.refs == 1,
+            "native disconnect acknowledges only after owned detach and reference cleanup");
+    }
     std::cout << "Passed " << checks << " native contract checks (fakes, not mobile runtime proof).\n";
 }

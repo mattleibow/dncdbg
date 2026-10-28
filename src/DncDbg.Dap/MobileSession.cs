@@ -1,0 +1,403 @@
+using System.Collections.Concurrent;
+using DncDbg.Protocol;
+using DncDbg.Remote;
+
+namespace DncDbg.Dap;
+
+/// <summary>Mobile DAP translation only. Execution is owned by the single target-native provider thread.</summary>
+internal sealed class MobileSession : IDisposable
+{
+    private readonly MobileLaunchArguments options;
+    private readonly DapConnection connection;
+    private readonly Action<string> log;
+    private readonly Func<int, int> toClientLine;
+    private readonly Func<int, int> fromClientLine;
+    private readonly ConcurrentDictionary<int, (long Remote, bool Frame)> handles = new();
+    private readonly object stateGate = new();
+    private int terminatedSent;
+    private readonly Dictionary<string, int[]> breakpoints = new(StringComparer.Ordinal);
+    private int nextHandle;
+    private RemoteStop? stop;
+    private RemoteSymbols symbols = null!;
+    private MobileLifecycle lifecycle = null!;
+    private CancellationTokenSource lifetime = new();
+    private CancellationTokenSource pollStop = new();
+    private Task? polling;
+    private string[] exceptionFilters = ["unhandled"];
+    private string[]? exceptionTypes;
+    private bool closed;
+    private bool started;
+    private IRemoteDebugModel Client => lifecycle.Client ?? throw new InvalidOperationException("The mobile debugger is not connected.");
+    private CancellationToken Token => lifetime.Token;
+    private T Wait<T>(Task<T> task) => task.GetAwaiter().GetResult();
+    private void Wait(Task task) => task.GetAwaiter().GetResult();
+
+    public MobileSession(MobileLaunchArguments options, DapConnection connection, Action<string> log,
+        Func<int, int> toClientLine, Func<int, int> fromClientLine)
+    {
+        this.options = options;
+        this.connection = connection;
+        this.log = log;
+        this.toClientLine = toClientLine;
+        this.fromClientLine = fromClientLine;
+    }
+
+    public void Launch()
+    {
+        lifecycle = new MobileLifecycle(options);
+        try
+        {
+            symbols = new RemoteSymbols(options.AssetsPath);
+            Wait(lifecycle.ConnectAsync(Token));
+            foreach (RemoteConfiguration chunk in symbols.ConfigurationChunks())
+                Wait(Client.RequestConfigureAsync(chunk, Token));
+        }
+        catch (Exception startup)
+        {
+            try { Wait(lifecycle.CloseAsync(terminate: true)); }
+            catch (Exception cleanup)
+            {
+                throw new InvalidOperationException(startup.Message + " Cleanup also failed: " + cleanup.Message, startup);
+            }
+            throw;
+        }
+        connection.SendEvent("process", new
+        {
+            name = options.ApplicationId, systemProcessId = lifecycle.ProcessId > 0 ? (int?)lifecycle.ProcessId : null,
+            isLocalProcess = false, startMethod = "launch",
+        });
+        connection.SendEvent("capabilities", new
+        {
+            capabilities = new
+            {
+                supportsConfigurationDoneRequest = true, supportsRestartRequest = true, supportsTerminateRequest = true,
+                supportsModulesRequest = Has("modules"), supportsEvaluateForHovers = Has("safeEvaluate"),
+                supportsExceptionInfoRequest = Has("exceptions"), supportsConditionalBreakpoints = false,
+                supportsHitConditionalBreakpoints = false, supportsLogPoints = false, supportsFunctionBreakpoints = false,
+                supportsSetVariable = false, supportsSetExpression = false, supportsReadMemoryRequest = false,
+                supportsWriteMemoryRequest = false, supportsGotoTargetsRequest = false, supportsStepInTargetsRequest = false,
+                supportsSingleThreadExecutionRequests = false, supportsBreakpointLocationsRequest = false,
+                supportsLoadedSourcesRequest = false, supportsExceptionFilterOptions = true,
+                exceptionBreakpointFilters = new[] {
+                    new { filter = "all", label = "Thrown CLR exceptions", @default = false, supportsCondition = true, conditionDescription = "One exact CLR type name, e.g. System.InvalidOperationException" },
+                    new { filter = "unhandled", label = "Unhandled CLR exceptions", @default = true, supportsCondition = true, conditionDescription = "One exact CLR type name, e.g. System.InvalidOperationException" } },
+            },
+        });
+    }
+
+    private bool Has(string feature) => Client.Capabilities.Features?.Contains(feature, StringComparer.Ordinal) == true;
+    private void Require(string feature)
+    {
+        if (!Has(feature)) throw new NotSupportedException($"Mobile provider does not support '{feature}'.");
+    }
+
+    public void Start()
+    {
+        if (started) throw new InvalidOperationException("Mobile configuration has already completed.");
+        if (Has("exceptions")) Wait(Client.RequestExceptionsAsync(new(exceptionFilters, exceptionTypes), Token));
+        else if (exceptionFilters.Length > 0) throw new NotSupportedException("The mobile provider does not support exception filters.");
+        Wait(Client.RequestStartAsync(new(), Token));
+        started = true;
+        polling = PollAsync();
+    }
+
+    private async Task PollAsync()
+    {
+        try
+        {
+            while (!Token.IsCancellationRequested && !pollStop.IsCancellationRequested)
+            {
+                RemoteEvent[] events = await Client.RequestPollAsync(new(), Token);
+                foreach (RemoteEvent item in events)
+                {
+                    switch (item.Kind)
+                    {
+                        case "stopped" when item.Stop != null:
+                            lock (stateGate)
+                            {
+                                handles.Clear();
+                                stop = item.Stop;
+                                connection.SendEvent("stopped", new StoppedEventBody
+                                { Reason = item.Stop.Reason, ThreadId = item.Stop.ThreadId });
+                            }
+                            break;
+                        case "thread" when item.Thread != null:
+                        case "threadExited" when item.Thread != null:
+                            connection.SendEvent("thread", new ThreadEventBody
+                            { Reason = item.Kind == "thread" ? "started" : "exited", ThreadId = item.Thread.Id });
+                            break;
+                        case "module" when item.Module != null:
+                        case "moduleRemoved" when item.Module != null:
+                            connection.SendEvent("module", new { reason = item.Kind == "module" ? "new" : "removed", module = Module(item.Module) });
+                            break;
+                        case "breakpoint" when item.Breakpoint != null:
+                            connection.SendEvent("breakpoint", new { reason = "changed", breakpoint = Breakpoint(item.Breakpoint) });
+                            break;
+                        case "exited":
+                            if (item.ExitCode is { } exitCode)
+                                connection.SendEvent("exited", new ExitedEventBody { ExitCode = exitCode });
+                            else
+                                connection.SendEvent("output", new OutputEventBody { Category = "console", Output = "The mobile target exited; its exit code is unavailable.\n" });
+                            await lifecycle.CloseAsync(terminate: false);
+                            SendTerminated();
+                            return;
+                        default:
+                            throw new InvalidDataException($"Unknown remote debugger event '{item.Kind}'.");
+                    }
+                }
+                await Task.Delay(50, pollStop.Token);
+            }
+        }
+        catch (Exception e) when ((lifetime.IsCancellationRequested || pollStop.IsCancellationRequested) &&
+            e is OperationCanceledException or IOException or ObjectDisposedException) { }
+        catch (Exception e)
+        {
+            log($"Mobile event stream failed: {e}");
+            connection.SendEvent("output", new OutputEventBody { Category = "stderr", Output = $"Mobile debugger disconnected: {e.Message}\n" });
+            try { await lifecycle.CloseAsync(terminate: true); }
+            catch (Exception cleanup) { log($"Mobile cleanup failed: {cleanup}"); }
+            SendTerminated();
+        }
+    }
+
+    private int Handle(long remote, bool frame)
+    {
+        if (remote == 0) return 0;
+        int id = Interlocked.Increment(ref nextHandle);
+        if (id <= 0) throw new InvalidOperationException("DAP handle limit exceeded.");
+        handles[id] = (remote, frame);
+        return id;
+    }
+    private long Resolve(int id, bool frame) => handles.TryGetValue(id, out var item) && item.Frame == frame
+        ? item.Remote : throw new InvalidOperationException("Stale or invalid mobile frame/variable reference.");
+    private RemoteStop Current() => stop ?? throw new InvalidOperationException("The mobile debuggee is not stopped.");
+    private void Thread(int id)
+    {
+        if (Current().ThreadId != id) throw new NotSupportedException("Inspection/execution is limited to the currently stopped thread.");
+    }
+    private object Module(RemoteModule module) => new
+    {
+        id = module.Id, name = module.Name, path = module.Path, version = module.Mvid, symbolStatus = "Portable PDB catalog",
+    };
+    private object Breakpoint(RemoteBreakpoint breakpoint) => new
+    { verified = breakpoint.Verified, line = toClientLine(breakpoint.Line), message = breakpoint.Message };
+    private Variable Variable(RemoteValue value) => new()
+    {
+        Name = value.Name ?? "", Value = value.Value, Type = value.Type, VariablesReference = Handle(value.Handle, false),
+        IndexedVariables = value.IndexedVariables, NamedVariables = value.NamedVariables, EvaluateName = value.EvaluateName,
+    };
+    private void Invalidate()
+    {
+        stop = null;
+        handles.Clear();
+    }
+
+    public object? Dispatch(DapMessage request, out Action? after)
+    {
+        if (request.Command == "restart") return DispatchCore(request, out after);
+        lock (stateGate) return DispatchCore(request, out after);
+    }
+
+    private object? DispatchCore(DapMessage request, out Action? after)
+    {
+        after = null;
+        if (request.Arguments is { } json && json.TryGetProperty("singleThread", out var single) && single.ValueKind == System.Text.Json.JsonValueKind.True)
+            throw new NotSupportedException("Single-thread execution is not supported by the mobile provider.");
+        switch (request.Command)
+        {
+            case "setBreakpoints":
+            {
+                Require("sourceBreakpoints");
+                var args = request.GetArguments<SetBreakpointsArguments>()!;
+                if ((args.Breakpoints ?? []).Any(b => b.Condition != null || b.HitCondition != null || b.LogMessage != null || b.Column != null))
+                    throw new NotSupportedException("Mobile supports source line breakpoints, not conditions, hit counts, logpoints or columns.");
+                string path = args.Source.Path ?? throw new ArgumentException("A local source path is required.");
+                int[] lines = (args.Breakpoints ?? []).Select(b => fromClientLine(b.Line)).ToArray();
+                RemoteBreakpoints bound = symbols.Bind(path, lines);
+                var result = Wait(Client.RequestSetBreakpointsAsync(bound, Token));
+                breakpoints[path] = lines;
+                return new { breakpoints = result.Select(Breakpoint).ToArray() };
+            }
+            case "setExceptionBreakpoints":
+            {
+                Require("exceptions");
+                var args = request.GetArguments<SetExceptionBreakpointsArguments>() ?? new();
+                var filterOptions = args.FilterOptions ?? [];
+                string[] filters = args.Filters.Concat(filterOptions.Select(f => f.FilterId)).Distinct(StringComparer.Ordinal).ToArray();
+                if (filters.Any(x => x is not ("all" or "unhandled")) ||
+                    filterOptions.Any(f => f.Condition == null || !System.Text.RegularExpressions.Regex.IsMatch(f.Condition, @"\A[A-Za-z_][A-Za-z0-9_.+`]*\z")) ||
+                    (filterOptions.Length > 0 && args.Filters.Length > 0))
+                    throw new NotSupportedException("Mobile exception filters support 'all'/'unhandled' and exact CLR type conditions; no wildcards or mixing conditional/unconditional filters.");
+                string[]? types = filterOptions.Length == 0 ? null : filterOptions.Select(f => f.Condition!).Distinct(StringComparer.Ordinal).ToArray();
+                Wait(Client.RequestExceptionsAsync(new(filters, types), Token));
+                exceptionFilters = filters;
+                exceptionTypes = types;
+                return null;
+            }
+            case "threads":
+                Require("threads");
+                return new { threads = Wait(Client.RequestThreadsAsync(new(), Token)).Select(t => new { id = t.Id, name = t.Name }).ToArray() };
+            case "modules":
+            {
+                Require("modules");
+                RemoteModule[] modules = Wait(Client.RequestModulesAsync(new(), Token));
+                int start = request.Arguments?.TryGetProperty("startModule", out var s) == true ? s.GetInt32() : 0;
+                int count = request.Arguments?.TryGetProperty("moduleCount", out var c) == true ? c.GetInt32() : modules.Length;
+                if (start < 0 || count < 0) throw new ArgumentException("Invalid module page.");
+                return new { totalModules = modules.Length, modules = modules.Skip(start).Take(count).Select(Module).ToArray() };
+            }
+            case "stackTrace":
+            {
+                var args = request.GetArguments<StackTraceArguments>()!;
+                Thread(args.ThreadId);
+                RemoteFrame[] stack = Wait(Client.RequestStackAsync(new(Current().Id), Token));
+                if (stack.Any(f => f.StopId != Current().Id))
+                    throw new InvalidDataException("Remote stack belongs to another stop generation.");
+                return new StackTraceResponseBody
+                {
+                    TotalFrames = stack.Length,
+                    StackFrames = stack.Skip(args.StartFrame ?? 0).Take(args.Levels is > 0 ? args.Levels.Value : stack.Length)
+                        .Select(f => new StackFrame
+                        {
+                            Id = Handle(f.Handle, true), Name = f.Name, Line = f.Line > 0 ? toClientLine(f.Line) : 0, Column = 1,
+                            Source = f.Source == null ? null : new Source { Name = Path.GetFileName(f.Source), Path = f.Source, SourceReference = 0 },
+                        }).ToArray(),
+                };
+            }
+            case "scopes":
+                Require("scopes");
+                return new ScopesResponseBody
+                {
+                    Scopes = Wait(Client.RequestScopesAsync(new(Resolve(request.GetArguments<ScopesArguments>()!.FrameId, true)), Token))
+                        .Select(s => new Scope { Name = s.Name, VariablesReference = Handle(s.Handle, false), NamedVariables = s.Count }).ToArray(),
+                };
+            case "variables":
+            {
+                Require("variables");
+                var args = request.GetArguments<VariablesArguments>()!;
+                if (args.Format?.Hex == true) throw new NotSupportedException("Mobile hexadecimal formatting is not implemented.");
+                return new VariablesResponseBody
+                {
+                    Variables = Wait(Client.RequestVariablesAsync(new(Resolve(args.VariablesReference, false),
+                        args.Start ?? 0, args.Count ?? 100, args.Filter), Token)).Select(Variable).ToArray(),
+                };
+            }
+            case "evaluate":
+            {
+                Require("safeEvaluate");
+                var args = request.GetArguments<EvaluateArguments>()!;
+                if (args.FrameId == null || args.Format?.Hex == true)
+                    throw new NotSupportedException("Mobile evaluation requires a stopped frame and decimal formatting.");
+                RemoteValue value = Wait(Client.RequestEvaluateAsync(new(Resolve(args.FrameId.Value, true), args.Expression), Token));
+                return new EvaluateResponseBody
+                {
+                    Result = value.Value, Type = value.Type, VariablesReference = Handle(value.Handle, false),
+                    NamedVariables = value.NamedVariables, IndexedVariables = value.IndexedVariables,
+                };
+            }
+            case "continue":
+            case "next":
+            case "stepIn":
+            case "stepOut":
+            {
+                int thread = request.GetArguments<ThreadArguments>()!.ThreadId;
+                Thread(thread);
+                long id = Current().Id;
+                if (request.Command != "continue")
+                {
+                    Require(request.Command);
+                    if (request.Command == "stepIn" && request.GetArguments<StepInArguments>()?.TargetId != null)
+                        throw new NotSupportedException("Mobile targeted step-in is not implemented.");
+                    Wait(Client.RequestStepAsync(new(id, thread, request.Command), Token));
+                }
+                else Wait(Client.RequestContinueAsync(new(id), Token));
+                Invalidate();
+                return request.Command == "continue" ? new ContinueResponseBody { AllThreadsContinued = true } : null;
+            }
+            case "pause":
+                Require("pause");
+                if (stop != null) throw new InvalidOperationException("The mobile debuggee is already stopped.");
+                Wait(Client.RequestPauseAsync(new(), Token));
+                return null;
+            case "exceptionInfo":
+            {
+                Require("exceptions");
+                Thread(request.GetArguments<ThreadArguments>()!.ThreadId);
+                if (Current().Reason != "exception") throw new InvalidOperationException("This is not an exception stop.");
+                RemoteException exception = Wait(Client.RequestExceptionInfoAsync(new(Current().Id), Token));
+                return new ExceptionInfoResponseBody { ExceptionId = exception.Type, Description = exception.Description, BreakMode = exception.BreakMode };
+            }
+            case "dotnet/info":
+                return new { mobile = Client.Capabilities, debuggeeProcessId = lifecycle.ProcessId };
+            case "restart":
+                if (request.Arguments is { } restart && restart.TryGetProperty("arguments", out _))
+                    throw new NotSupportedException("Changing mobile launch configuration during restart is not implemented; start a new session.");
+                Restart();
+                return null;
+            case "terminate":
+                after = () => CloseAfterResponse(true);
+                return null;
+            case "detach":
+                after = () => CloseAfterResponse(false);
+                return null;
+            case "disconnect":
+                after = () => CloseAfterResponse(request.GetArguments<DisconnectArguments>()?.TerminateDebuggee ?? true);
+                return null;
+            default:
+                throw new NotSupportedException($"Mobile request '{request.Command}' is not supported. No desktop-engine fallback is used.");
+        }
+    }
+
+    public void Cancel()
+    {
+        pollStop.Cancel();
+        if (!started) lifetime.Cancel();
+    }
+    private void StopPolling()
+    {
+        pollStop.Cancel();
+        if (polling != null) Wait(polling);
+        polling = null;
+    }
+    private void Restart()
+    {
+        StopPolling();
+        Wait(lifecycle.CloseAsync(terminate: true));
+        lifetime.Dispose();
+        lifetime = new();
+        pollStop.Dispose();
+        pollStop = new();
+        Invalidate();
+        started = false;
+        terminatedSent = 0;
+        Launch();
+        foreach (var (path, lines) in breakpoints) Wait(Client.RequestSetBreakpointsAsync(symbols.Bind(path, lines), Token));
+        Start();
+    }
+    public void Close(bool terminate)
+    {
+        if (closed) return;
+        closed = true;
+        StopPolling();
+        try { if (lifecycle != null) Wait(lifecycle.CloseAsync(terminate)); }
+        finally { Invalidate(); SendTerminated(); }
+    }
+    private void SendTerminated()
+    {
+        if (Interlocked.Exchange(ref terminatedSent, 1) == 0) connection.SendEvent("terminated");
+    }
+    private void CloseAfterResponse(bool terminate)
+    {
+        try { Close(terminate); }
+        catch (Exception e)
+        {
+            log($"Mobile cleanup failed: {e}");
+            connection.SendEvent("output", new OutputEventBody { Category = "stderr", Output = $"Mobile cleanup failed: {e.Message}\n" });
+        }
+    }
+    public void Dispose()
+    {
+        try { Close(true); }
+        finally { lifetime.Dispose(); pollStop.Dispose(); }
+    }
+}

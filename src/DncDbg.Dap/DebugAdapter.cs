@@ -12,6 +12,7 @@ internal sealed class DebugAdapter : IDisposable
     private readonly DapConnection _connection;
     private readonly Action<string> _log;
     private DebugEngine _engine;
+    private MobileSession? _mobile;
 
     // what a restart has to bring back
     private LaunchArguments? _launchArguments;
@@ -213,10 +214,18 @@ internal sealed class DebugAdapter : IDisposable
 
     private object? Dispatch(DapMessage request)
     {
+        if (_mobile != null && request.Command is not ("initialize" or "configurationDone"))
+        {
+            object? result = _mobile.Dispatch(request, out Action? after);
+            _afterResponse = after;
+            return result;
+        }
         switch (request.Command)
         {
             case "initialize":
             {
+                _mobile?.Dispose();
+                _mobile = null;
                 if (_initialized)
                 {
                     DebugEngine old = _engine;
@@ -282,6 +291,16 @@ internal sealed class DebugAdapter : IDisposable
             case "launch":
             {
                 _launchArguments = request.GetArguments<LaunchArguments>() ?? throw new DebuggerException("Missing launch arguments.");
+                if (_launchArguments.Mobile is { } mobile)
+                {
+                    if (_launchArguments.NoDebug || _launchArguments.Program != null || _launchArguments.Project != null ||
+                        _launchArguments.StopAtEntry || _launchArguments.Console is not (null or "internalConsole"))
+                        throw new DebuggerException("Mobile launch cannot be combined with desktop program/project/noDebug/stopAtEntry/terminal launch.");
+                    _mobile = new MobileSession(mobile, _connection, _log, LineToClient, LineFromClient);
+                    try { _mobile.Launch(); }
+                    catch { _mobile.Dispose(); _mobile = null; throw; }
+                    return null;
+                }
                 Launch(_launchArguments);
                 return null;
             }
@@ -336,6 +355,19 @@ internal sealed class DebugAdapter : IDisposable
             }
 
             case "configurationDone":
+                if (_mobile != null)
+                {
+                    try { _mobile.Start(); }
+                    catch (Exception e)
+                    {
+                        if (_pendingStartResponse is { } pending)
+                        {
+                            _pendingStartResponse = null;
+                            _connection.SendErrorResponse(pending.Request, e.Message);
+                        }
+                        throw;
+                    }
+                }
                 _configurationDone = true;
                 _afterResponse = () =>
                 {
@@ -345,7 +377,7 @@ internal sealed class DebugAdapter : IDisposable
                         _connection.SendResponse(pending.Request, pending.Body);
                         pending.AfterResponse?.Invoke();
                     }
-                    _engine.ConfigurationDone();
+                    if (_mobile == null) _engine.ConfigurationDone();
                 };
                 return null;
 
@@ -864,6 +896,7 @@ internal sealed class DebugAdapter : IDisposable
     private void StopWorker()
     {
         _stopping = true;
+        _mobile?.Cancel();
         _engine.CancelCurrentRequest(sessionEnds: true);
         _connection.CancelPendingRequests();
         if (!_queue.IsAddingCompleted)
@@ -874,6 +907,7 @@ internal sealed class DebugAdapter : IDisposable
     public void Dispose()
     {
         StopWorker();
+        _mobile?.Dispose();
         _engine.Dispose();
         _disposed = true;
     }

@@ -3,6 +3,7 @@
   <ItemGroup>
     <ProjectReference Include="..\DncDbg.Protocol\DncDbg.Protocol.csproj" />
     <ProjectReference Include="..\DncDbg.Engine\DncDbg.Engine.csproj" />
+    <ProjectReference Include="..\DncDbg.Remote\DncDbg.Remote.csproj" />
   </ItemGroup>
 
   <PropertyGroup>

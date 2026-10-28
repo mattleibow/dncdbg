@@ -63,6 +63,8 @@ std::unordered_map<int64_t, Unknown*> frames;
 Json catalog = Json::array(), mobileEvents = Json::array();
 std::string stopReason = "breakpoint";
 bool breakThrown = false, breakUnhandled = true;
+std::vector<std::string> exceptionTypes;
+bool ModelExceptionMatches(Unknown*);
 void ModelClear();
 void ModelBind(Unknown*);
 void ModelModule(Unknown*, bool);
@@ -282,7 +284,8 @@ void Pump() {
         Ref<> object{callback.object};
         bool exception = callback.kind == CallbackKind::ExceptionThrown || callback.kind == CallbackKind::ExceptionUnhandled;
         bool shouldStop = callback.kind == CallbackKind::Breakpoint || callback.kind == CallbackKind::Step ||
-            callback.kind == CallbackKind::Pause || (exception && (callback.kind == CallbackKind::ExceptionThrown ? breakThrown : breakUnhandled));
+            callback.kind == CallbackKind::Pause || (exception && (callback.kind == CallbackKind::ExceptionThrown ? breakThrown : breakUnhandled) &&
+                ModelExceptionMatches(callback.object));
         if (shouldStop && !stoppedController && !cleaning) {
             stoppedController = callback.controller;
             stoppedThread = callback.object;
@@ -468,8 +471,18 @@ void Cleanup() {
     }
 }
 
+void CleanupOrExit() {
+    try { Cleanup(); }
+    catch (const std::exception& error) {
+        Report(error.what(), Fail);
+        Report("cleanup-failed-exiting-owned-target", Fail);
+        _exit(87);
+    }
+}
+
 void* Run(void*) {
     int connection = -1;
+    bool cleaned = false;
     try {
         auto acceptDeadline = Clock::now() + std::chrono::seconds(120);
         while (connection < 0) {
@@ -567,7 +580,11 @@ void* Run(void*) {
                         }
                         break;
                     }
-                    case 9: done = true; break;
+                    case 9:
+                        CleanupOrExit();
+                        cleaned = true;
+                        done = true;
+                        break;
                     case 10: ModelConfigure(body); break;
                     case 11:
                         if (!debug) throw std::runtime_error("InvalidState");
@@ -590,8 +607,14 @@ void* Run(void*) {
                         if (filters.size() > 2 || std::any_of(filters.begin(), filters.end(),
                             [](const std::string& value) { return value != "all" && value != "unhandled"; }))
                             throw std::runtime_error("UnsupportedOperation");
+                        std::vector<std::string> types;
+                        if (body.contains("Types") && !body.at("Types").is_null()) types = body.at("Types").get<std::vector<std::string>>();
+                        if (types.size() > 32 || std::any_of(types.begin(), types.end(),
+                            [](const std::string& value) { return value.empty() || value.size() > 256; }))
+                            throw std::runtime_error("InvalidState");
                         breakThrown = std::find(filters.begin(), filters.end(), "all") != filters.end();
                         breakUnhandled = std::find(filters.begin(), filters.end(), "unhandled") != filters.end();
+                        exceptionTypes = std::move(types);
                         break;
                     }
                     case 19: result = ModelException(body.at("Id").get<int64_t>()); break;
@@ -612,12 +635,7 @@ void* Run(void*) {
     }
     if (connection >= 0) close(connection);
     if (listener >= 0) { close(listener); listener = -1; }
-    try { Cleanup(); }
-    catch (const std::exception& error) {
-        Report(error.what(), Fail);
-        Report("cleanup-failed-exiting-owned-target", Fail);
-        _exit(87);
-    }
+    if (!cleaned) CleanupOrExit();
     state.store(-2);
     Report("owner-finished");
     ownerFinished.store(true);

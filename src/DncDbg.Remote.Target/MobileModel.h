@@ -477,10 +477,9 @@ void ModelPause() {
     Require(process->Continue(0));
     throw std::runtime_error("NoManagedThread");
 }
-Json ModelException(int64_t id) {
-    if (id != stopId || stopReason != "exception" || !stoppedThread) throw std::runtime_error("InvalidState");
+std::string ModelExceptionType(Thread* thread) {
     Ref<Value> original, value;
-    Require(static_cast<Thread*>(stoppedThread)->GetCurrentException(&original.value));
+    Require(thread->GetCurrentException(&original.value));
     Dereference(original.value, value);
     if (!value.value) throw std::runtime_error("ExceptionUnavailable");
     Ref<ObjectValue> object; Ref<Class> klass; Ref<Module> module; Ref metadata;
@@ -491,7 +490,16 @@ Json ModelException(int64_t id) {
     Require(klass.value->GetToken(&token)); Require(module.value->GetMetaDataInterface(MetadataId, &metadata.value));
     Require(static_cast<MetadataImport*>(metadata.value)->GetTypeDefProps(token, name, 1024, &count, &flags, &base));
     if (count > 1024) throw std::runtime_error("TypeNameLimit");
-    std::string type = Utf8(name, count && name[count - 1] == 0 ? count - 1 : count);
+    return Utf8(name, count && name[count - 1] == 0 ? count - 1 : count);
+}
+bool ModelExceptionMatches(Unknown* thread) {
+    if (exceptionTypes.empty()) return true;
+    std::string type = ModelExceptionType(static_cast<Thread*>(thread));
+    return std::find(exceptionTypes.begin(), exceptionTypes.end(), type) != exceptionTypes.end();
+}
+Json ModelException(int64_t id) {
+    if (id != stopId || stopReason != "exception" || !stoppedThread) throw std::runtime_error("InvalidState");
+    std::string type = ModelExceptionType(static_cast<Thread*>(stoppedThread));
     return {{"Type", type}, {"Description", type + " (message/property func-eval is unavailable in this provider)"},
         {"BreakMode", breakThrown ? "always" : "unhandled"}};
 }

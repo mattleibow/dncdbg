@@ -70,6 +70,9 @@
 	<PropertyGroup Condition="'$(Configuration)' == 'Debug' And '$(EnableExperimentalRemoteDebugging)' == 'true'">
 		<DefineConstants>$(DefineConstants);DNCDBG_EXPERIMENTAL_REMOTE</DefineConstants>
 	</PropertyGroup>
+	<PropertyGroup Condition="'$(Configuration)' == 'Debug' And '$(EnableExperimentalRemoteDebugging)' == 'true' And $([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'android'">
+		<EmbedAssembliesIntoApk>true</EmbedAssembliesIntoApk>
+	</PropertyGroup>
 	<ItemGroup Condition="'$(Configuration)' == 'Debug' And '$(EnableExperimentalRemoteDebugging)' == 'true'">
 		<ProjectReference Include="../../src/DncDbg.Remote/DncDbg.Remote.csproj" />
 	</ItemGroup>

@@ -54,7 +54,7 @@ public sealed record RemoteModule(string Id, string Name, string Path, string Mv
 public sealed record RemoteScope(string Name, long Handle, int Count);
 public sealed record RemoteVariables(long Handle, int Start = 0, int Count = 100, string? Filter = null);
 public sealed record RemoteStep(long Stop, int ThreadId, string Kind);
-public sealed record RemoteExceptions(string[] Filters);
+public sealed record RemoteExceptions(string[] Filters, string[]? Types = null);
 public sealed record RemoteException(string Type, string Description, string BreakMode);
 
 [JsonSerializable(typeof(RemoteEnvelope))]

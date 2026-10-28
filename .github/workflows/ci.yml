@@ -67,6 +67,8 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           python3 tests/DncDbg.MauiTestApp/test_validate.py
+          python3 src/DncDbg.Remote/generate_contract.py --check
+          python3 tests/DncDbg.MobileTests/test_dap.py
           python3 src/DncDbg.Remote.Target/build.py --test-host
 
       - name: Run smoke and acceptance tests

@@ -28,6 +28,10 @@ internal static class ExperimentalStartup
         if (PrivateStartup.Endpoint is { } nativeEndpoint)
         {
             Status = PrivateStartup.Capabilities.Bootstrap!;
+            string sessionFile = Path.Combine(FileSystem.AppDataDirectory, "dncdbg-session-id");
+            string? sessionId = File.Exists(sessionFile) ? File.ReadAllText(sessionFile) : Environment.GetEnvironmentVariable("DNCDBG_SESSION_ID");
+            File.Delete(sessionFile);
+            nativeEndpoint = nativeEndpoint with { SessionId = sessionId, ProcessId = Environment.ProcessId };
             File.WriteAllText(DescriptorPath, System.Text.Json.JsonSerializer.Serialize(nativeEndpoint, DncDbg.Remote.RemoteJson.Default.RemoteEndpoint));
             return;
         }

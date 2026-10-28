@@ -11,6 +11,7 @@
             <Label x:Name="CounterStatus" Text="Count: 0" AutomationId="counter-status" />
             <Button Text="Run managed scenario" AutomationId="run-scenario" Clicked="OnCounterClicked" />
             <Button Text="Reset" AutomationId="reset-scenario" Clicked="OnResetClicked" />
+            <Button Text="Throw and catch exception" AutomationId="throw-scenario" Clicked="OnExceptionClicked" />
             <Label x:Name="ResultStatus" Text="Result: not run" AutomationId="result-status" />
         </VerticalStackLayout>
     </ScrollView>

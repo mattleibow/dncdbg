@@ -1,0 +1,261 @@
+#!/usr/bin/env python3
+"""Real mobile DAP gate. Deployment/debugger routing belong exclusively to dncdbg-dap; DevFlow is separate."""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import queue
+import shutil
+import subprocess
+import threading
+import time
+
+from test_dap import Dap, ROOT
+
+
+class Ui:
+    def __init__(self, port, output):
+        self.process = subprocess.Popen(["maui", "devflow", "--agent-port", str(port), "batch"],
+                                        cwd=ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE, text=True)
+        self.responses = queue.Queue()
+        self.log = (output / "devflow.jsonl").open("a")
+        threading.Thread(target=self.read, daemon=True).start()
+
+    def read(self):
+        for line in self.process.stdout:
+            self.responses.put(line)
+
+    def send(self, command):
+        self.process.stdin.write(command + "\n")
+        self.process.stdin.flush()
+
+    def receive(self):
+        line = self.responses.get(timeout=30)
+        self.log.write(line)
+        self.log.flush()
+        result = json.loads(line)
+        assert result["exit_code"] == 0, result
+        return result
+
+    def command(self, command):
+        self.send(command)
+        return self.receive()
+
+    def close(self):
+        self.process.stdin.close()
+        try:
+            self.process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait()
+        self.process.stdout.close()
+        self.process.stderr.close()
+        self.log.close()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--platform", required=True, choices=["android", "iosSimulator"])
+    parser.add_argument("--device", required=True)
+    parser.add_argument("--app", type=Path, required=True)
+    parser.add_argument("--assets", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args()
+    args.output.mkdir(parents=True, exist_ok=True)
+    assets = args.output / "assets"
+    assets.mkdir(exist_ok=True)
+    for extension in ("dll", "pdb"):
+        shutil.copyfile(args.assets / ("DncDbg.MauiTestApp." + extension), assets / ("DncDbg.MauiTestApp." + extension))
+    adb = str(Path.home() / "Library/Android/sdk/platform-tools/adb")
+    env = {**os.environ, "PATH": str(Path(adb).parent) + os.pathsep + os.environ["PATH"],
+           "DNCDBG_LOG_DIR": str(args.output.resolve())}
+    dap = Dap(env, timeout=120)
+    ui = None
+    ui_port = None
+    evidence = {"platform": args.platform, "device": args.device,
+                "head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+                "passed": False}
+    checks = []
+
+    def check(value, name):
+        assert value, name
+        checks.append(name)
+        print("PASS:", name, flush=True)
+
+    def device(*command, check=True):
+        return subprocess.run([adb, "-s", args.device, *command], text=True, capture_output=True,
+                              check=check, timeout=30)
+
+    def stack():
+        event = dap.event("stopped")
+        frame = dap.request("stackTrace", {"threadId": event["threadId"]})["stackFrames"][0]
+        return event, frame
+
+    def native_report():
+        if args.platform == "android":
+            result = device("exec-out", "run-as", "com.dncdbg.mobiletests", "cat", "files/dncdbg-private-startup.jsonl", check=False)
+            return result.stdout
+        container = subprocess.run(["xcrun", "simctl", "get_app_container", args.device,
+                                    "com.dncdbg.mobiletests", "data"], capture_output=True, text=True, timeout=15)
+        path = Path(container.stdout.strip()) / "Library/dncdbg-private-startup.jsonl"
+        return path.read_text() if container.returncode == 0 and path.exists() else ""
+
+    source = ROOT / "tests/DncDbg.MauiTestApp/MainPage.xaml.cs"
+    line = next(i + 1 for i, text in enumerate(source.read_text().splitlines()) if "// MOBILE_BREAKPOINT:" in text)
+    try:
+        dap.request("initialize", {"adapterID": "dncdbg", "linesStartAt1": True, "columnsStartAt1": True})
+        launch = dap.send("launch", {"mobile": {
+            "platform": args.platform, "appPath": str(args.app.resolve()), "applicationId": "com.dncdbg.mobiletests",
+            "deviceId": args.device, "assetsPath": str(assets.resolve()),
+            "runtimeIdentifier": "android-arm64" if args.platform == "android" else "iossimulator-arm64",
+            "uninstallOnDisconnect": True, "startupTimeoutSeconds": 90}})
+        dap.request("setBreakpoints", {"source": {"path": str(source)}, "breakpoints": [{"line": line}]})
+        dap.request("setExceptionBreakpoints", {"filters": []})
+        dap.request("configurationDone")
+        dap.response(launch)
+        evidence["provider"] = dap.request("dotnet/info")["mobile"]
+        wait = subprocess.run(["maui", "devflow", "--device", args.device, "wait", "--wait-platform",
+                               "Android" if args.platform == "android" else "iOS", "--timeout", "20"],
+                              cwd=ROOT, capture_output=True, text=True, timeout=30)
+        (args.output / "devflow-wait.json").write_text(wait.stdout + wait.stderr)
+        if args.platform == "android":
+            # Separate UI-only route. Never reused by the debugger or counted as broker success.
+            ui_port = int(device("forward", "--no-rebind", "tcp:0", "tcp:9223").stdout.strip())
+            evidence["devflowBroker"] = wait.returncode == 0
+        else:
+            registration = json.loads(wait.stdout)
+            ui_port = registration["port"]
+            evidence["devflowBroker"] = True
+        ui = Ui(ui_port, args.output)
+        ui.command("MAUI tree --depth 15")
+        ui.command("MAUI tap --automationId reset-scenario")
+        ui.send("MAUI tap --automationId run-scenario")
+        event, frame = stack()
+        check(event["reason"] == "breakpoint" and frame["name"].endswith("MainPage.ManagedScenario") and
+              frame["source"]["path"] == str(source) and frame["line"] == line, "exact MOBILE_BREAKPOINT through dncdbg-dap")
+        thread = event["threadId"]
+        scope = dap.request("scopes", {"frameId": frame["id"]})["scopes"][0]["variablesReference"]
+        variables = dap.request("variables", {"variablesReference": scope})["variables"]
+        locals_by_name = {v["name"]: v for v in variables}
+        check(locals_by_name["input"]["value"] == "1" and locals_by_name["answer"]["value"] == "42",
+              "DAP locals/argument 1/42")
+        check("mobile" in locals_by_name["message"]["value"] and "🚀" in locals_by_name["message"]["value"],
+              "DAP UTF-16 string with surrogate pair")
+        array = dap.request("variables", {"variablesReference": locals_by_name["numbers"]["variablesReference"],
+                                          "start": 0, "count": 2})["variables"]
+        check([v["value"] for v in array] == ["1", "42"], "DAP array children")
+        fields = dap.request("variables", {"variablesReference": locals_by_name["sample"]["variablesReference"]})["variables"]
+        check(any(v["name"] == "Number" and v["value"] == "42" for v in fields), "DAP object fields")
+        for expression, expected in [("answer + 1", "43"), ("numbers[1]", "42"), ("sample.Number", "42")]:
+            check(dap.request("evaluate", {"frameId": frame["id"], "expression": expression})["result"] == expected,
+                  "safe DAP evaluate " + expression)
+        dap.request("evaluate", {"frameId": frame["id"], "expression": "sample.ToString()"}, success=False)
+        evidence["breakpoint"] = {"event": event, "frame": frame, "locals": variables, "fields": fields, "array": array}
+        dap.request("stepIn", {"threadId": thread})
+        step, step_frame = stack()
+        check(step["reason"] == "step" and step_frame["name"].endswith("FinishScenario"), "DAP source step-in")
+        dap.request("next", {"threadId": step["threadId"]})
+        step, _ = stack()
+        check(step["reason"] == "step", "DAP source next")
+        dap.request("stepOut", {"threadId": step["threadId"]})
+        step, _ = stack()
+        check(step["reason"] == "step", "DAP source step-out")
+        dap.request("scopes", {"frameId": frame["id"]}, success=False)
+        dap.request("continue", {"threadId": step["threadId"]})
+        ui.receive()
+        ui.command('MAUI assert --automationId result-status Text "Result: 42"')
+        dap.request("setExceptionBreakpoints", {"filters": [], "filterOptions": [
+            {"filterId": "all", "condition": "System.InvalidOperationException"}]})
+        ui.send("MAUI tap --automationId throw-scenario")
+        observed_exceptions = []
+        for _ in range(32):
+            exception, exception_frame = stack()
+            check(exception["reason"] == "exception", "DAP thrown-exception stop")
+            info = dap.request("exceptionInfo", {"threadId": exception["threadId"]})
+            observed_exceptions.append(info["exceptionId"])
+            evidence["exceptions"] = observed_exceptions
+            if info["exceptionId"] == "System.InvalidOperationException" and exception_frame["name"].endswith("ThrowScenario"):
+                break
+            dap.request("continue", {"threadId": exception["threadId"]})
+        else:
+            raise AssertionError("MOBILE_EXCEPTION was not observed: " + repr(observed_exceptions))
+        evidence["exceptions"] = observed_exceptions
+        check(info["exceptionId"] == "System.InvalidOperationException", "DAP actual exception type and ThrowScenario frame")
+        dap.request("setExceptionBreakpoints", {"filters": []})
+        dap.request("continue", {"threadId": exception["threadId"]})
+        ui.receive()
+        ui.command('MAUI assert --automationId result-status Text "Exception handled"')
+        dap.request("setExceptionBreakpoints", {"filters": []})
+        dap.request("pause", {"threadId": thread})
+        paused = dap.event("stopped")
+        check(paused["reason"] == "pause", "DAP pause while polling does not deadlock")
+        dap.request("continue", {"threadId": paused["threadId"]})
+        check(len(dap.request("threads")["threads"]) > 0 and dap.request("modules")["totalModules"] > 0,
+              "DAP real thread/module snapshots")
+        dap.request("restart")
+        # iOS gets a fresh DevFlow assignment after restart; Android keeps a UI-only mapping to its fixed fallback.
+        ui.close()
+        ui = None
+        wait = subprocess.run(["maui", "devflow", "--device", args.device, "wait", "--wait-platform",
+                               "Android" if args.platform == "android" else "iOS", "--timeout", "20"],
+                              cwd=ROOT, capture_output=True, text=True, timeout=30)
+        if args.platform == "iosSimulator":
+            ui_port = json.loads(wait.stdout)["port"]
+        ui = Ui(ui_port, args.output)
+        ui.command("MAUI tree --depth 15")
+        ui.send("MAUI tap --automationId run-scenario")
+        restarted, restarted_frame = stack()
+        check(restarted["reason"] == "breakpoint" and restarted_frame["line"] == line,
+              "DAP restart reinstalls, reacquires endpoint and restores source breakpoints")
+        check(dap.request("evaluate", {"frameId": restarted_frame["id"], "expression": "answer + 1"})["result"] == "43",
+              "restart preserves exact 1/42/43 gate")
+        dap.request("disconnect", {"terminateDebuggee": False})
+        dap.event("terminated")
+        ui.receive()
+        ui.command('MAUI assert --automationId result-status Text "Result: 42"')
+        deadline = time.monotonic() + 10
+        report = native_report()
+        while '"Phase":"owner-finished"' not in report and time.monotonic() < deadline:
+            time.sleep(0.1)
+            report = native_report()
+        phases = [json.loads(row) for row in report.splitlines()]
+        evidence["nativeCleanup"] = phases
+        for phase in ("cleanup-detach-return", "terminate-return", "owner-finished"):
+            matches = [row for row in phases if row["Phase"] == phase]
+            check(len(matches) == 1 and matches[0]["HResult"] == "0x00000000", "native exact-once " + phase)
+        image = args.output.resolve() / "detached.png"
+        ui.command("MAUI screenshot --output " + json.dumps(str(image)) + " --overwrite")
+        evidence["screenshotSha256"] = hashlib.sha256(image.read_bytes()).hexdigest()
+        check(True, "DAP disconnect while stopped relinquishes stop and UI remains usable")
+        evidence["passed"] = True
+    finally:
+        try:
+            report = native_report()
+            if report:
+                (args.output / "native-report.jsonl").write_text(report)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        if ui is not None:
+            ui.close()
+        dap.close()
+        (args.output / "adapter-stderr.log").write_text(dap.stderr)
+        evidence["checks"] = checks
+        evidence["dapMessages"] = dap.history
+        # Ensure no target or UI route is left by this gate, including on an assertion failure.
+        if args.platform == "android":
+            device("shell", "am", "force-stop", "com.dncdbg.mobiletests", check=False)
+            device("uninstall", "com.dncdbg.mobiletests", check=False)
+            if ui_port:
+                device("forward", "--remove", f"tcp:{ui_port}", check=False)
+        else:
+            subprocess.run(["xcrun", "simctl", "terminate", args.device, "com.dncdbg.mobiletests"],
+                           capture_output=True, timeout=20)
+            subprocess.run(["xcrun", "simctl", "uninstall", args.device, "com.dncdbg.mobiletests"],
+                           capture_output=True, timeout=20)
+        (args.output / "report.json").write_text(json.dumps(evidence, indent=2))
+
+
+if __name__ == "__main__":
+    main()

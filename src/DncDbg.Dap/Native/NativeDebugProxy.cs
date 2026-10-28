@@ -326,6 +326,8 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
                 RequireStop(work);
                 bool enrich = command != "dotnet/nativeStackTrace" && _managed;
                 mappedInspection = MapStack(body, arguments["threadId"]?.GetValue<long>() ?? throw new DebuggerException("Missing 'threadId'."), enrich, work);
+                if (enrich)
+                    RefreshManagedBreakpoints();
                 VerifyStop(work);
             }
             Transform(body, "variablesReference", id => _references.Variable(id, false, work.Stop, 0, nativeFrameContext));
@@ -497,13 +499,17 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
 
     private void SetManagedBreakpoints(DapMessage request, string path, JsonObject arguments, NativeAdapterSession native)
     {
-        bool active, stopped;
+        bool active, stopped, managed, configured;
         lock (_state)
         {
             active = _started && !_targetEnded;
             stopped = _stopped && _allStopped;
+            managed = _managed;
+            configured = _configurationDone;
         }
-        if (active && !stopped)
+        if (active && !managed)
+            throw new DebuggerException("Managed source breakpoints require managedInspection.");
+        if (active && configured && !stopped)
             throw new DebuggerException("Managed source breakpoints can only be changed while the LLDB-owned target is stopped.");
 
         JsonArray requested = arguments["breakpoints"] as JsonArray ?? [];
@@ -514,6 +520,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
             if (stopped && previous != null)
                 DeleteManagedBackendBreakpoints(native, previous, strict: true);
 
+            var reused = new HashSet<int>();
             created = requested.Select(item =>
             {
                 JsonObject source = item as JsonObject ?? throw new DebuggerException("Invalid managed source breakpoint.");
@@ -522,7 +529,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
                 int normalizedLine = _linesStartAt1 ? line : line + 1;
                 int? normalizedColumn = column is null or 0 ? column : _columnsStartAt1 ? column : column + 1;
                 ManagedBreakpointState? old = previous?.FirstOrDefault(b =>
-                    b.RequestedLine == normalizedLine && b.RequestedColumn == normalizedColumn);
+                    b.RequestedLine == normalizedLine && b.RequestedColumn == normalizedColumn && reused.Add(b.Id));
                 string? unsupported = source["condition"] != null || source["hitCondition"] != null || source["logMessage"] != null
                     ? "Conditions, hit conditions, and logpoints are not yet supported for LLDB-owned managed source breakpoints."
                     : normalizedLine <= 0 ? "Source lines start at 1." : null;
@@ -540,8 +547,12 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
             else
                 _managedBreakpoints[path] = created;
 
-            if (stopped && _managed)
-                RefreshManagedBreakpointsLocked(native, strict: true, publishChanges: false);
+            if (stopped && managed && _managedBreakpoints.Count > 0)
+                try { RefreshManagedBreakpointsLocked(native, strict: false, publishChanges: false); }
+                catch (Exception error) when (error is not OutOfMemoryException)
+                {
+                    log("Managed source breakpoint request remains pending: " + error.Message);
+                }
         }
         SendClientResponse(request, new SetBreakpointsResponseBody
         {
@@ -566,8 +577,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         lock (_managedBreakpointLock)
         {
             try { RefreshManagedBreakpointsLocked(native, strict: false, publishChanges: true); }
-            catch (Exception error) when (error is DebuggerException or IOException or TimeoutException
-                or JsonException or OperationCanceledException)
+            catch (Exception error) when (error is not OutOfMemoryException)
             {
                 log("Managed source breakpoint refresh failed: " + error.Message);
                 SendClientEvent("output", new OutputEventBody { Category = "stderr",
@@ -593,17 +603,19 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
                 log($"Managed breakpoint {breakpoint.Path}:{breakpoint.RequestedLine} resolution failed: {error.Message}");
                 continue;
             }
-            breakpoint.Resolved = resolved.FirstOrDefault();
+            if (resolved.Count > 0)
+                breakpoint.Resolved = resolved[0];
             var desired = resolved.Where(r => r.Address != null).Select(r => r.Address!.Value).ToHashSet();
 
-            foreach ((int backendId, ulong address) in breakpoint.BackendIds.ToArray())
-            {
-                if (desired.Contains(address))
-                    continue;
-                DeleteManagedBackendBreakpoint(native, backendId, strict);
-                breakpoint.BackendIds.Remove(backendId);
-                _managedBackendBreakpointIds.Remove(backendId);
-            }
+            if (desired.Count > 0)
+                foreach ((int backendId, ulong address) in breakpoint.BackendIds.ToArray())
+                {
+                    if (desired.Contains(address))
+                        continue;
+                    DeleteManagedBackendBreakpoint(native, backendId, strict);
+                    breakpoint.BackendIds.Remove(backendId);
+                    _managedBackendBreakpointIds.Remove(backendId);
+                }
             foreach (ulong address in desired.Except(breakpoint.BackendIds.Values).Order())
             {
                 int backendId = InstallManagedBackendBreakpoint(native, address);
@@ -632,12 +644,23 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
 
     private void DeleteManagedBackendBreakpoints(NativeAdapterSession native, IEnumerable<ManagedBreakpointState> breakpoints, bool strict)
     {
-        foreach (ManagedBreakpointState breakpoint in breakpoints)
-            foreach (int backendId in breakpoint.BackendIds.Keys.ToArray())
+        ManagedBreakpointState[] owners = breakpoints.ToArray();
+        int[] ids = owners.SelectMany(b => b.BackendIds.Keys).Distinct().Order().ToArray();
+        if (ids.Length == 0)
+            return;
+        try
+        {
+            _ = LldbSnapshotTarget.Body(native.Request("evaluate", new
             {
-                DeleteManagedBackendBreakpoint(native, backendId, strict);
-                _managedBackendBreakpointIds.Remove(backendId);
-            }
+                expression = "`breakpoint delete " + string.Join(' ', ids),
+                context = "repl",
+            }, OperationToken()));
+        }
+        catch when (!strict) { return; }
+        foreach (int id in ids)
+            _managedBackendBreakpointIds.Remove(id);
+        foreach (ManagedBreakpointState owner in owners)
+            owner.BackendIds.Clear();
     }
 
     private static void DeleteManagedBackendBreakpoint(NativeAdapterSession native, int backendId, bool strict)
@@ -663,9 +686,8 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
             var seen = new HashSet<int>();
             foreach (JsonNode? item in hits)
             {
-                if (item == null)
+                if (item is not JsonValue value || !value.TryGetValue<int>(out int id))
                     continue;
-                int id = item.GetValue<int>();
                 int clientId = _managedBackendBreakpointIds.GetValueOrDefault(id, id);
                 if (seen.Add(clientId))
                     mapped.Add(clientId);
@@ -706,49 +728,57 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
             startFrame = 0,
             levels = 128,
         }, OperationToken())).GetProperty("stackFrames");
-        JsonElement caller = stack.EnumerateArray().FirstOrDefault(frame =>
-            frame.TryGetProperty("source", out JsonElement source)
-            && source.TryGetProperty("path", out JsonElement path) && path.ValueKind == JsonValueKind.String
-            && frame.TryGetProperty("line", out JsonElement line) && line.TryGetInt32(out int value) && value > 0);
-        if (caller.ValueKind != JsonValueKind.Object)
+        JsonElement[] frames = stack.EnumerateArray().ToArray();
+        if (frames.Length == 0)
             return false;
 
-        string sourcePath = caller.GetProperty("source").GetProperty("path").GetString()!;
-        int currentLine = caller.GetProperty("line").GetInt32();
-        int targetLine = currentLine + 1;
-        try
-        {
-            JsonElement locations = LldbSnapshotTarget.Body(native.Request("breakpointLocations", new
-            {
-                source = new { path = sourcePath },
-                line = currentLine + 1,
-                endLine = currentLine + 100,
-            }, OperationToken())).GetProperty("breakpoints");
-            targetLine = locations.EnumerateArray()
-                .Select(location => location.TryGetProperty("line", out JsonElement line) && line.TryGetInt32(out int value) ? value : 0)
-                .FirstOrDefault(line => line > currentLine);
-            if (targetLine == 0)
-                return false;
-        }
-        catch (DebuggerException)
-        {
-            // Older LLDB-DAP builds can omit breakpointLocations; LLDB still resolves the requested next line.
-        }
+        IReadOnlyList<ManagedInspectionFrame> managed = Inspection().GetStackTrace(threadId);
+        HashSet<ulong> managedPcs = managed.Select(frame => frame.InstructionPointer).ToHashSet();
+        if (!TryInstructionPointer(frames[0], out ulong top) || !managedPcs.Contains(top))
+            return false;
 
-        string escapedPath = sourcePath.Replace("\\", "\\\\", StringComparison.Ordinal)
-            .Replace("\"", "\\\"", StringComparison.Ordinal);
+        ulong returnAddress = 0;
+        foreach (JsonElement frame in frames.Skip(1))
+        {
+            if (!TryInstructionPointer(frame, out ulong pc))
+                continue;
+            if (managedPcs.Contains(pc))
+                return false;
+            if (!frame.TryGetProperty("source", out JsonElement source)
+                || !source.TryGetProperty("path", out JsonElement path) || path.ValueKind != JsonValueKind.String
+                || source.TryGetProperty("presentationHint", out JsonElement hint) && hint.GetString() == "deemphasize"
+                || !frame.TryGetProperty("line", out JsonElement line) || !line.TryGetInt32(out int sourceLine) || sourceLine <= 0)
+                continue;
+            returnAddress = pc;
+            break;
+        }
+        if (returnAddress == 0)
+            return false;
+
         JsonElement body = LldbSnapshotTarget.Body(native.Request("evaluate", new
         {
-            expression = $"`breakpoint set --one-shot true --file \"{escapedPath}\" --line {targetLine}",
+            expression = $"`breakpoint set --one-shot true --address 0x{returnAddress:x} --thread-id {threadId}",
             context = "repl",
-        }, OperationToken()));
+        }, _lifetime.Token));
         string result = body.TryGetProperty("result", out JsonElement value) ? value.GetString() ?? "" : "";
         Match match = Regex.Match(result, @"\bBreakpoint (?<id>[1-9][0-9]*):", RegexOptions.CultureInvariant);
-        if (!match.Success || !int.TryParse(match.Groups["id"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out int id))
+        if (!match.Success || !result.Contains("address =", StringComparison.Ordinal)
+            || !int.TryParse(match.Groups["id"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out int id))
             throw new DebuggerException($"LLDB did not return a transition StepOut breakpoint ID: {result}");
         lock (_state)
             _transitionStep = new TransitionStepPlan(id, threadId);
         return true;
+
+        static bool TryInstructionPointer(JsonElement frame, out ulong address)
+        {
+            address = 0;
+            if (!frame.TryGetProperty("instructionPointerReference", out JsonElement reference)
+                || reference.ValueKind != JsonValueKind.String)
+                return false;
+            string text = reference.GetString()!;
+            return ulong.TryParse(text.AsSpan(text.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? 2 : 0),
+                NumberStyles.HexNumber, CultureInfo.InvariantCulture, out address) && address is not (0 or ulong.MaxValue);
+        }
     }
 
     private void CompleteTransitionStep(JsonObject body)
@@ -763,23 +793,31 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
             return;
 
         bool hit = body["hitBreakpointIds"] is JsonArray hits
-            && hits.Any(item => item?.GetValue<int>() == plan.BackendBreakpointId);
-        if (hit)
+            && hits.Any(item => item is JsonValue value && value.TryGetValue<int>(out int id)
+                && id == plan.BackendBreakpointId);
+        if (hit && body["threadId"]?.GetValue<int>() == plan.ThreadId)
         {
+            bool retainedUserBreakpoint = false;
             if (body["hitBreakpointIds"] is JsonArray ids)
             {
                 var retained = new JsonArray();
                 foreach (JsonNode? item in ids)
-                    if (item?.GetValue<int>() != plan.BackendBreakpointId)
+                    if (item is not JsonValue value || !value.TryGetValue<int>(out int id)
+                        || id != plan.BackendBreakpointId)
                         retained.Add(item?.DeepClone());
                 if (retained.Count == 0)
                     body.Remove("hitBreakpointIds");
                 else
+                {
                     body["hitBreakpointIds"] = retained;
+                    retainedUserBreakpoint = true;
+                }
             }
-            body["reason"] = "step";
-            body["description"] = "managed/native step out";
-            body["threadId"] = plan.ThreadId;
+            if (!retainedUserBreakpoint)
+            {
+                body["reason"] = "step";
+                body["description"] = "managed/native step out";
+            }
             return;
         }
 
@@ -1021,7 +1059,6 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
                 {
                     MapManagedBreakpointHits(body);
                     CompleteTransitionStep(body);
-                    RefreshManagedBreakpoints();
                 }
                 Transform(body, "variablesReference", id => _references.Variable(id, false, envelope.Stop, 0));
                 Transform(body, "sourceReference", id => _references.Source(id, envelope.Session));
@@ -1039,8 +1076,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
                 SendClientEvent(message.Event!, message.Body);
                 Interlocked.Increment(ref _eventProgress);
             }
-            catch (Exception error) when (error is IOException or OperationCanceledException or TimeoutException
-                or DebuggerException or ObjectDisposedException)
+            catch (Exception error) when (error is not OutOfMemoryException)
             { log("Native event forwarding failed: " + error.Message); }
         }
     }

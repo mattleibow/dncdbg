@@ -12,10 +12,12 @@ DNCDbg has two deliberately separate modes:
   unload/reload and device transport belong to that debugger, not a new DNCDbg
   native engine.
 
-The optional managed feature in native mode is **read-only CoreCLR inspection**,
-not transparent mixed-mode debugging. It does not install managed source
-breakpoints, step C#, control CLR exceptions, perform func-eval, mutate managed
-variables, or subscribe to JIT/EnC execution notifications.
+The optional managed feature in native mode combines **read-only CoreCLR
+inspection** with LLDB-owned managed source-address breakpoints. CoreCLR does
+not control execution or patch code. Current-code managed source breakpoints
+and one managed-callback-to-native `StepOut` shape are proven; CLR exception
+control, func-eval, managed mutation, native-to-managed `StepIn`, and
+JIT/EnC/tiering notifications are not.
 
 ## Architecture decision
 
@@ -283,9 +285,11 @@ debugger. For example, after initialize:
 ```
 
 Use the native adapter's ordinary source/function/instruction breakpoints.
-`setBreakpoints` on `.cs` explicitly fails in native mode. At a native stop,
-`stackTrace` can enrich matching JIT frames; `scopes`, `variables` and lookup of
-a scalar local/argument name use the read-only view for those frames.
+With `managedInspection`, `.cs` `setBreakpoints` requests can bind loaded,
+current JIT code through portable PDBs while LLDB remains the sole execution
+owner. At a native stop, `stackTrace` can enrich matching JIT frames; `scopes`,
+`variables` and lookup of a scalar local/argument name use the read-only view
+for those frames.
 Calls, arithmetic C# expressions, properties and managed mutation fail with a
 read-only diagnostic. Native-frame evaluation is forwarded to the native engine.
 With managed inspection enabled, LLDB `watch` and `hover` use its read-only **hover** variable-path lookup
@@ -373,8 +377,10 @@ state lock, including for snapshot-cancellation observers.
 | Attach with managed inspection; proxy restart | Explicitly rejected until real post-continue/restart contracts are green; disconnect/reinitialize instead |
 | Managed stack/source and primitive local/argument inspection | Optional read-only CoreCLR provider; matching local metadata/runtime required |
 | Native/managed frame correlation | Exact same-thread PC match only |
-| Managed source breakpoints, managed stepping, CLR exception filters, managed func-eval/mutation | **Not implemented**; use normal managed mode |
-| JIT/EnC notifications, managed breakpoint rebind across tiered/R2R code | **Not implemented**; there are no managed code patches to rebind |
+| Managed source breakpoints | Experimental current-JIT portable-PDB binding through LLDB; conditions/logpoints and automatic generation rebind are not implemented |
+| Managed stepping | One managed-callback-to-source-bearing-native-caller `StepOut` shape is experimental; ordinary managed stepping and native-to-managed `StepIn` are not implemented |
+| CLR exception filters, managed func-eval/mutation | **Not implemented**; use normal managed mode |
+| JIT/EnC notifications, managed breakpoint rebind across tiered/R2R code | **Not implemented**; existing LLDB address bindings are retained when a stopped snapshot lacks code-version information |
 | Single-file/dynamic/missing local PE/PDB named-source parity | Not claimed; missing metadata is explicitly unavailable or lacks source/names |
 | Mono and NativeAOT managed inspection | Not implemented; native backend remains usable without this provider |
 | Remote/device managed inspection | Not implemented; native transport/configuration is forwarded to the backend |
@@ -584,27 +590,32 @@ to `ManagedCallback`, and the current instruction pointer equals the breakpoint
 response's `instructionReference`. The experimental
 `dncdbgCodeStartReference` remains a separate method-code identity used for
 diagnostics and code-version work; hybrid `stackTrace` and
-`dotnet/managedStackTrace` emit the same spelling. Both DevFlow invocations must
-complete, and the second updates the status to `126:2`.
+`dotnet/managedStackTrace` emit the same spelling. Three DevFlow invocations
+must complete: the second and third both hit the same managed breakpoint ID,
+and the final status is `126:3`.
 
 This proves an LLDB-owned managed **source** breakpoint on macOS AppKit without
 making ICorDebug a second execution controller. Breakpoint changes for an
-active mixed session currently require an all-threads stop. Requests remain
-pending when the module or JIT code version is unavailable and are retried at
-later stops. ReadyToRun and tiering remain disabled in the proof; automatic JIT,
+active, configured mixed session currently require an all-threads stop;
+configuration-time requests can remain pending. Pending requests are retried
+when `setBreakpoints` or a managed-enriched `stackTrace` refreshes the current
+stopped snapshot. A missing code version never removes an already valid LLDB
+binding. ReadyToRun and tiering remain disabled in the proof; automatic JIT,
 tiering, ReadyToRun and ReJIT generation notifications/rebinding are not yet
 complete. Conditions, hit conditions and logpoints are not implemented for
 managed source breakpoints.
 
 The AppKit proof also issues standard DAP `stepOut` while stopped in the managed
 callback. DNCDbg finds the first source-bearing native caller in LLDB's physical
-stack, asks LLDB for the next executable source line, installs an LLDB-owned
-one-shot breakpoint there, and resumes. The temporary LLDB breakpoint stop is
-reported to the client as one `step` stop at
-`native_callback_roundtrip` after the callback returns. This is the first
-managed-to-native transition-step vertical slice. It currently assumes a
-source-bearing native caller and a next executable line in the same source
-file; optimized/tail-call code and callers without source are not claimed.
+stack after proving the top physical PC is managed and no intervening managed
+caller appears before that native boundary. It installs an LLDB-owned one-shot
+breakpoint at the native caller frame's exact return PC, scoped to the original
+OS thread, and resumes. The temporary LLDB breakpoint stop is reported to the
+client as one `step` stop at `native_callback_roundtrip` after the callback
+returns. Coincident user-breakpoint hits retain breakpoint semantics. This is
+the first managed-to-native transition-step vertical slice. It currently
+requires a source-bearing native boundary frame; optimized/tail-call code and
+callers without source are not claimed.
 
 Native-to-managed `StepIn` is still a separate unfinished slice. The public
 ARM64 CoreCLR path was traced through the delegate thunk,

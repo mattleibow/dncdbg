@@ -95,7 +95,8 @@ def main(adapter, lldb):
         batch.stdin.write(
             "ui tap RunMixedMode; "
             "ui tap RunMixedMode; "
-            "ui assert --automationId MixedModeStatus Text 126:2\n")
+            "ui tap RunMixedMode; "
+            "ui assert --automationId MixedModeStatus Text 126:3\n")
         batch.stdin.close()
 
         stop = session.event("stopped")
@@ -155,11 +156,24 @@ def main(adapter, lldb):
         native_caller = transition_stack["stackFrames"][0]
         check(transition_stop["reason"] == "step"
               and transition_stop["description"] == "managed/native step out"
+              and "hitBreakpointIds" not in transition_stop
               and "native_callback_roundtrip" in native_caller["name"]
               and native_caller["source"]["path"].endswith("native.cpp")
-              and native_caller["line"] == line(FIXTURE / "native.cpp", "return native_after_callback"),
+              and native_caller["line"] == line(FIXTURE / "native.cpp", "callback(sum)"),
               json.dumps(dict(stop=transition_stop, stack=transition_stack), indent=2))
         session.request("continue", dict(threadId=transition_stop["threadId"]))
+        repeated_stop = session.event("stopped")
+        check(repeated_stop["reason"] == "breakpoint"
+              and managed_breakpoint_id in repeated_stop.get("hitBreakpointIds", []),
+              str(repeated_stop))
+        repeated_stack = session.request("stackTrace", dict(threadId=repeated_stop["threadId"]))
+        repeated_callback = repeated_stack["stackFrames"][0]
+        check("[Managed]" in repeated_callback["name"]
+              and "ManagedCallback" in repeated_callback["name"]
+              and repeated_callback["line"] == line(
+                  PROJECT.parent / "MixedModeScenario.cs", "MAUI_MANAGED_CALLBACK_ENTRY"),
+              str(repeated_stack))
+        session.request("continue", dict(threadId=repeated_stop["threadId"]))
         try:
             batch.wait(timeout=30)
         except subprocess.TimeoutExpired:
@@ -167,11 +181,12 @@ def main(adapter, lldb):
         batch_output = batch.stdout.read()
         batch_error = batch.stderr.read()
         batch_results = [json.loads(result) for result in batch_output.splitlines() if result]
-        check(len(batch_results) == 3
+        check(len(batch_results) == 4
               and all(result["exit_code"] == 0 for result in batch_results)
               and batch_results[0]["command"] == "ui tap RunMixedMode"
               and batch_results[1]["command"] == "ui tap RunMixedMode"
-              and batch_results[2]["command"].startswith("ui assert"),
+              and batch_results[2]["command"] == "ui tap RunMixedMode"
+              and batch_results[3]["command"].startswith("ui assert"),
               batch_output + batch_error)
         atexit.unregister(terminate)
 

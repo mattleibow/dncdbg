@@ -145,13 +145,21 @@ public sealed class CoreClrInspection : IDisposable
                 {
                     if (function.TryEnumerateNativeCode(out CorDebugCodeEnum nativeCodes) == HRESULT.S_OK)
                         codes.AddRange(nativeCodes);
-                    if (codes.Count == 0 && function.TryGetNativeCode(out CorDebugCode nativeCode) == HRESULT.S_OK)
-                        codes.Add(nativeCode);
                 }
                 catch (DebugException error)
                 {
-                    _log?.Invoke($"Managed breakpoint native-code lookup failed in '{module.Name}': {ErrorText.Describe(error)}");
+                    _log?.Invoke($"Managed breakpoint native-code enumeration failed in '{module.Name}': {ErrorText.Describe(error)}");
                 }
+                if (codes.Count == 0)
+                    try
+                    {
+                        if (function.TryGetNativeCode(out CorDebugCode nativeCode) == HRESULT.S_OK)
+                            codes.Add(nativeCode);
+                    }
+                    catch (DebugException error)
+                    {
+                        _log?.Invoke($"Managed breakpoint current-code lookup failed in '{module.Name}': {ErrorText.Describe(error)}");
+                    }
                 foreach (CorDebugILFrame frame in _frames.Values)
                     if (frame.Function.Token.Value == resolved.MethodToken && frame.Function.Module.Name == module.Name)
                         try { codes.Add(new CorDebugNativeFrame((ICorDebugNativeFrame)frame.Raw).Code); }
@@ -160,15 +168,15 @@ public sealed class CoreClrInspection : IDisposable
                 {
                     if (code.TryGetILToNativeMapping(out COR_DEBUG_IL_TO_NATIVE_MAP[] map) != HRESULT.S_OK)
                         continue;
-                    ulong? address = ResolveNativeAddress(code.Address.Value, map, resolved.ILOffset);
-                    if (address == null)
-                        continue;
                     int version = code.VersionNumber;
-                    if (!seen.Add((module.Name, resolved.MethodToken, resolved.ILOffset, address, version)))
-                        continue;
-                    result.Add(new ManagedSourceBreakpoint(module.Name, resolved.MethodToken, resolved.ILOffset,
-                        resolved.Line, resolved.Column, resolved.EndLine, resolved.EndColumn, address, version));
-                    emitted = true;
+                    foreach (ulong address in ResolveNativeAddresses(code.Address.Value, map, resolved.ILOffset))
+                    {
+                        if (!seen.Add((module.Name, resolved.MethodToken, resolved.ILOffset, address, version)))
+                            continue;
+                        result.Add(new ManagedSourceBreakpoint(module.Name, resolved.MethodToken, resolved.ILOffset,
+                            resolved.Line, resolved.Column, resolved.EndLine, resolved.EndColumn, address, version));
+                        emitted = true;
+                    }
                 }
 
                 if (!emitted && seen.Add((module.Name, resolved.MethodToken, resolved.ILOffset, null, 0)))
@@ -179,33 +187,29 @@ public sealed class CoreClrInspection : IDisposable
         return result;
     }
 
-    internal static ulong? ResolveNativeAddress(ulong codeStart, IReadOnlyList<COR_DEBUG_IL_TO_NATIVE_MAP> map, int ilOffset)
+    internal static IReadOnlyList<ulong> ResolveNativeAddresses(
+        ulong codeStart, IReadOnlyList<COR_DEBUG_IL_TO_NATIVE_MAP> map, int ilOffset)
     {
         if (ilOffset < 0)
-            return null;
-        COR_DEBUG_IL_TO_NATIVE_MAP? selected = null;
+            return [];
+        var result = new List<ulong>();
         foreach (COR_DEBUG_IL_TO_NATIVE_MAP candidate in map)
         {
             if (candidate.ilOffset < 0 || candidate.nativeStartOffset < 0
-                || candidate.nativeEndOffset <= candidate.nativeStartOffset || candidate.ilOffset > ilOffset)
+                || candidate.nativeEndOffset <= candidate.nativeStartOffset || candidate.ilOffset != ilOffset)
                 continue;
-            if (selected == null || candidate.ilOffset > selected.Value.ilOffset)
-                selected = candidate;
+            try { result.Add(checked(codeStart + (ulong)candidate.nativeStartOffset)); }
+            catch (OverflowException) { }
         }
-        if (selected == null)
-            return null;
-        try { return checked(codeStart + (ulong)selected.Value.nativeStartOffset); }
-        catch (OverflowException) { return null; }
+        return result.Distinct().Order().ToArray();
     }
 
     private IEnumerable<CorDebugModule> EnumerateModules()
     {
-        var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (CorDebugAppDomain domain in _process.AppDomains)
             foreach (CorDebugAssembly assembly in domain.Assemblies)
                 foreach (CorDebugModule module in assembly.Modules)
-                    if (seen.Add(module.Name))
-                        yield return module;
+                    yield return module;
     }
 
     public IReadOnlyList<VariableInfo> GetVariables(int frameId)
@@ -265,11 +269,16 @@ public sealed class CoreClrInspection : IDisposable
         ModuleMetadata? metadata = ModuleMetadata.TryOpen(path, _log);
         if (metadata != null)
         {
-            var import = new MetaDataImport((IMetaDataImport)module.GetMetaDataInterface(typeof(IMetaDataImport).GUID));
-            if (import.ScopeProps.pmvid != metadata.ModuleVersionId)
+            try
+            {
+                var import = new MetaDataImport((IMetaDataImport)module.GetMetaDataInterface(typeof(IMetaDataImport).GUID));
+                if (import.ScopeProps.pmvid != metadata.ModuleVersionId)
+                    throw new DebuggerException($"Managed module '{path}' does not match the loaded module's MVID.");
+            }
+            catch
             {
                 metadata.Dispose();
-                throw new DebuggerException($"Managed module '{path}' does not match the loaded module's MVID.");
+                throw;
             }
         }
         _metadata.Add(path, metadata);

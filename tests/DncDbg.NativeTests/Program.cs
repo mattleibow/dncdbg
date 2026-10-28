@@ -1363,16 +1363,17 @@ static void AssertManagedIlMapping()
         new COR_DEBUG_IL_TO_NATIVE_MAP { ilOffset = -2, nativeStartOffset = 0, nativeEndOffset = 3 },
         new COR_DEBUG_IL_TO_NATIVE_MAP { ilOffset = 0, nativeStartOffset = 4, nativeEndOffset = 11 },
         new COR_DEBUG_IL_TO_NATIVE_MAP { ilOffset = 7, nativeStartOffset = 12, nativeEndOffset = 19 },
+        new COR_DEBUG_IL_TO_NATIVE_MAP { ilOffset = 7, nativeStartOffset = 32, nativeEndOffset = 39 },
         new COR_DEBUG_IL_TO_NATIVE_MAP { ilOffset = 15, nativeStartOffset = 20, nativeEndOffset = 27 },
         new COR_DEBUG_IL_TO_NATIVE_MAP { ilOffset = -3, nativeStartOffset = 28, nativeEndOffset = 31 },
     };
 
-    if (CoreClrInspection.ResolveNativeAddress(0x1000, map, 7) != 0x100c
-        || CoreClrInspection.ResolveNativeAddress(0x1000, map, 10) != 0x100c
-        || CoreClrInspection.ResolveNativeAddress(0x1000, map, 1) != 0x1004
-        || CoreClrInspection.ResolveNativeAddress(0x1000, map, 30) != 0x1014
-        || CoreClrInspection.ResolveNativeAddress(0x1000, map, -1) != null
-        || CoreClrInspection.ResolveNativeAddress(ulong.MaxValue - 2, map, 7) != null)
+    if (!CoreClrInspection.ResolveNativeAddresses(0x1000, map, 7).SequenceEqual([0x100cUL, 0x1020UL])
+        || CoreClrInspection.ResolveNativeAddresses(0x1000, map, 10).Count != 0
+        || CoreClrInspection.ResolveNativeAddresses(0x1000, map, 1).Count != 0
+        || CoreClrInspection.ResolveNativeAddresses(0x1000, map, 30).Count != 0
+        || CoreClrInspection.ResolveNativeAddresses(0x1000, map, -1).Count != 0
+        || CoreClrInspection.ResolveNativeAddresses(ulong.MaxValue - 2, map, 7).Count != 0)
         throw new InvalidOperationException("Managed IL-to-native breakpoint mapping did not preserve sequence-point ownership.");
 
     Console.WriteLine("PASS managed source breakpoint IL offsets map to stable native sequence ranges");

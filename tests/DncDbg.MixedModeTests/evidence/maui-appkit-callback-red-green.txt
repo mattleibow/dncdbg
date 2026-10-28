@@ -65,9 +65,10 @@ Managed-address breakpoint GREEN:
   [Managed] MixedModeScenario.ManagedCallback, validates the breakpoint stop
   reason and LLDB breakpoint ID, and requires the managed callback to be the
   top frame with both current IP and code-start equal to the breakpoint address.
-  Both DevFlow tap commands must succeed, and the final DevFlow assertion is
-  MixedModeStatus.Text == 126:2 so the first invocation cannot create a false
-  green for the second.
+  Three DevFlow tap commands must succeed, the same managed breakpoint ID must
+  stop both the second and third invocations, and the final DevFlow assertion
+  is MixedModeStatus.Text == 126:3 so neither earlier invocation can create a
+  false green.
 
   Hybrid stackTrace and dotnet/managedStackTrace both publish the exact
   dncdbgCodeStartReference spelling. The managed inspection status reports
@@ -115,14 +116,18 @@ Managed-to-native StepOut RED:
 
 Managed-to-native StepOut GREEN:
   At the managed source stop, DNCDbg locates the first source-bearing native
-  caller in LLDB's physical stack, resolves the next executable source line,
-  installs an LLDB-owned one-shot breakpoint, and resumes. The internal
-  breakpoint ID is removed from the client event and the final stop is reported
-  as reason=step, description="managed/native step out".
+  boundary in LLDB's physical stack after verifying the top PC is managed and
+  no intervening managed frame precedes it. It installs an LLDB-owned one-shot
+  breakpoint at that caller frame's exact return PC, scoped to the requesting
+  OS thread, and resumes. The internal breakpoint ID is removed from the client
+  event and the final stop is reported as reason=step,
+  description="managed/native step out". Coincident user breakpoint IDs keep
+  breakpoint semantics.
 
   The proof requires the top frame to be native_callback_roundtrip in native.cpp
-  on the return-native_after_callback line, then continues and requires both
-  DevFlow taps plus the final 126:2 assertion.
+  at the exact callback return PC, then continues, proves the same managed
+  breakpoint ID fires on a third invocation, and requires three DevFlow taps
+  plus the final 126:3 assertion.
 
   PASS MAUI AppKit managed source breakpoint and managed-to-native StepOut
 

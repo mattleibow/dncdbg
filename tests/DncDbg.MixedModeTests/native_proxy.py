@@ -83,9 +83,15 @@ def scenario(adapter, lldb, managed, finish):
         check(len(breakpoints["breakpoints"]) == 2, str(breakpoints))
         checkpoint_id = breakpoints["breakpoints"][0]["id"]
         if managed:
-            session.response(session.send("setBreakpoints", dict(source=dict(path=str(FIXTURE / "Program.cs")),
-                                                                 breakpoints=[dict(line=line(FIXTURE / "Program.cs", "MANAGED_BEFORE"))])),
-                             success=False)
+            pending = session.request("setBreakpoints", dict(
+                source=dict(path=str(FIXTURE / "Program.cs")),
+                breakpoints=[dict(line=line(FIXTURE / "Program.cs", "MANAGED_BEFORE"))],
+            ))["breakpoints"]
+            check(len(pending) == 1 and not pending[0]["verified"], str(pending))
+            session.request("setBreakpoints", dict(
+                source=dict(path=str(FIXTURE / "Program.cs")),
+                breakpoints=[],
+            ))
         session.request("configurationDone")
         session.response(launch)
         stale = None

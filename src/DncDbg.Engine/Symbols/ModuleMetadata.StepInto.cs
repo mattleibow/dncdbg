@@ -129,9 +129,33 @@ internal sealed partial class ModuleMetadata
         if (import.Module.IsNil)
             return null;
         string entryPoint = import.Name.IsNil ? _md.GetString(method.Name) : _md.GetString(import.Name);
+        if (OperatingSystem.IsWindows() && (((int)import.Attributes & 1) == 0))
+        {
+            string? suffix = ((int)import.Attributes & 6) switch
+            {
+                2 => "A",
+                4 or 6 => "W",
+                _ => null,
+            };
+            if (suffix == null)
+                return null;
+            if (!entryPoint.EndsWith(suffix, StringComparison.Ordinal))
+                entryPoint += suffix;
+        }
         string library = _md.GetString(_md.GetModuleReference(import.Module).Name);
         return new PInvokeTarget(library, entryPoint);
     }
+
+    public IReadOnlyList<PInvokeTarget> GetPInvokeTargets(int methodToken, int startOffset, int endOffset, int minimumOffset) =>
+        GetCallInstructions(methodToken)
+            .Where(call => call.Kind == CallKind.Call
+                && call.Offset >= Math.Max(startOffset, minimumOffset)
+                && call.Offset < endOffset)
+            .Select(call => GetPInvokeTarget(call.Target))
+            .Where(target => target != null)
+            .Select(target => target!)
+            .Distinct()
+            .ToArray();
 
     // "Outer.Inner" without namespace or arity, for a type defined here or referenced from elsewhere
     private string GetTypeDisplayName(EntityHandle handle)

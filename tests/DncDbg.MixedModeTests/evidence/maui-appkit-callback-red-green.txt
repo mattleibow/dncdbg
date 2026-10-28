@@ -65,10 +65,10 @@ Managed-address breakpoint GREEN:
   [Managed] MixedModeScenario.ManagedCallback, validates the breakpoint stop
   reason and LLDB breakpoint ID, and requires the managed callback to be the
   top frame with both current IP and code-start equal to the breakpoint address.
-  Three DevFlow tap commands must succeed, the same managed breakpoint ID must
-  stop both the second and third invocations, and the final DevFlow assertion
-  is MixedModeStatus.Text == 126:3 so neither earlier invocation can create a
-  false green.
+  Four DevFlow tap commands must succeed. The same untouched managed breakpoint
+  binding and ID must stop both the second and third invocations before the
+  request is replaced for the P/Invoke StepIn scenario. The final DevFlow
+  assertion is MixedModeStatus.Text == 126:4.
 
   Hybrid stackTrace and dotnet/managedStackTrace both publish the exact
   dncdbgCodeStartReference spelling. The managed inspection status reports
@@ -125,25 +125,28 @@ Managed-to-native StepOut GREEN:
   breakpoint semantics.
 
   The proof requires the top frame to be native_callback_roundtrip in native.cpp
-  at the exact callback return PC, then continues, proves the same managed
-  breakpoint ID fires on a third invocation, and requires three DevFlow taps
-  plus the final 126:3 assertion.
+  at the exact callback return PC, then continues and proves the same untouched
+  managed breakpoint ID fires on a third invocation. The fourth invocation
+  drives P/Invoke StepIn, and the final assertion is 126:4.
 
   PASS MAUI AppKit managed source breakpoint and managed-to-native StepOut
 
 Managed-to-native StepIn GREEN:
-  At the third invocation's managed MAUI_MANAGED_BEFORE source stop, DNCDbg
+  At the fourth invocation's managed MAUI_MANAGED_BEFORE source stop, DNCDbg
   decodes the statement's IL call instruction and the MethodDef P/Invoke import:
     library=mixedfixture
     entryPoint=native_callback_roundtrip
 
   `stepInTargets` publishes that exact entry point. Selecting the target installs
-  an LLDB-owned one-shot symbol breakpoint scoped to the original OS thread,
-  resumes, removes the internal breakpoint ID, and reports one reason=step stop
-  with native_callback_roundtrip as the top native.cpp frame.
+  an LLDB-owned one-shot symbol breakpoint qualified by libmixedfixture.dylib
+  and scoped to the original OS thread. A different-thread reuse is rejected.
+  The accepted target resumes, removes the internal breakpoint ID, and reports
+  one reason=step stop on the original thread with native_callback_roundtrip as
+  the top native.cpp frame. Querying native stepInTargets at that stop must not
+  invalidate the managed snapshot.
 
   The proof then continues and requires the retained managed callback breakpoint
-  ID to fire again before the final 126:3 DevFlow assertion.
+  ID to fire again before the final 126:4 DevFlow assertion.
 
 Native-to-managed callback StepIn blocker evidence:
   LLDB can enumerate the C++ callback function pointer and stop at its delegate

@@ -260,12 +260,8 @@ public sealed class CoreClrInspection : IDisposable
         (int Start, int End)? range = metadata.GetStepRange(methodToken, frame.IP.pnOffset, frame.Function.ILCode.Size);
         if (range == null)
             return [];
-        return metadata.GetCallInstructions(methodToken)
-            .Where(call => call.Offset >= range.Value.Start && call.Offset < range.Value.End)
-            .Select(call => metadata.GetPInvokeTarget(call.Target))
-            .Where(target => target != null)
-            .Select(target => new ManagedNativeStepInTarget(target!.Library, target.EntryPoint))
-            .Distinct()
+        return metadata.GetPInvokeTargets(methodToken, range.Value.Start, range.Value.End, frame.IP.pnOffset)
+            .Select(target => new ManagedNativeStepInTarget(target.Library, target.EntryPoint))
             .ToArray();
     }
 

@@ -36,7 +36,14 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         public bool Verified => BackendIds.Count > 0;
     }
     private sealed record TransitionStepPlan(int BackendBreakpointId, int ThreadId, string Description);
-    private sealed record ManagedNativeStepTarget(int Id, string EntryPoint, long Stop, long Inspection);
+    private sealed record ManagedNativeStepTarget(
+        int Id,
+        string Library,
+        string EntryPoint,
+        long ThreadId,
+        long NativeFrameId,
+        long Stop,
+        long Inspection);
     private readonly BlockingCollection<Work> _requests = [];
     private readonly BlockingCollection<BackendMessage> _events = [];
     private readonly List<Task> _starts = [];
@@ -221,7 +228,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
             {
                 StackFrames = frames.Select(f => new StackFrame
                 {
-                    Id = _references.Frame(0, f.Frame.Id, stop, inspection), Name = f.Frame.Name,
+                    Id = _references.Frame(0, f.Frame.Id, Integer(arguments, "threadId"), stop, inspection), Name = f.Frame.Name,
                     Source = f.Frame.SourcePath == null ? null : new Source { Path = f.Frame.SourcePath, Name = Path.GetFileName(f.Frame.SourcePath) },
                     Line = f.Frame.Line > 0 && !_linesStartAt1 ? f.Frame.Line - 1 : f.Frame.Line,
                     Column = f.Frame.Column > 0 && !_columnsStartAt1 ? f.Frame.Column - 1 : f.Frame.Column,
@@ -248,7 +255,9 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
             CoreClrInspection view = Inspection();
             if (command == "stepInTargets")
             {
-                ManagedNativeStepInTarget[] targets = view.GetNativeStepInTargets(id).ToArray();
+                ManagedNativeStepInTarget[] targets = frame!.NativeId == 0
+                    || !IsTopNativeFrame(native, frame.ThreadId, frame.NativeId)
+                    ? [] : view.GetNativeStepInTargets(id).ToArray();
                 VerifyStop(work);
                 var responseTargets = new List<StepInTarget>();
                 lock (_state)
@@ -256,7 +265,8 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
                     {
                         int targetId = ++_nextManagedStepTargetId;
                         _managedStepTargets[targetId] = new ManagedNativeStepTarget(
-                            targetId, target.EntryPoint, stop, inspection);
+                            targetId, target.Library, target.EntryPoint, frame.ThreadId,
+                            frame.NativeId, stop, inspection);
                         responseTargets.Add(new StepInTarget
                         {
                             Id = targetId,
@@ -310,7 +320,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
             arguments["context"] = "hover";
         bool mutation = !executionControl && !readOnlyEvaluation && command is not ("stackTrace" or "dotnet/nativeStackTrace" or "scopes" or "variables" or "threads"
             or "readMemory" or "modules" or "loadedSources" or "source" or "breakpointLocations" or "disassemble" or "exceptionInfo"
-            or "dataBreakpointInfo" or "completions");
+            or "dataBreakpointInfo" or "completions" or "stepInTargets");
         if (mutation)
         {
             if (_managed && _inspection != null && !_supportsInvalidated)
@@ -432,13 +442,17 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
                 throw new DebuggerException("Native debugger version mismatch between discovery and DAP initialization.");
             capabilities["supportsCancelRequest"] = false;
             capabilities["supportsRestartRequest"] = false;
-            capabilities["supportsStepInTargetsRequest"] = true;
+            capabilities["supportsStepInTargetsRequest"] = descriptor.Kind == "lldb"
+                || capabilities["supportsStepInTargetsRequest"]?.GetValue<bool>() == true;
             capabilities["dncdbg"] = JsonSerializer.SerializeToNode(new
             {
                 ExecutionOwner = "native-adapter", ManagedInspection = "optional-read-only-coreclr",
-                ManagedExecutionControl = false, SupportsManagedSourceBreakpoints = true,
-                SupportsManagedNativeStepInTargets = true,
-                SupportsManagedNativeStepOut = true,
+                ManagedExecutionControl = false,
+                RequiresManagedInspection = true,
+                SupportsManagedSourceBreakpoints = descriptor.Kind == "lldb",
+                SupportsManagedNativeStepInTargets = descriptor.Kind == "lldb",
+                SupportsManagedNativeStepOut = descriptor.Kind == "lldb",
+                SupportsNativeToManagedStepIn = false,
             }, DapJson.Options);
             response.Body = capabilities;
             _initialized = true;
@@ -761,26 +775,61 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         ManagedNativeStepTarget? target;
         lock (_state)
             _managedStepTargets.TryGetValue(targetId, out target);
-        if (target == null || target.Stop != stop || target.Inspection != inspection)
+        if (target == null)
+            return false;
+        if (target.Stop != stop || target.Inspection != inspection)
             throw new DebuggerException("The selected managed/native StepIn target is stale.");
         int threadId = Integer(arguments, "threadId");
-        string escaped = target.EntryPoint.Replace("\\", "\\\\", StringComparison.Ordinal)
-            .Replace("\"", "\\\"", StringComparison.Ordinal);
+        if (threadId != target.ThreadId || !IsTopNativeFrame(native, threadId, target.NativeFrameId))
+            throw new DebuggerException("The selected managed/native StepIn target belongs to a different active frame.");
+        if (!Regex.IsMatch(target.EntryPoint, @"^[A-Za-z_?$@][A-Za-z0-9_?$@.]*$", RegexOptions.CultureInvariant))
+            throw new DebuggerException("The P/Invoke entry point cannot be represented safely as an LLDB symbol.");
+        string library = NativeLibraryName(target.Library);
+        if (!Regex.IsMatch(library, @"^[A-Za-z0-9_.+-]+$", RegexOptions.CultureInvariant))
+            throw new DebuggerException("The P/Invoke library cannot be represented safely as an LLDB module.");
         JsonElement body = LldbSnapshotTarget.Body(native.Request("evaluate", new
         {
-            expression = $"`breakpoint set --one-shot true --name \"{escaped}\" --thread-id {threadId}",
+            expression = $"`breakpoint set --one-shot true --name \"{target.EntryPoint}\" --shlib \"{library}\" --thread-id {threadId}",
             context = "repl",
-        }, _lifetime.Token));
+        }, OperationToken()));
         string result = body.TryGetProperty("result", out JsonElement resultValue)
             ? resultValue.GetString() ?? "" : "";
         Match match = Regex.Match(result, @"\bBreakpoint (?<id>[1-9][0-9]*):", RegexOptions.CultureInvariant);
-        if (!match.Success || !result.Contains("address =", StringComparison.Ordinal)
-            || !int.TryParse(match.Groups["id"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out int id))
+        int id = match.Success && int.TryParse(match.Groups["id"].Value, NumberStyles.None,
+            CultureInfo.InvariantCulture, out int parsed) ? parsed : 0;
+        if (id == 0 || !result.Contains("address =", StringComparison.Ordinal))
+        {
+            if (id != 0)
+                DeleteManagedBackendBreakpoint(native, id, strict: false);
             throw new DebuggerException($"LLDB did not resolve managed StepIn target '{target.EntryPoint}': {result}");
+        }
         lock (_state)
             _transitionStep = new TransitionStepPlan(id, threadId, "managed/native step in");
         arguments.Remove("targetId");
         return true;
+    }
+
+    private bool IsTopNativeFrame(NativeAdapterSession native, long threadId, long frameId)
+    {
+        JsonElement frames = LldbSnapshotTarget.Body(native.Request("stackTrace", new
+        {
+            threadId,
+            startFrame = 0,
+            levels = 1,
+        }, OperationToken())).GetProperty("stackFrames");
+        return frames.GetArrayLength() == 1
+            && frames[0].TryGetProperty("id", out JsonElement id)
+            && id.TryGetInt64(out long top) && top == frameId;
+    }
+
+    private static string NativeLibraryName(string import)
+    {
+        string name = Path.GetFileName(import);
+        if (Path.HasExtension(name))
+            return name;
+        if (OperatingSystem.IsWindows())
+            return name + ".dll";
+        return "lib" + name + (OperatingSystem.IsMacOS() ? ".dylib" : ".so");
     }
 
     private bool TryPlanManagedStepOut(NativeAdapterSession native, JsonObject arguments)
@@ -970,7 +1019,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
                 frame["endColumn"] = source.EndColumn > 0 ? (_columnsStartAt1 ? source.EndColumn : source.EndColumn - 1) : null;
                 frame["dncdbgCodeStartReference"] = $"0x{match.CodeStart:x}";
             }
-            frame["id"] = _references.Frame(nativeId, match?.Frame.Id, stop, inspection);
+            frame["id"] = _references.Frame(nativeId, match?.Frame.Id, thread, stop, inspection);
         }
         return managedEpoch;
     }
@@ -1186,11 +1235,9 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         lock (_state)
         {
             if (execution)
-            {
                 _stop++;
-                _managedStepTargets.Clear();
-            }
             _inspectionEpoch++;
+            _managedStepTargets.Clear();
             if (stopped is { } value)
                 _stopped = value;
             _allStopped &= _stopped;

@@ -2,7 +2,7 @@ using DncDbg.Engine;
 
 namespace DncDbg.Dap.Native;
 
-internal sealed record FrameReference(long NativeId, int? ManagedId, long Stop, long Inspection);
+internal sealed record FrameReference(long NativeId, int? ManagedId, long ThreadId, long Stop, long Inspection);
 internal sealed record VariableReference(long Id, bool Managed, long Stop, long Inspection, long? NativeFrame);
 
 /// <summary>Client frame/variable identities are never reused or shared between native and managed owners.</summary>
@@ -17,11 +17,11 @@ internal sealed class NativeReferences
     private readonly object _gate = new();
     private int _next;
 
-    public int Frame(long nativeId, int? managedId, long stop, long inspection)
+    public int Frame(long nativeId, int? managedId, long threadId, long stop, long inspection)
     {
         lock (_gate)
         {
-            var reference = new FrameReference(nativeId, managedId, stop, managedId == null ? 0 : inspection);
+            var reference = new FrameReference(nativeId, managedId, threadId, stop, managedId == null ? 0 : inspection);
             if (_frameIds.TryGetValue(reference, out int id))
                 return id;
             id = checked(++_next);

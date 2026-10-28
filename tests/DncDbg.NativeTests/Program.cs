@@ -1390,13 +1390,13 @@ static void AssertPInvokeMetadata()
         ?? throw new InvalidOperationException("Native test metadata was unavailable.");
     (int MethodToken, int ILOffset) callMethod = metadata.FindMethodsByName(
         "PInvokeMetadataFixture.Call").Single();
-    PInvokeTarget[] targets = metadata.GetCallInstructions(callMethod.MethodToken)
-        .Select(call => metadata.GetPInvokeTarget(call.Target))
-        .Where(target => target != null)
-        .Cast<PInvokeTarget>()
-        .ToArray();
+    PInvokeTarget[] targets = metadata.GetPInvokeTargets(
+        callMethod.MethodToken, 0, int.MaxValue, 0).ToArray();
     if (targets is not [{ Library: "dncdbg-test-native", EntryPoint: "dncdbg_test_native_entry" }])
         throw new InvalidOperationException("P/Invoke step target metadata was not decoded exactly.");
+    int addressMethod = metadata.FindMethodsByName("PInvokeMetadataFixture.AddressOnly").Single().MethodToken;
+    if (metadata.GetPInvokeTargets(addressMethod, 0, int.MaxValue, 0).Count != 0)
+        throw new InvalidOperationException("Taking a P/Invoke function address was misreported as a StepIn call target.");
     Console.WriteLine("PASS managed StepIn target decodes public P/Invoke library and entry point metadata");
 }
 
@@ -1510,4 +1510,6 @@ static class PInvokeMetadataFixture
     private static extern int Native(int value);
 
     internal static int Call(int value) => Native(value);
+
+    internal static Func<int, int> AddressOnly() => Native;
 }

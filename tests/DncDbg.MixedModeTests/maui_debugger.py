@@ -96,7 +96,8 @@ def main(adapter, lldb):
             "ui tap RunMixedMode; "
             "ui tap RunMixedMode; "
             "ui tap RunMixedMode; "
-            "ui assert --automationId MixedModeStatus Text 126:3\n")
+            "ui tap RunMixedMode; "
+            "ui assert --automationId MixedModeStatus Text 126:4\n")
         batch.stdin.close()
 
         stop = session.event("stopped")
@@ -162,6 +163,19 @@ def main(adapter, lldb):
               and native_caller["line"] == line(FIXTURE / "native.cpp", "callback(sum)"),
               json.dumps(dict(stop=transition_stop, stack=transition_stack), indent=2))
 
+        session.request("continue", dict(threadId=transition_stop["threadId"]))
+        retained_stop = session.event("stopped")
+        check(retained_stop["reason"] == "breakpoint"
+              and managed_breakpoint_id in retained_stop.get("hitBreakpointIds", []),
+              str(retained_stop))
+        retained_stack = session.request("stackTrace", dict(threadId=retained_stop["threadId"]))
+        retained_callback = retained_stack["stackFrames"][0]
+        check("[Managed]" in retained_callback["name"]
+              and "ManagedCallback" in retained_callback["name"]
+              and retained_callback["line"] == line(
+                  PROJECT.parent / "MixedModeScenario.cs", "MAUI_MANAGED_CALLBACK_ENTRY"),
+              str(retained_stack))
+
         mixed_breakpoints = session.request("setBreakpoints", dict(
             source=dict(path=str(PROJECT.parent / "MixedModeScenario.cs")),
             breakpoints=[
@@ -177,7 +191,7 @@ def main(adapter, lldb):
                                    if bp["line"] == line(PROJECT.parent / "MixedModeScenario.cs", "MAUI_MANAGED_CALLBACK_ENTRY"))
         check(callback_breakpoint["id"] == managed_breakpoint_id, str(mixed_breakpoints))
 
-        session.request("continue", dict(threadId=transition_stop["threadId"]))
+        session.request("continue", dict(threadId=retained_stop["threadId"]))
         run_stop = session.event("stopped")
         check(run_stop["reason"] == "breakpoint"
               and run_breakpoint["id"] in run_stop.get("hitBreakpointIds", []),
@@ -189,10 +203,15 @@ def main(adapter, lldb):
               str(run_stack))
         step_targets = session.request("stepInTargets", dict(frameId=run_frame["id"]))["targets"]
         native_target = next((target for target in step_targets
-                              if "native_callback_roundtrip" in target["label"]), None)
-        check(native_target is not None, str(step_targets))
+                              if target["label"] == "native_callback_roundtrip (mixedfixture)"), None)
+        check(native_target is not None and len(step_targets) == 1, str(step_targets))
+        session.request("stepIn", dict(
+            threadId=run_stop["threadId"] + 1,
+            targetId=native_target["id"],
+        ), success=False)
         session.request("stepIn", dict(threadId=run_stop["threadId"], targetId=native_target["id"]))
         native_step = session.event("stopped")
+        check(native_step["threadId"] == run_stop["threadId"], str(native_step))
         native_step_stack = session.request("stackTrace", dict(threadId=native_step["threadId"]))
         native_step_frame = native_step_stack["stackFrames"][0]
         check(native_step["reason"] == "step"
@@ -201,20 +220,24 @@ def main(adapter, lldb):
               and "native_callback_roundtrip" in native_step_frame["name"]
               and native_step_frame["source"]["path"].endswith("native.cpp"),
               json.dumps(dict(stop=native_step, stack=native_step_stack), indent=2))
+        native_snapshot = session.request("dotnet/info")["managedSnapshot"]
+        session.request("stepInTargets", dict(frameId=native_step_frame["id"]))
+        check(session.request("dotnet/info")["managedSnapshot"] == native_snapshot,
+              "Native stepInTargets invalidated the managed snapshot")
 
         session.request("continue", dict(threadId=native_step["threadId"]))
-        repeated_stop = session.event("stopped")
-        check(repeated_stop["reason"] == "breakpoint"
-              and managed_breakpoint_id in repeated_stop.get("hitBreakpointIds", []),
-              str(repeated_stop))
-        repeated_stack = session.request("stackTrace", dict(threadId=repeated_stop["threadId"]))
-        repeated_callback = repeated_stack["stackFrames"][0]
-        check("[Managed]" in repeated_callback["name"]
-              and "ManagedCallback" in repeated_callback["name"]
-              and repeated_callback["line"] == line(
+        final_callback_stop = session.event("stopped")
+        check(final_callback_stop["reason"] == "breakpoint"
+              and managed_breakpoint_id in final_callback_stop.get("hitBreakpointIds", []),
+              str(final_callback_stop))
+        final_callback_stack = session.request("stackTrace", dict(threadId=final_callback_stop["threadId"]))
+        final_callback = final_callback_stack["stackFrames"][0]
+        check("[Managed]" in final_callback["name"]
+              and "ManagedCallback" in final_callback["name"]
+              and final_callback["line"] == line(
                   PROJECT.parent / "MixedModeScenario.cs", "MAUI_MANAGED_CALLBACK_ENTRY"),
-              str(repeated_stack))
-        session.request("continue", dict(threadId=repeated_stop["threadId"]))
+              str(final_callback_stack))
+        session.request("continue", dict(threadId=final_callback_stop["threadId"]))
         try:
             batch.wait(timeout=30)
         except subprocess.TimeoutExpired:
@@ -222,12 +245,13 @@ def main(adapter, lldb):
         batch_output = batch.stdout.read()
         batch_error = batch.stderr.read()
         batch_results = [json.loads(result) for result in batch_output.splitlines() if result]
-        check(len(batch_results) == 4
+        check(len(batch_results) == 5
               and all(result["exit_code"] == 0 for result in batch_results)
               and batch_results[0]["command"] == "ui tap RunMixedMode"
               and batch_results[1]["command"] == "ui tap RunMixedMode"
               and batch_results[2]["command"] == "ui tap RunMixedMode"
-              and batch_results[3]["command"].startswith("ui assert"),
+              and batch_results[3]["command"] == "ui tap RunMixedMode"
+              and batch_results[4]["command"].startswith("ui assert"),
               batch_output + batch_error)
         atexit.unregister(terminate)
 

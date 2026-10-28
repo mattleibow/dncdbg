@@ -493,6 +493,17 @@ file lifetime; embedded command/expression text is not allowed.
 This is an extensible native backend architecture, **not** a claim that
 Android/iOS deployment or Mono/AOT managed debugging is validated.
 
+Any future mobile managed plane must join this architecture through a versioned
+transport and an explicit capability role, not as a second local controller.
+For a private, runtime-version-specific CoreCLR bootstrap, the handshake must
+state `privateBootstrap=true`, the supported runtime/DBI build identities and
+target ABI, and whether the endpoint is an execution owner or inspection-only.
+Every stop, frame and handle must carry one connection-local stop generation
+that can be correlated with LLDB's native-owner stop before stacks are merged.
+Identity mismatch, unsupported builds and stale generations fail closed. The
+experimental mobile branch is not consumed here until its iOS simulator and
+Android emulator execution-owner proofs and independent review are complete.
+
 ## Reproduce the proof and proxy contracts
 
 ```sh
@@ -590,9 +601,10 @@ to `ManagedCallback`, and the current instruction pointer equals the breakpoint
 response's `instructionReference`. The experimental
 `dncdbgCodeStartReference` remains a separate method-code identity used for
 diagnostics and code-version work; hybrid `stackTrace` and
-`dotnet/managedStackTrace` emit the same spelling. Three DevFlow invocations
-must complete: the second and third both hit the same managed breakpoint ID,
-and the final status is `126:3`.
+`dotnet/managedStackTrace` emit the same spelling. Four DevFlow invocations
+must complete: the second and third hit the same managed breakpoint before its
+request is replaced, and the fourth validates P/Invoke StepIn plus the retained
+callback identity. The final status is `126:4`.
 
 This proves an LLDB-owned managed **source** breakpoint on macOS AppKit without
 making ICorDebug a second execution controller. Breakpoint changes for an
@@ -620,13 +632,18 @@ callers without source are not claimed.
 For the forward transition, `stepInTargets` on a managed frame decodes the
 current portable-PDB statement's IL call instructions and ECMA-335 P/Invoke
 import metadata. DNCDbg publishes the native entry point as a target; choosing
-it installs an LLDB-owned, original-thread-scoped one-shot symbol breakpoint
-and resumes. The AppKit proof selects `native_callback_roundtrip`, stops with
-reason `step` in `native.cpp`, then continues to the already retained managed
-callback breakpoint. This proves the C# P/Invoke → C++ direction without giving
-CoreCLR execution ownership. Indirect function pointers, runtime-generated
-interop stubs without a metadata import, overloaded native symbol ambiguity,
-and missing native symbols are not yet handled as StepIn targets.
+it validates the original top managed frame/thread, qualifies the import with
+the platform-native library name, and installs an LLDB-owned,
+original-thread-scoped one-shot symbol breakpoint. The AppKit proof selects
+exactly `native_callback_roundtrip (mixedfixture)`, rejects reuse from a
+different thread, stops with reason `step` in `native.cpp`, verifies native
+`stepInTargets` does not invalidate the managed snapshot, then continues to the
+retained managed callback breakpoint. This proves the C# P/Invoke → C++
+direction without giving CoreCLR execution ownership. The library and symbol
+must already be loaded and resolve to one address. Indirect function pointers,
+delegate/function-address creation, runtime-generated interop stubs without a
+metadata import, ambiguous symbols, and unsupported Windows name mangling are
+not offered as StepIn targets.
 
 Native-to-managed callback `StepIn` is still a separate unfinished slice. The public
 ARM64 CoreCLR path was traced through the delegate thunk,

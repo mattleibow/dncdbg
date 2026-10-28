@@ -18,9 +18,17 @@ def start_owned(*args, **kwargs):
 def stop_owned(process):
     def group_exists():
         process.poll()
-        groups = subprocess.run(["ps", "-axo", "pgid="], check=True, capture_output=True,
-                                text=True, timeout=5).stdout.split()
-        return str(process.pid) in groups
+        try:
+            os.killpg(process.pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            # Some macOS/Python combinations report EPERM for vanished groups.
+            # Only that ambiguous case needs an independent system snapshot.
+            groups = subprocess.run(["ps", "-axo", "pgid="], check=True, capture_output=True,
+                                    text=True, timeout=5).stdout.split()
+            return str(process.pid) in groups
 
     def signal_group(value):
         if value == 0:

@@ -2,6 +2,7 @@
 
 	<PropertyGroup>
 		<TargetFrameworks>net11.0-android;net11.0-ios</TargetFrameworks>
+		<TargetFrameworks Condition="'$(DncDbgMobileTestPlatform)' != ''">net11.0-$(DncDbgMobileTestPlatform)</TargetFrameworks>
 
 		<OutputType>Exe</OutputType>
 		<RootNamespace>DncDbg.MauiTestApp</RootNamespace>

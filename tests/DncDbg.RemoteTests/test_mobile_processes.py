@@ -73,15 +73,17 @@ class ProcessOwnershipTests(unittest.TestCase):
             with self.assertRaises(PermissionError):
                 validate.stop_owned(process)
 
-    def test_group_liveness_uses_ps_not_permission_sensitive_signal_zero(self):
+    def test_group_liveness_uses_kernel_probe_without_global_process_scan(self):
         process = Mock(pid=123456)
-        with patch.object(validate.os, "killpg") as send, \
-                patch.object(validate.subprocess, "run", side_effect=[
-                    subprocess.CompletedProcess([], 0, "123456\n", ""),
-                    subprocess.CompletedProcess([], 0, "", ""),
-                    subprocess.CompletedProcess([], 0, "", "")]):
+        with patch.object(validate.os, "killpg", side_effect=[
+                None, None, ProcessLookupError(), ProcessLookupError()]) as send, \
+                patch.object(validate.subprocess, "run",
+                             side_effect=subprocess.TimeoutExpired(["ps"], 5)) as snapshot:
             validate.stop_owned(process)
-        send.assert_called_once_with(123456, signal.SIGTERM)
+        self.assertEqual(send.call_args_list, [
+            unittest.mock.call(123456, signal.SIGTERM), unittest.mock.call(123456, 0),
+            unittest.mock.call(123456, 0), unittest.mock.call(123456, 0)])
+        snapshot.assert_not_called()
 
     def test_timeout_removes_parent_child_and_listener_within_five_seconds(self):
         directory = validate.ROOT / "build/validation/process-ownership" / f"{os.getpid()}-{time.time_ns()}"

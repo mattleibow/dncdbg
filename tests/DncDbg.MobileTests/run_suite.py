@@ -218,7 +218,7 @@ class Suite:
             if faults:
                 command.append("--test-faults")
             self.run(*command)
-        properties = [f"-p:RuntimeIdentifier={rid}", "-p:EnableExperimentalRemoteDebugging=true",
+        properties = [f"-p:DncDbgMobileTestPlatform={self.args.platform}", f"-p:RuntimeIdentifier={rid}", "-p:EnableExperimentalRemoteDebugging=true",
                       "-p:EnableExperimentalPrivateBootstrap=true", f"-p:EnableExperimentalTestFaults={str(faults).lower()}",
                       "-p:EmbedAssembliesIntoApk=true", "-p:UseMonoRuntime=false"]
         properties += [f"-p:MauiDevFlowPort={self.state['uiPort']}", f"-p:MauiDevFlowSessionId={self.state['name']}"]

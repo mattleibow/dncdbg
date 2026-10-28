@@ -133,7 +133,7 @@ def main():
             env["DEVELOPER_DIR"] = args.build_developer_dir
         tfm = f"net11.0-{prefix}"
         rid = args.runtime_identifier or ("iossimulator-arm64" if prefix == "ios" else "android-arm64")
-        properties = [f"-p:RuntimeIdentifier={rid}", "-p:EnableExperimentalRemoteDebugging=true"]
+        properties = [f"-p:DncDbgMobileTestPlatform={prefix}", f"-p:RuntimeIdentifier={rid}", "-p:EnableExperimentalRemoteDebugging=true"]
         if args.agent_port:
             properties.append(f"-p:MauiDevFlowPort={args.agent_port}")
         if args.ui_session:

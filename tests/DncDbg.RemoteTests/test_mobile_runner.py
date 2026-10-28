@@ -39,6 +39,13 @@ class MobileRunnerTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/mobile.yml").read_text()
         self.assertNotIn("--version " + PIN["workload"], workflow)
 
+    def test_mobile_restore_is_scoped_to_the_selected_platform(self):
+        self.suite.state |= {"uiPort": 9223, "name": "ownedrun"}
+        with patch.object(self.suite, "json", side_effect=RuntimeError("evaluation only")) as evaluate:
+            with self.assertRaisesRegex(RuntimeError, "evaluation only"):
+                self.suite.build("Release")
+        self.assertIn("-p:DncDbgMobileTestPlatform=android", evaluate.call_args.args)
+
     @unittest.skipUnless(os.name == "posix", "Portable no-op console helper")
     def test_remote_console_helper_exits_without_running_contracts(self):
         result = subprocess.run(["dotnet", str(ROOT / "tests/DncDbg.RemoteTests/bin/Release/net10.0/DncDbg.RemoteTests.dll"),

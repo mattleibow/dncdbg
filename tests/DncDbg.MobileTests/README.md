@@ -49,6 +49,10 @@ the exact workload set; supplying `--version` there is rejected by the SDK.
 Install `Microsoft.Maui.Cli` at the pinned version and put
 its `maui` command on PATH. The fixture's `global.json` selects .NET 11; all
 portable projects still select the root .NET 10 SDK.
+The runner scopes the fixture's restore graph to the selected platform using
+`DncDbgMobileTestPlatform`; an Android Linux job never requests iOS packs, and
+an iOS job does not require the Android workload. Project references retain
+their own target frameworks.
 
 - **iOS:** Apple Silicon, Xcode **26.6 / 17F113**, simulator runtime
   **iOS 26.5 / 23F77**, device type **iPhone 17 Pro**. `DEVELOPER_DIR` is scoped;
@@ -110,6 +114,9 @@ session must all match before its route is admitted. Before querying or
 mutating any UI, both DAP/fault helpers verify exact package, platform and native
 process ID. A reachable unrelated agent/ADB port is an error, never a fallback
 UI target.
+Owned POSIX group liveness uses a kernel signal-zero probe; only ambiguous
+macOS `EPERM` requires a global process snapshot. An ordinary completed CLI
+command must not depend on scanning every process on a loaded hosted runner.
 
 `state.json` journals ownership for recovery. The workflow repeats cleanup with
 the **same command/options plus `--cleanup`** in an `always()` step after timeout/

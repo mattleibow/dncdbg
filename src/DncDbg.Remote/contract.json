@@ -32,7 +32,7 @@
     "RemoteBreakpoints": ["string Source", "int[] Lines", "RemoteManagedLocation? Location = null", "RemoteManagedLocation[]? Locations = null"],
     "RemoteManagedLocation": ["string Mvid", "int MethodToken", "int IlOffset", "string Method", "RemoteManagedVariable[] Variables"],
     "RemoteManagedVariable": ["string Name", "int Index", "bool Parameter", "int StartOffset = 0", "int EndOffset = 2147483647"],
-    "RemoteBreakpoint": ["int Line", "bool Verified", "string? Message = null"],
+    "RemoteBreakpoint": ["int Line", "bool Verified", "string? Message = null", "string? Source = null"],
     "RemoteStop": ["long Id", "string Reason", "int ThreadId"],
     "RemoteFrame": ["long Handle", "string Name", "string? Source", "int Line", "long StopId = 0", "string? Mvid = null", "int MethodToken = 0", "int IlOffset = 0"],
     "RemoteEvaluation": ["long Frame", "string Expression"],

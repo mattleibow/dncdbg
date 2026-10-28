@@ -13,6 +13,8 @@ internal sealed class MobileSession : IDisposable
     private readonly Func<int, int> toClientLine;
     private readonly Func<int, int> fromClientLine;
     private readonly ConcurrentDictionary<int, (long Remote, bool Frame)> handles = new();
+    private readonly ConcurrentDictionary<(string Source, int Line), int> breakpointIds = new();
+    private int nextBreakpoint;
     private readonly object stateGate = new();
     private int terminatedSent;
     private readonly Dictionary<string, int[]> breakpoints = new(StringComparer.Ordinal);
@@ -180,8 +182,17 @@ internal sealed class MobileSession : IDisposable
     {
         id = module.Id, name = module.Name, path = module.Path, version = module.Mvid, symbolStatus = "Portable PDB catalog",
     };
-    private object Breakpoint(RemoteBreakpoint breakpoint) => new
-    { verified = breakpoint.Verified, line = toClientLine(breakpoint.Line), message = breakpoint.Message };
+    private DncDbg.Protocol.Breakpoint Breakpoint(RemoteBreakpoint breakpoint, string? source = null)
+    {
+        string path = source ?? breakpoint.Source ?? throw new InvalidDataException("A mobile breakpoint update is missing its source identity.");
+        int id = breakpointIds.GetOrAdd((path, breakpoint.Line), _ => Interlocked.Increment(ref nextBreakpoint));
+        if (id <= 0) throw new InvalidOperationException("DAP breakpoint ID limit exceeded.");
+        return new()
+        {
+            Id = id, Verified = breakpoint.Verified, Line = toClientLine(breakpoint.Line), Message = breakpoint.Message,
+            Source = new Source { Path = path, Name = Path.GetFileName(path), SourceReference = 0 },
+        };
+    }
     private Variable Variable(RemoteValue value) => new()
     {
         Name = value.Name ?? "", Value = value.Value, Type = value.Type, VariablesReference = Handle(value.Handle, false),
@@ -217,7 +228,7 @@ internal sealed class MobileSession : IDisposable
                 RemoteBreakpoints bound = symbols.Bind(path, lines);
                 var result = Wait(Client.RequestSetBreakpointsAsync(bound, Token));
                 breakpoints[path] = lines;
-                return new { breakpoints = result.Select(Breakpoint).ToArray() };
+                return new { breakpoints = result.Select(b => Breakpoint(b, bound.Source)).ToArray() };
             }
             case "setExceptionBreakpoints":
             {

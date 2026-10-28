@@ -111,10 +111,13 @@ def main():
             "deviceId": args.device, "assetsPath": str(assets.resolve()),
             "runtimeIdentifier": "android-arm64" if args.platform == "android" else "iossimulator-arm64",
             "uninstallOnDisconnect": True, "startupTimeoutSeconds": 90}})
-        dap.request("setBreakpoints", {"source": {"path": str(source)}, "breakpoints": [{"line": line}]})
+        breakpoint = dap.request("setBreakpoints", {"source": {"path": str(source)}, "breakpoints": [{"line": line}]})["breakpoints"][0]
         dap.request("setExceptionBreakpoints", {"filters": []})
         dap.request("configurationDone")
         dap.response(launch)
+        changed = dap.event("breakpoint")["breakpoint"]
+        check(changed["id"] == breakpoint["id"] and changed["verified"] and changed["source"]["path"] == str(source),
+              "DAP breakpoint identity survives asynchronous module binding")
         evidence["provider"] = dap.request("dotnet/info")["mobile"]
         wait = subprocess.run(["maui", "devflow", "--device", args.device, "wait", "--wait-platform",
                                "Android" if args.platform == "android" else "iOS", "--timeout", "20"],
@@ -197,6 +200,8 @@ def main():
         check(len(dap.request("threads")["threads"]) > 0 and dap.request("modules")["totalModules"] > 0,
               "DAP real thread/module snapshots")
         dap.request("restart")
+        restored = dap.event("breakpoint")["breakpoint"]
+        check(restored["id"] == breakpoint["id"] and restored["verified"], "DAP breakpoint ID remains stable across restart")
         # iOS gets a fresh DevFlow assignment after restart; Android keeps a UI-only mapping to its fixed fallback.
         ui.close()
         ui = None

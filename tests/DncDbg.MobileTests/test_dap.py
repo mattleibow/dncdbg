@@ -78,6 +78,7 @@ class Remote:
             with self.listener.accept()[0] as connection:
                 stream = connection.makefile("rb")
                 pending = []
+                bound_breakpoints = []
                 generation = 101
                 while header := stream.read(8):
                     magic, size = struct.unpack("<II", header)
@@ -99,8 +100,12 @@ class Remote:
                                 "sourceBreakpoints", "threads", "modules", "scopes", "variables",
                                 "safeEvaluate", "pause", "stepIn", "next", "stepOut", "exceptions"],
                         }
+                    elif op == 2:
+                        result = [{"Line": line, "Verified": False, "Source": body["Source"]} for line in body["Lines"]]
+                        bound_breakpoints = result
                     elif op == 3:
-                        pending = [{"Kind": "stopped", "Generation": generation, "Stop": {
+                        pending = [{"Kind": "breakpoint", "Generation": generation, "Breakpoint": bp | {"Verified": True}}
+                                   for bp in bound_breakpoints] + [{"Kind": "stopped", "Generation": generation, "Stop": {
                             "Id": generation, "Reason": "breakpoint", "ThreadId": 7}}]
                         error = self.start_error
                     elif op == 11:
@@ -291,6 +296,22 @@ class MobileDapTests(unittest.TestCase):
         commands = [json.loads(x) for x in (self.state / "commands.jsonl").read_text().splitlines()]
         self.assertFalse(any(c[0] == "adb" or "uninstall" in c for c in commands))
         self.assertIn(9, self.remote.operations)
+
+    def test_source_breakpoint_verification_events_keep_dap_identity(self):
+        self.remote = Remote(self.state, "Android")
+        launch = self.dap.send("launch", {"mobile": self.options("android")})
+        source = ROOT / "tests/RemoteBreakpointApp/Program.cs"
+        line = next(i + 1 for i, text in enumerate(source.read_text().splitlines()) if "// REMOTE_BREAKPOINT" in text)
+        breakpoint = self.dap.request("setBreakpoints", {"source": {"path": str(source)},
+                                                       "breakpoints": [{"line": line}]})["breakpoints"][0]
+        self.assertGreater(breakpoint["id"], 0)
+        self.assertFalse(breakpoint["verified"])
+        self.dap.request("configurationDone")
+        self.dap.response(launch)
+        changed = self.dap.event("breakpoint")["breakpoint"]
+        self.assertEqual(changed["id"], breakpoint["id"])
+        self.assertEqual(changed["source"]["path"], str(source))
+        self.assertTrue(changed["verified"])
 
     def test_physical_android_rejected_before_deployment(self):
         options = self.options("android") | {"deviceId": "physical-device"}

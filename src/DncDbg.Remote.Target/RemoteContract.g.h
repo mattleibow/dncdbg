@@ -155,6 +155,9 @@ inline void Validate_RemoteBreakpoint(const Json& body) {
     if (body.contains("Message") && !body.at("Message").is_null()) {
         if (!(body.at("Message").is_string())) throw std::runtime_error("MalformedPayload");
     }
+    if (body.contains("Source") && !body.at("Source").is_null()) {
+        if (!(body.at("Source").is_string())) throw std::runtime_error("MalformedPayload");
+    }
 }
 inline void Validate_RemoteStop(const Json& body) {
     if (!body.is_object()) throw std::runtime_error("MalformedPayload");

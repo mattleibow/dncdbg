@@ -35,6 +35,7 @@ For iOS use `platform: "iosSimulator"`, a built `.app` directory, the exact
 simulator UDID, `runtimeIdentifier: "iossimulator-arm64"` and
 `tunnel: { "provider": "host" }`. The target must already be booted; the adapter
 does not seize a shared device or change global Xcode/workload settings.
+The host must have `adb` (Android) or `xcrun` (iOS simulator) available on `PATH`.
 
 `platform`, `appPath`, `applicationId`, `deviceId`, `runtimeIdentifier` and
 `assetsPath` are required. The assets directory contains matching user PE DLLs
@@ -43,6 +44,8 @@ CodeView GUID/stamp/age, portable-PDB identity and requested source checksums ar
 checked. Symbol catalogs are uploaded in bounded chunks; the authenticated
 256-KiB frame limit is unchanged. Missing/ambiguous sequence points and changed
 source files are errors, never invented verified breakpoints.
+Source breakpoints keep their DAP ID/source identity when later module-load
+events verify them and when a restart restores them.
 
 The app must opt in to and package the target debugger, DBI and DAC, as the
 [MAUI fixture](../tests/DncDbg.MauiTestApp/README.md) does. This does not inject

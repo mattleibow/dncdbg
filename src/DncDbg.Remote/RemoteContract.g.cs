@@ -34,7 +34,7 @@ public sealed record RemoteEndpoint(int Port, string Token, string? SessionId = 
 public sealed record RemoteBreakpoints(string Source, int[] Lines, RemoteManagedLocation? Location = null, RemoteManagedLocation[]? Locations = null);
 public sealed record RemoteManagedLocation(string Mvid, int MethodToken, int IlOffset, string Method, RemoteManagedVariable[] Variables);
 public sealed record RemoteManagedVariable(string Name, int Index, bool Parameter, int StartOffset = 0, int EndOffset = 2147483647);
-public sealed record RemoteBreakpoint(int Line, bool Verified, string? Message = null);
+public sealed record RemoteBreakpoint(int Line, bool Verified, string? Message = null, string? Source = null);
 public sealed record RemoteStop(long Id, string Reason, int ThreadId);
 public sealed record RemoteFrame(long Handle, string Name, string? Source, int Line, long StopId = 0, string? Mvid = null, int MethodToken = 0, int IlOffset = 0);
 public sealed record RemoteEvaluation(long Frame, string Expression);

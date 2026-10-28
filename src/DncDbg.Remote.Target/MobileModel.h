@@ -147,7 +147,7 @@ void ModelBind(Unknown* module) {
         Require(breakpoint.value->Activate(1));
         binding.breakpoint = breakpoint.value; breakpoint.value = nullptr;
         Event({{"Kind", "breakpoint"}, {"Generation", NewId()},
-            {"Breakpoint", {{"Line", binding.line}, {"Verified", true}}}});
+            {"Breakpoint", {{"Line", binding.line}, {"Verified", true}, {"Source", binding.source}}}});
     }
 }
 Json ModelSetBreakpoints(const Json& request) {
@@ -181,7 +181,7 @@ Json ModelSetBreakpoints(const Json& request) {
     for (auto& module : modelModules) ModelBind(module.first);
     Json result = Json::array();
     for (auto& binding : modelBindings) if (binding.source == source)
-        result.push_back({{"Line", binding.line}, {"Verified", binding.breakpoint != nullptr}});
+        result.push_back({{"Line", binding.line}, {"Verified", binding.breakpoint != nullptr}, {"Source", binding.source}});
     return result;
 }
 Json ModelStackFrame(Frame* frame, uint32_t token, uint32_t offset, int64_t handle) {

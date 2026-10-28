@@ -161,7 +161,48 @@ def main(adapter, lldb):
               and native_caller["source"]["path"].endswith("native.cpp")
               and native_caller["line"] == line(FIXTURE / "native.cpp", "callback(sum)"),
               json.dumps(dict(stop=transition_stop, stack=transition_stack), indent=2))
+
+        mixed_breakpoints = session.request("setBreakpoints", dict(
+            source=dict(path=str(PROJECT.parent / "MixedModeScenario.cs")),
+            breakpoints=[
+                dict(line=line(PROJECT.parent / "MixedModeScenario.cs", "MAUI_MANAGED_BEFORE")),
+                dict(line=line(PROJECT.parent / "MixedModeScenario.cs", "MAUI_MANAGED_CALLBACK_ENTRY")),
+            ],
+        ))["breakpoints"]
+        check(len(mixed_breakpoints) == 2 and all(bp["verified"] for bp in mixed_breakpoints),
+              str(mixed_breakpoints))
+        run_breakpoint = next(bp for bp in mixed_breakpoints
+                              if bp["line"] == line(PROJECT.parent / "MixedModeScenario.cs", "MAUI_MANAGED_BEFORE"))
+        callback_breakpoint = next(bp for bp in mixed_breakpoints
+                                   if bp["line"] == line(PROJECT.parent / "MixedModeScenario.cs", "MAUI_MANAGED_CALLBACK_ENTRY"))
+        check(callback_breakpoint["id"] == managed_breakpoint_id, str(mixed_breakpoints))
+
         session.request("continue", dict(threadId=transition_stop["threadId"]))
+        run_stop = session.event("stopped")
+        check(run_stop["reason"] == "breakpoint"
+              and run_breakpoint["id"] in run_stop.get("hitBreakpointIds", []),
+              str(run_stop))
+        run_stack = session.request("stackTrace", dict(threadId=run_stop["threadId"]))
+        run_frame = run_stack["stackFrames"][0]
+        check("[Managed]" in run_frame["name"] and "MixedModeScenario.Run" in run_frame["name"]
+              and run_frame["line"] == line(PROJECT.parent / "MixedModeScenario.cs", "MAUI_MANAGED_BEFORE"),
+              str(run_stack))
+        step_targets = session.request("stepInTargets", dict(frameId=run_frame["id"]))["targets"]
+        native_target = next((target for target in step_targets
+                              if "native_callback_roundtrip" in target["label"]), None)
+        check(native_target is not None, str(step_targets))
+        session.request("stepIn", dict(threadId=run_stop["threadId"], targetId=native_target["id"]))
+        native_step = session.event("stopped")
+        native_step_stack = session.request("stackTrace", dict(threadId=native_step["threadId"]))
+        native_step_frame = native_step_stack["stackFrames"][0]
+        check(native_step["reason"] == "step"
+              and native_step["description"] == "managed/native step in"
+              and "hitBreakpointIds" not in native_step
+              and "native_callback_roundtrip" in native_step_frame["name"]
+              and native_step_frame["source"]["path"].endswith("native.cpp"),
+              json.dumps(dict(stop=native_step, stack=native_step_stack), indent=2))
+
+        session.request("continue", dict(threadId=native_step["threadId"]))
         repeated_stop = session.event("stopped")
         check(repeated_stop["reason"] == "breakpoint"
               and managed_breakpoint_id in repeated_stop.get("hitBreakpointIds", []),
@@ -191,7 +232,7 @@ def main(adapter, lldb):
         atexit.unregister(terminate)
 
         session.request("disconnect", dict(terminateDebuggee=True))
-        print("PASS MAUI AppKit managed source breakpoint and managed-to-native StepOut", flush=True)
+        print("PASS MAUI AppKit managed source breakpoint, P/Invoke StepIn, and callback StepOut", flush=True)
 
 
 if __name__ == "__main__":

@@ -35,7 +35,8 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         public Dictionary<int, ulong> BackendIds { get; } = [];
         public bool Verified => BackendIds.Count > 0;
     }
-    private sealed record TransitionStepPlan(int BackendBreakpointId, int ThreadId);
+    private sealed record TransitionStepPlan(int BackendBreakpointId, int ThreadId, string Description);
+    private sealed record ManagedNativeStepTarget(int Id, string EntryPoint, long Stop, long Inspection);
     private readonly BlockingCollection<Work> _requests = [];
     private readonly BlockingCollection<BackendMessage> _events = [];
     private readonly List<Task> _starts = [];
@@ -44,6 +45,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
     private readonly object _managedBreakpointLock = new();
     private readonly Dictionary<string, List<ManagedBreakpointState>> _managedBreakpoints = new(StringComparer.Ordinal);
     private readonly Dictionary<int, int> _managedBackendBreakpointIds = [];
+    private readonly Dictionary<int, ManagedNativeStepTarget> _managedStepTargets = [];
     private readonly CancellationTokenSource _lifetime = new();
     private readonly List<CancellationTokenSource> _retiredTokens = [];
     private CancellationTokenSource _snapshotCancellation = new();
@@ -73,6 +75,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
     private volatile bool _stopping, _disconnecting;
     private bool _disposed;
     private int _nextManagedBreakpointId = 1_000_000;
+    private int _nextManagedStepTargetId = 2_000_000;
     private long _eventProgress, _terminalDrainUntil;
 
     public void Run()
@@ -243,6 +246,30 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
             RequireStop(work);
             int id = frame?.ManagedId ?? checked((int)variable!.Id);
             CoreClrInspection view = Inspection();
+            if (command == "stepInTargets")
+            {
+                ManagedNativeStepInTarget[] targets = view.GetNativeStepInTargets(id).ToArray();
+                VerifyStop(work);
+                var responseTargets = new List<StepInTarget>();
+                lock (_state)
+                    foreach (ManagedNativeStepInTarget target in targets)
+                    {
+                        int targetId = ++_nextManagedStepTargetId;
+                        _managedStepTargets[targetId] = new ManagedNativeStepTarget(
+                            targetId, target.EntryPoint, stop, inspection);
+                        responseTargets.Add(new StepInTarget
+                        {
+                            Id = targetId,
+                            Label = $"{target.EntryPoint} ({target.Library})",
+                        });
+                    }
+                PublishInspection(work, new DapMessage
+                {
+                    Success = true,
+                    Body = new StepInTargetsResponseBody { Targets = responseTargets.ToArray() },
+                }, inspection);
+                return;
+            }
             object body = command switch
             {
                 "scopes" => new ScopesResponseBody
@@ -292,7 +319,10 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
             CloseView();
         }
 
-        string backendCommand = command == "dotnet/nativeStackTrace" ? "stackTrace" : command;
+        bool managedNativeStepIn = command == "stepIn"
+            && TryPlanManagedNativeStepIn(native, arguments, stop, inspection);
+        string backendCommand = command == "dotnet/nativeStackTrace" ? "stackTrace"
+            : managedNativeStepIn ? "continue" : command;
         if (command == "stepOut" && _managed && TryPlanManagedStepOut(native, arguments))
             backendCommand = "continue";
         bool stopOwned = backendCommand is "stackTrace" or "scopes" or "variables" or "readMemory"
@@ -308,7 +338,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         try { response = native.Request(backendCommand, arguments, OperationToken()); }
         catch
         {
-            if (command == "stepOut")
+            if (command is "stepIn" or "stepOut")
                 CancelTransitionStep(native);
             if (executionControl && work.Stop == StopEpoch())
                 Invalidate(execution: true, stopped: false, cancelOperation: false);
@@ -336,7 +366,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         }
         else
         {
-            if (command == "stepOut")
+            if (command is "stepIn" or "stepOut")
                 CancelTransitionStep(native);
             RestoreControlState(work);
         }
@@ -372,6 +402,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         _targetPid = null;
         _selectedNativeFrame = null;
         _transitionStep = null;
+        _managedStepTargets.Clear();
         lock (_managedBreakpointLock)
         {
             _managedBreakpoints.Clear();
@@ -401,10 +432,13 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
                 throw new DebuggerException("Native debugger version mismatch between discovery and DAP initialization.");
             capabilities["supportsCancelRequest"] = false;
             capabilities["supportsRestartRequest"] = false;
+            capabilities["supportsStepInTargetsRequest"] = true;
             capabilities["dncdbg"] = JsonSerializer.SerializeToNode(new
             {
                 ExecutionOwner = "native-adapter", ManagedInspection = "optional-read-only-coreclr",
                 ManagedExecutionControl = false, SupportsManagedSourceBreakpoints = true,
+                SupportsManagedNativeStepInTargets = true,
+                SupportsManagedNativeStepOut = true,
             }, DapJson.Options);
             response.Body = capabilities;
             _initialized = true;
@@ -719,6 +753,36 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         };
     }
 
+    private bool TryPlanManagedNativeStepIn(
+        NativeAdapterSession native, JsonObject arguments, long stop, long inspection)
+    {
+        if (arguments["targetId"] is not JsonValue value || !value.TryGetValue<int>(out int targetId))
+            return false;
+        ManagedNativeStepTarget? target;
+        lock (_state)
+            _managedStepTargets.TryGetValue(targetId, out target);
+        if (target == null || target.Stop != stop || target.Inspection != inspection)
+            throw new DebuggerException("The selected managed/native StepIn target is stale.");
+        int threadId = Integer(arguments, "threadId");
+        string escaped = target.EntryPoint.Replace("\\", "\\\\", StringComparison.Ordinal)
+            .Replace("\"", "\\\"", StringComparison.Ordinal);
+        JsonElement body = LldbSnapshotTarget.Body(native.Request("evaluate", new
+        {
+            expression = $"`breakpoint set --one-shot true --name \"{escaped}\" --thread-id {threadId}",
+            context = "repl",
+        }, _lifetime.Token));
+        string result = body.TryGetProperty("result", out JsonElement resultValue)
+            ? resultValue.GetString() ?? "" : "";
+        Match match = Regex.Match(result, @"\bBreakpoint (?<id>[1-9][0-9]*):", RegexOptions.CultureInvariant);
+        if (!match.Success || !result.Contains("address =", StringComparison.Ordinal)
+            || !int.TryParse(match.Groups["id"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out int id))
+            throw new DebuggerException($"LLDB did not resolve managed StepIn target '{target.EntryPoint}': {result}");
+        lock (_state)
+            _transitionStep = new TransitionStepPlan(id, threadId, "managed/native step in");
+        arguments.Remove("targetId");
+        return true;
+    }
+
     private bool TryPlanManagedStepOut(NativeAdapterSession native, JsonObject arguments)
     {
         int threadId = Integer(arguments, "threadId");
@@ -766,7 +830,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
             || !int.TryParse(match.Groups["id"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out int id))
             throw new DebuggerException($"LLDB did not return a transition StepOut breakpoint ID: {result}");
         lock (_state)
-            _transitionStep = new TransitionStepPlan(id, threadId);
+            _transitionStep = new TransitionStepPlan(id, threadId, "managed/native step out");
         return true;
 
         static bool TryInstructionPointer(JsonElement frame, out ulong address)
@@ -816,7 +880,7 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
             if (!retainedUserBreakpoint)
             {
                 body["reason"] = "step";
-                body["description"] = "managed/native step out";
+                body["description"] = plan.Description;
             }
             return;
         }
@@ -1122,7 +1186,10 @@ internal sealed class NativeDebugProxy(DapConnection client, NativeAdapterDescri
         lock (_state)
         {
             if (execution)
+            {
                 _stop++;
+                _managedStepTargets.Clear();
+            }
             _inspectionEpoch++;
             if (stopped is { } value)
                 _stopped = value;

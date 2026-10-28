@@ -8,7 +8,12 @@ using DncDbg.Engine.Values;
 
 namespace DncDbg.Engine;
 
-public sealed record ManagedInspectionFrame(FrameInfo Frame, ulong InstructionPointer, ulong CodeStart);
+public sealed record ManagedInspectionFrame(
+    FrameInfo Frame,
+    ulong InstructionPointer,
+    ulong CodeStart,
+    int MethodToken,
+    int ILOffset);
 
 public sealed record ManagedSourceBreakpoint(
     string ModulePath,
@@ -20,6 +25,8 @@ public sealed record ManagedSourceBreakpoint(
     int EndColumn,
     ulong? Address,
     int CodeVersion);
+
+public sealed record ManagedNativeStepInTarget(string Library, string EntryPoint);
 
 /// <summary>
 /// A read-only view of an externally stopped CoreCLR process. The caller owns execution and must discard
@@ -83,7 +90,7 @@ public sealed class CoreClrInspection : IDisposable
                 _frames.Add(id, il);
                 var info = new FrameInfo(id, "[Managed] " + name, source?.Path, source?.Line ?? 0,
                     source?.Column ?? 0, source?.EndLine ?? 0, source?.EndColumn ?? 0);
-                result.Add(new ManagedInspectionFrame(info, address, codeStart));
+                result.Add(new ManagedInspectionFrame(info, address, codeStart, token, il.IP.pnOffset));
             }
             else if (frameResult == HRESULT.CORDBG_E_MISSING_METADATA)
             {
@@ -240,6 +247,27 @@ public sealed class CoreClrInspection : IDisposable
     public VariableInfo Evaluate(int frameId, string expression) =>
         GetVariables(frameId).FirstOrDefault(v => v.Name == expression)
         ?? throw new DebuggerException("Managed inspection is read-only and supports scalar local/argument names only, not calls or expressions.");
+
+    public IReadOnlyList<ManagedNativeStepInTarget> GetNativeStepInTargets(int frameId)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (!_frames.TryGetValue(frameId, out CorDebugILFrame? frame))
+            throw new DebuggerException("The managed inspection frame is stale.");
+        ModuleMetadata? metadata = GetMetadata(frame.Function.Module);
+        if (metadata == null)
+            return [];
+        int methodToken = checked((int)frame.Function.Token.Value);
+        (int Start, int End)? range = metadata.GetStepRange(methodToken, frame.IP.pnOffset, frame.Function.ILCode.Size);
+        if (range == null)
+            return [];
+        return metadata.GetCallInstructions(methodToken)
+            .Where(call => call.Offset >= range.Value.Start && call.Offset < range.Value.End)
+            .Select(call => metadata.GetPInvokeTarget(call.Target))
+            .Where(target => target != null)
+            .Select(target => new ManagedNativeStepInTarget(target!.Library, target.EntryPoint))
+            .Distinct()
+            .ToArray();
+    }
 
     private static VariableInfo Describe(string name, Func<CorDebugValue> getter)
     {

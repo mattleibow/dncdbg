@@ -378,7 +378,7 @@ state lock, including for snapshot-cancellation observers.
 | Managed stack/source and primitive local/argument inspection | Optional read-only CoreCLR provider; matching local metadata/runtime required |
 | Native/managed frame correlation | Exact same-thread PC match only |
 | Managed source breakpoints | Experimental current-JIT portable-PDB binding through LLDB; conditions/logpoints and automatic generation rebind are not implemented |
-| Managed stepping | One managed-callback-to-source-bearing-native-caller `StepOut` shape is experimental; ordinary managed stepping and native-to-managed `StepIn` are not implemented |
+| Managed stepping | P/Invoke callsite `StepIn` to a public native entry point and managed-callback-to-native-caller `StepOut` are experimental; ordinary managed stepping and native-to-managed callback `StepIn` are not implemented |
 | CLR exception filters, managed func-eval/mutation | **Not implemented**; use normal managed mode |
 | JIT/EnC notifications, managed breakpoint rebind across tiered/R2R code | **Not implemented**; existing LLDB address bindings are retained when a stopped snapshot lacks code-version information |
 | Single-file/dynamic/missing local PE/PDB named-source parity | Not claimed; missing metadata is explicitly unavailable or lacks source/names |
@@ -617,7 +617,18 @@ the first managed-to-native transition-step vertical slice. It currently
 requires a source-bearing native boundary frame; optimized/tail-call code and
 callers without source are not claimed.
 
-Native-to-managed `StepIn` is still a separate unfinished slice. The public
+For the forward transition, `stepInTargets` on a managed frame decodes the
+current portable-PDB statement's IL call instructions and ECMA-335 P/Invoke
+import metadata. DNCDbg publishes the native entry point as a target; choosing
+it installs an LLDB-owned, original-thread-scoped one-shot symbol breakpoint
+and resumes. The AppKit proof selects `native_callback_roundtrip`, stops with
+reason `step` in `native.cpp`, then continues to the already retained managed
+callback breakpoint. This proves the C# P/Invoke → C++ direction without giving
+CoreCLR execution ownership. Indirect function pointers, runtime-generated
+interop stubs without a metadata import, overloaded native symbol ambiguity,
+and missing native symbols are not yet handled as StepIn targets.
+
+Native-to-managed callback `StepIn` is still a separate unfinished slice. The public
 ARM64 CoreCLR path was traced through the delegate thunk,
 `TheUMEntryPrestub`, `TheUMEntryPrestubWorker`, and the generated reverse
 P/Invoke stub. The published CoreCLR assembly shows the prestub worker returns

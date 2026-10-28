@@ -2,13 +2,17 @@ using System.Runtime.InteropServices;
 using ClrDebug;
 using DncDbg.Dap.Native;
 using DncDbg.Engine;
+using DncDbg.Engine.Symbols;
 
 if (args.Length is < 2 or > 3)
     throw new ArgumentException("Supply the public Python executable and fake_native_adapter.py test peer.");
 string python = args[0], fake = args[1];
 
 if (args.Length != 3 || args[2] is not ("pid-reuse-worker" or "parent-reuse-worker"))
+{
     AssertManagedIlMapping();
+    AssertPInvokeMetadata();
+}
 
 if (args.Length == 2 || args[2] == "version-probe-descriptors")
 {
@@ -1380,6 +1384,22 @@ static void AssertManagedIlMapping()
     Console.WriteLine("PASS managed source breakpoint IL offsets map to stable native sequence ranges");
 }
 
+static void AssertPInvokeMetadata()
+{
+    using ModuleMetadata metadata = ModuleMetadata.TryOpen(typeof(PInvokeMetadataFixture).Assembly.Location)
+        ?? throw new InvalidOperationException("Native test metadata was unavailable.");
+    (int MethodToken, int ILOffset) callMethod = metadata.FindMethodsByName(
+        "PInvokeMetadataFixture.Call").Single();
+    PInvokeTarget[] targets = metadata.GetCallInstructions(callMethod.MethodToken)
+        .Select(call => metadata.GetPInvokeTarget(call.Target))
+        .Where(target => target != null)
+        .Cast<PInvokeTarget>()
+        .ToArray();
+    if (targets is not [{ Library: "dncdbg-test-native", EntryPoint: "dncdbg_test_native_entry" }])
+        throw new InvalidOperationException("P/Invoke step target metadata was not decoded exactly.");
+    Console.WriteLine("PASS managed StepIn target decodes public P/Invoke library and entry point metadata");
+}
+
 NativeAdapterSession Session(string mode)
 {
     string architecture = RuntimeInformation.ProcessArchitecture == Architecture.Arm64 ? "arm64" : "x64";
@@ -1482,4 +1502,12 @@ sealed class CompletingReverseOutput : MemoryStream
         }
         return Task.CompletedTask;
     }
+}
+
+static class PInvokeMetadataFixture
+{
+    [DllImport("dncdbg-test-native", EntryPoint = "dncdbg_test_native_entry")]
+    private static extern int Native(int value);
+
+    internal static int Call(int value) => Native(value);
 }

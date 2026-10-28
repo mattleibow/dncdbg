@@ -131,7 +131,21 @@ Managed-to-native StepOut GREEN:
 
   PASS MAUI AppKit managed source breakpoint and managed-to-native StepOut
 
-Native-to-managed StepIn blocker evidence:
+Managed-to-native StepIn GREEN:
+  At the third invocation's managed MAUI_MANAGED_BEFORE source stop, DNCDbg
+  decodes the statement's IL call instruction and the MethodDef P/Invoke import:
+    library=mixedfixture
+    entryPoint=native_callback_roundtrip
+
+  `stepInTargets` publishes that exact entry point. Selecting the target installs
+  an LLDB-owned one-shot symbol breakpoint scoped to the original OS thread,
+  resumes, removes the internal breakpoint ID, and reports one reason=step stop
+  with native_callback_roundtrip as the top native.cpp frame.
+
+  The proof then continues and requires the retained managed callback breakpoint
+  ID to fire again before the final 126:3 DevFlow assertion.
+
+Native-to-managed callback StepIn blocker evidence:
   LLDB can enumerate the C++ callback function pointer and stop at its delegate
   thunk. On macOS arm64 the public CoreCLR route is:
     delegate thunk -> TheUMEntryPrestub -> TheUMEntryPrestubWorker

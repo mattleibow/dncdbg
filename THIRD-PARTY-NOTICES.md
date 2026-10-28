@@ -56,7 +56,19 @@ The mobile experiment was informed by an audit of JaneySprings/clrdbg
 `DotNet.Debugging.Remote` at `bb5e52b7d0fdef874288a46a4a2aa0f1643e37d7`
 (MIT, Copyright (c) 2026 Nikita Romanov), itself attributing SharpDbg by
 MattParkerDev at `e3f2298746c619b16a7d683d39f1fe01aa5ef8b8`
-(MIT, Copyright (c) 2026 Matthew Parker). **No reference source was copied or
-incorporated.** See the [audit](docs/experimental-mobile-debugging.md#reference-audit-and-attribution)
-for pinned license/attribution links and the explicitly rejected implementation
-assumptions.
+(MIT, Copyright (c) 2026 Matthew Parker). The experimental native startup topology
+in `src/DncDbg.Remote.Target/Bootstrap.cpp` now adapts its runtime discovery,
+target-side `DllMain` / `CoreCLRCreateCordbObject3` startup and native-owner
+approach. Both MIT notices are retained in
+[`JaneySprings-clrdbg.LICENSE`](src/licenses/JaneySprings-clrdbg.LICENSE).
+The generic machine-word/vtable transport is **not** incorporated; calls use
+typed public COM signatures. `CorDebugAbi.h` uses the public `cordebug.idl`
+signatures from dotnet/runtime (MIT, .NET Foundation and Contributors; see
+[`Microsoft.MIT.LICENSE`](src/licenses/Microsoft.MIT.LICENSE)).
+
+The optional native target helper builds against nlohmann/json **3.12.0** at
+`55f93686c01528224f448c19128836e7df245f72`. The build downloads its single header
+into ignored `build/native-private/deps` and verifies the SHA-256 recorded in
+`src/DncDbg.Remote.Target/dependencies.json` before compiling. Its MIT license
+(Copyright (c) 2013-2025 Niels Lohmann) is retained in
+[`nlohmann-json.LICENSE`](src/licenses/nlohmann-json.LICENSE).

@@ -2,7 +2,7 @@
 
 Standard `dotnet new maui` app, now targeting `net11.0-ios` and
 `net11.0-android`. This is a
-**debugger test fixture, not a working mobile debugger**. See the
+**experimental debugger test fixture, not general mobile debugger support**. See the
 [architecture, reference audit and blockers](../../docs/experimental-mobile-debugging.md).
 
 `Microsoft.Maui.DevFlow.Agent` and `builder.AddMauiDevFlowAgent()` are Debug-only.
@@ -12,7 +12,57 @@ tests retain the root's .NET 10 SDK. The remote startup
 probe additionally requires `-p:EnableExperimentalRemoteDebugging=true`; it is
 absent from Release even if that property is supplied. The UI shows the actual
 runtime blocker, with stable AutomationIds for scenario/reset/results.
-The `MOBILE_BREAKPOINT` comment marks the intended **future** debugger test site.
+The `MOBILE_BREAKPOINT` comment marks the real runtime proof's source location.
+
+## Private target-native runtime gate (experimental)
+
+This is a separate, explicit opt-in to a **private, version-fragile** CoreCLR
+startup path. It must not be combined with a host startup/attach controller.
+It supports only the pinned .NET 11 RC1 arm64 iOS simulator/Android emulator
+runtime/DBI/DAC identities and hashes in `PrivateBootstrapPolicy`, not physical
+devices. No target iOS DBI is loaded in macOS and no desktop DBI is substituted.
+
+```sh
+python3 tests/DncDbg.MauiTestApp/validate.py --platform ios \
+  --device YOUR_DEDICATED_SIMULATOR_UDID \
+  --build-developer-dir /Applications/Xcode-26.6.0.app/Contents/Developer \
+  --private-bootstrap
+
+python3 tests/DncDbg.MauiTestApp/validate.py --platform android \
+  --device YOUR_DEDICATED_EMULATOR_SERIAL --agent-port 9223 --allow-fallback \
+  --private-bootstrap
+```
+
+The runner builds the target-native helper, performs exact-build/platform/export
+preflight and uses its **native-owned** authenticated versioned connection.
+It binds the actual PE/portable-PDB sequence point at `MOBILE_BREAKPOINT`,
+checks stack/source/line, reads `input=1` and `answer=42` through `ICorDebug`,
+evaluates `answer + 1=43` with the limited int32 evaluator, continues and checks
+normal UI completion. One persistent DevFlow batch owns all UI mutations,
+reset assertions and the final screenshot, avoiding preview.12 lease conflicts.
+Add `--private-disconnect` on a fresh fixture launch to drop the connection
+while stopped and prove that the same scenario completes without a host continue.
+
+**Exit 0 requires the real proof and successful native detach/cleanup.** Private
+mode evidence, native phase logs, UI JSONL and screenshots are under ignored
+`build/validation/mobile/private-bootstrap/`; failed runs preserve their exact
+last native phase before uninstall. The caller still owns simulator/emulator
+shutdown. Any red gate forbids opening a completion PR. Independent review and
+full CI are required before merge even if both mobile gates pass.
+
+The bootstrap runs `DllMain` / `CoreCLRCreateCordbObject3` target-side, never on a
+managed execution owner. A stuck native call exits **this opted-in app** after
+20 seconds; failed cleanup exits it rather than leaving a suspended runtime.
+This intentionally narrow single-module/int32 backend is not full mobile
+engine/DAP integration. MIT attribution is retained in
+[`THIRD-PARTY-NOTICES.md`](../../THIRD-PARTY-NOTICES.md).
+
+Portable/native negative checks (neither is mobile proof):
+
+```sh
+dotnet run --project tests/DncDbg.RemoteTests -c Release
+python3 src/DncDbg.Remote.Target/build.py --test-host
+```
 
 ## Portable protocol and actual desktop breakpoint test
 
@@ -72,7 +122,7 @@ mutation-lease contention. Android uses `EmbedAssembliesIntoApk=true`, required
 for direct `adb install` without fast-deploy assembly synchronization. It polls actual
 agent reachability because broker registration can precede the HTTP listener.
 
-**Exit 2 is intentional:** UI and capability-probe validation can pass, but
+**Without `--private-bootstrap`, exit 2 is intentional:** UI and capability-probe validation can pass, but
 the managed-mobile-breakpoint release gate is still blocked. Failure before
 that report is a validation failure, not an expected skip. The
 `--allow-fallback` flag only permits collecting UI evidence after an unsuccessful
@@ -174,7 +224,8 @@ architecture audit for red results and why no mobile debugger support is claimed
 
 ### Completing the actual debugger gate
 
-Once a public native startup/backend is available, the mobile test must:
+The private runtime gate above implements this narrow proof. A future general
+mobile backend must continue to prove:
 
 1. Establish a real `ICorDebug` session and receive real runtime callbacks.
 2. Set a source breakpoint at `MOBILE_BREAKPOINT` before the scenario runs.

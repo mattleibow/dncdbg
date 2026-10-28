@@ -49,6 +49,10 @@ def main():
                         help="TCP is the supported mobile route; UDS preserves the iOS negative experiment")
     parser.add_argument("--shared-debugger-ipc", action="store_true",
                         help="iOS only: give the owned target and probe the same short project-owned TMPDIR")
+    parser.add_argument("--private-bootstrap", action="store_true",
+                        help="Opt into exact-build-pinned, version-fragile target-native private DBI startup")
+    parser.add_argument("--private-disconnect", action="store_true",
+                        help="Drop the authenticated native session while stopped, instead of continuing explicitly")
     args = parser.parse_args()
     if args.platform == "android" and not args.device.startswith("emulator-"):
         parser.error("Physical Android devices are intentionally not supported")
@@ -58,13 +62,22 @@ def main():
         parser.error("A shared debugger IPC directory applies only to the iOS simulator's host filesystem")
     if args.diagnostic_trace and args.diagnostic_transport == "uds" and args.platform != "ios":
         parser.error("The UDS diagnostic experiment applies only to the iOS simulator")
-    EVIDENCE = ROOT / f"build/validation/mobile/net11-{args.runtime}"
+    if args.private_bootstrap and args.runtime == "mono":
+        parser.error("The private bootstrap requires CoreCLR")
+    if args.private_disconnect and not args.private_bootstrap:
+        parser.error("--private-disconnect requires --private-bootstrap")
+    if args.private_bootstrap and (args.public_attach_probe or args.startup_probes):
+        parser.error("Private target execution ownership cannot be combined with a host startup/attach controller")
+    EVIDENCE = ROOT / ("build/validation/mobile/private-bootstrap" if args.private_bootstrap else f"build/validation/mobile/net11-{args.runtime}")
+    if args.private_disconnect:
+        EVIDENCE /= "disconnect"
     EVIDENCE.mkdir(parents=True, exist_ok=True)
     prefix = args.platform
     adb = str(Path(os.environ.get("ANDROID_HOME", str(Path.home() / "Library/Android/sdk"))) / "platform-tools/adb")
     forwards = []
     added_reverse = False
     installed = False
+    target_pid = None
     tracer = None
     router = None
     trace_output = None
@@ -114,6 +127,9 @@ def main():
         tfm = f"net11.0-{prefix}"
         rid = "iossimulator-arm64" if prefix == "ios" else "android-arm64"
         properties = [f"-p:RuntimeIdentifier={rid}", "-p:EnableExperimentalRemoteDebugging=true"]
+        if args.private_bootstrap:
+            run("python3", "src/DncDbg.Remote.Target/build.py", rid, env=env, log=f"{prefix}-native-build.log")
+            properties.append("-p:EnableExperimentalPrivateBootstrap=true")
         if args.diagnostic_trace or args.shared_debugger_ipc:
             parent = ROOT / "build/i"
             parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -207,6 +223,8 @@ def main():
             run("xcrun", "simctl", "terminate", args.device, APP, check=False)
             run("xcrun", "simctl", "install", args.device, str(output / "DncDbg.MauiTestApp.app"))
             launch_env = os.environ.copy()
+            (EVIDENCE / "ios-app-stdout.log").write_text("")
+            (EVIDENCE / "ios-app-stderr.log").write_text("")
             run("xcrun", "simctl", "launch", f"--stdout={EVIDENCE / 'ios-app-stdout.log'}",
                 f"--stderr={EVIDENCE / 'ios-app-stderr.log'}", args.device, APP, env=launch_env)
         else:
@@ -243,6 +261,7 @@ def main():
             time.sleep(0.25)
         if status["app"]["packageId"] != APP or status["device"]["platform"].lower() != prefix:
             raise RuntimeError("DevFlow selected the wrong application or platform")
+        target_pid = status["app"]["processId"]
         run(*cli, "--device", args.device, "diagnose", log=f"{prefix}-diagnose.json")
         commands = "\n".join([
             "MAUI tree --depth 5",
@@ -254,14 +273,15 @@ def main():
             "MAUI tap --automationId run-scenario",
             f"MAUI screenshot --output {EVIDENCE.relative_to(ROOT)}/{prefix}-scenario.png --overwrite",
         ]) + "\n"
-        batch = run(*cli, "batch", "--delay", "300", input=commands, log=f"{prefix}-ui-batch.jsonl")
-        rows = [json.loads(line) for line in batch.stdout.splitlines()]
-        if len(rows) != 8 or any(row["exit_code"] != 0 for row in rows):
-            raise RuntimeError("DevFlow UI batch failed; inspect saved JSONL")
-        if json.loads(rows[3]["output"])[0]["text"] != "Result: 42":
-            raise RuntimeError("Managed scenario did not yield 42")
-        if json.loads(rows[5]["output"])[0]["text"] != "Count: 0":
-            raise RuntimeError("Reset did not yield Count: 0")
+        if not args.private_bootstrap:
+            batch = run(*cli, "batch", "--delay", "300", input=commands, log=f"{prefix}-ui-batch.jsonl")
+            rows = [json.loads(line) for line in batch.stdout.splitlines()]
+            if len(rows) != 8 or any(row["exit_code"] != 0 for row in rows):
+                raise RuntimeError("DevFlow UI batch failed; inspect saved JSONL")
+            if json.loads(rows[3]["output"])[0]["text"] != "Result: 42":
+                raise RuntimeError("Managed scenario did not yield 42")
+            if json.loads(rows[5]["output"])[0]["text"] != "Count: 0":
+                raise RuntimeError("Reset did not yield Count: 0")
 
         if prefix == "ios":
             container = Path(run("xcrun", "simctl", "get_app_container", args.device, APP, "data").stdout.strip())
@@ -274,8 +294,34 @@ def main():
         os.fchmod(descriptor_fd, 0o600)
         with os.fdopen(descriptor_fd, "w") as file:
             json.dump(endpoint, file)
-        capability_result = run("dotnet", "run", "--project", "tests/DncDbg.RemoteTests", "--", "--mobile", str(forwarded_file),
-                                log=f"{prefix}-remote-capability.log")
+        proof = ["--mobile", str(forwarded_file)]
+        if args.private_bootstrap:
+            proof = ["--mobile-proof", str(forwarded_file), str(fixture / "MainPage.xaml.cs"),
+                     str(output / "DncDbg.MauiTestApp.dll"), str(output / "DncDbg.MauiTestApp.pdb"),
+                     str(port), "disconnect" if args.private_disconnect else "continue"]
+        capability_result = run("dotnet", "run", "--project", "tests/DncDbg.RemoteTests", "--", *proof,
+                                timeout=90, log=f"{prefix}-remote-capability.log")
+        native_cleanup = None
+        if args.private_bootstrap:
+            cleanup_deadline = time.monotonic() + 25
+            while True:
+                if prefix == "ios":
+                    native_log = (container / "Library/dncdbg-private-startup.jsonl").read_text()
+                else:
+                    native_log = device("exec-out", "run-as", APP, "cat", "files/dncdbg-private-startup.jsonl").stdout
+                phases = [json.loads(row) for row in native_log.splitlines()]
+                if phases and phases[-1]["Phase"] == "owner-finished":
+                    if not any(row["Phase"] == "cleanup-detach-return" and row["HResult"] == "0x00000000" for row in phases):
+                        raise RuntimeError("The native owner finished without successful target detach")
+                    native_cleanup = "owner finished, callback/frame leases released, listener closed, DBI terminated"
+                    if prefix == "ios":
+                        with socket.socket() as verify:
+                            if verify.connect_ex(("127.0.0.1", endpoint["Port"])) == 0:
+                                raise RuntimeError("Native listener remained open after cleanup")
+                    break
+                if time.monotonic() >= cleanup_deadline:
+                    raise RuntimeError("Native owner did not prove bounded cleanup; inspect its preserved phase log")
+                time.sleep(0.1)
         capabilities = json.loads(next(line for line in capability_result.stdout.splitlines() if line.startswith("{")))
         if not capabilities["Runtime"].startswith(".NET 11."):
             raise RuntimeError("The installed application did not report a .NET 11 runtime")
@@ -324,11 +370,16 @@ def main():
                   "sdk": sdk_version, "workload_set": workload_version, "runtime_selection": args.runtime,
                   "properties": inspected, "runtime_packs": runtime_packs, "native_assets": native_assets,
                   "capabilities": capabilities, "public_attach_probe": public_attach,
+                  "native_cleanup": native_cleanup,
                   "startup_environment": startup, "startup_probes": startup_probes, "diagnostic_trace": diagnostic_trace,
                   "mobile_managed_breakpoint": "blocked", "physical_devices": "not tested"}
+        if args.private_bootstrap:
+            report["private_bootstrap"] = "experimental target-side portable-PDB-bound int32 breakpoint proof"
+            report["mobile_managed_breakpoint"] = "passed"
+            report["stop_cleanup"] = "disconnect" if args.private_disconnect else "continue"
         (EVIDENCE / f"{prefix}-report.json").write_text(json.dumps(report, indent=2) + "\n")
         print(json.dumps(report))
-        return 2
+        return 0 if args.private_bootstrap else 2
     finally:
         cleanup_errors = []
 
@@ -339,6 +390,21 @@ def main():
                 cleanup_errors.append(str(error))
 
         if installed:
+            if prefix == "android" and target_pid:
+                cleanup(lambda: device("logcat", "-d", "--pid", str(target_pid), "-t", "2000", log="android-target-logcat.log"))
+            if args.private_bootstrap:
+                # Preserve native phase evidence even if DBI crashed the target before DevFlow connected.
+                for name in ("dncdbg-private-preflight.json", "dncdbg-private-startup.jsonl"):
+                    if prefix == "ios":
+                        saved_container = run("xcrun", "simctl", "get_app_container", args.device, APP, "data", check=False)
+                        if saved_container.returncode == 0:
+                            source = Path(saved_container.stdout.strip()) / "Library" / name
+                            if source.exists():
+                                (EVIDENCE / f"{prefix}-{name}").write_bytes(source.read_bytes())
+                    else:
+                        saved = device("exec-out", "run-as", APP, "cat", f"files/{name}", check=False)
+                        if saved.returncode == 0:
+                            (EVIDENCE / f"{prefix}-{name}").write_text(saved.stdout)
             if prefix == "ios":
                 cleanup(lambda: run("xcrun", "simctl", "terminate", args.device, APP, check=False))
                 cleanup(lambda: run("xcrun", "simctl", "uninstall", args.device, APP))

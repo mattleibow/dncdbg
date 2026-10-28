@@ -12,6 +12,10 @@ internal static class ExperimentalStartup
     {
         if (agent != null)
             return;
+#if DNCDBG_PRIVATE_BOOTSTRAP
+        if (PrivateStartup.Endpoint != null)
+            return;
+#endif
 #if DNCDBG_MONO_RUNTIME
         const DncDbg.Remote.RemoteRuntimeKind runtime = DncDbg.Remote.RemoteRuntimeKind.Mono;
 #elif DNCDBG_CORECLR_RUNTIME
@@ -19,9 +23,22 @@ internal static class ExperimentalStartup
 #else
         const DncDbg.Remote.RemoteRuntimeKind runtime = DncDbg.Remote.RemoteRuntimeKind.Unspecified;
 #endif
+#if DNCDBG_PRIVATE_BOOTSTRAP
+        PrivateStartup.Start();
+        if (PrivateStartup.Endpoint is { } nativeEndpoint)
+        {
+            Status = PrivateStartup.Capabilities.Bootstrap!;
+            File.WriteAllText(DescriptorPath, System.Text.Json.JsonSerializer.Serialize(nativeEndpoint, DncDbg.Remote.RemoteJson.Default.RemoteEndpoint));
+            return;
+        }
+        agent = new DncDbg.Remote.RemoteAgent(enableExperimental: true,
+            () => DncDbg.Remote.MobileRuntimeCapability.CreateUnavailableBackend(runtime, PrivateStartup.Capabilities));
+        Status = PrivateStartup.Capabilities.Blocker!;
+#else
         agent = new DncDbg.Remote.RemoteAgent(enableExperimental: true,
             () => DncDbg.Remote.MobileRuntimeCapability.CreateUnavailableBackend(runtime));
         Status = DncDbg.Remote.MobileRuntimeCapability.Detect(runtime).Blocker!;
+#endif
         File.WriteAllText(DescriptorPath, System.Text.Json.JsonSerializer.Serialize(agent.Endpoint, DncDbg.Remote.RemoteJson.Default.RemoteEndpoint));
         File.WriteAllText(Path.Combine(FileSystem.AppDataDirectory, "dncdbg-startup.json"),
             System.Text.Json.JsonSerializer.Serialize(StartupSnapshot.Capture(), StartupSnapshotJson.Default.StartupSnapshot));
@@ -29,8 +46,14 @@ internal static class ExperimentalStartup
 
     public static async Task StopAsync()
     {
+#if DNCDBG_PRIVATE_BOOTSTRAP
+        PrivateStartup.Cancel();
+#endif
         if (agent is not { } current)
+        {
+            File.Delete(DescriptorPath);
             return;
+        }
         agent = null;
         try { await current.DisposeAsync(); }
         finally

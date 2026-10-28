@@ -73,6 +73,26 @@
 	<ItemGroup Condition="'$(Configuration)' == 'Debug' And '$(EnableExperimentalRemoteDebugging)' == 'true'">
 		<ProjectReference Include="../../src/DncDbg.Remote/DncDbg.Remote.csproj" />
 	</ItemGroup>
+	<ItemGroup Condition="'$(Configuration)' == 'Debug' And '$(EnableExperimentalPrivateBootstrap)' == 'true'">
+		<MauiAsset Include="../../src/licenses/JaneySprings-clrdbg.LICENSE" LogicalName="licenses/JaneySprings-clrdbg.LICENSE" />
+		<MauiAsset Include="../../src/licenses/nlohmann-json.LICENSE" LogicalName="licenses/nlohmann-json.LICENSE" />
+		<MauiAsset Include="../../src/licenses/Microsoft.MIT.LICENSE" LogicalName="licenses/Microsoft.MIT.LICENSE" />
+	</ItemGroup>
+	<PropertyGroup Condition="'$(Configuration)' == 'Debug' And '$(EnableExperimentalRemoteDebugging)' == 'true' And '$(EnableExperimentalPrivateBootstrap)' == 'true'">
+		<DefineConstants>$(DefineConstants);DNCDBG_PRIVATE_BOOTSTRAP</DefineConstants>
+	</PropertyGroup>
+	<ItemGroup Condition="'$(Configuration)' == 'Debug' And '$(EnableExperimentalRemoteDebugging)' == 'true' And '$(EnableExperimentalPrivateBootstrap)' == 'true' And '$(RuntimeIdentifier)' == 'iossimulator-arm64'">
+		<NativeReference Include="../../build/native-private/iossimulator-arm64/libdncdbg_target.a" Kind="Static" ForceLoad="true" IsCxx="true" SmartLink="false" />
+	</ItemGroup>
+	<ItemGroup Condition="'$(Configuration)' == 'Debug' And '$(EnableExperimentalRemoteDebugging)' == 'true' And '$(EnableExperimentalPrivateBootstrap)' == 'true' And '$(RuntimeIdentifier)' == 'android-arm64'">
+		<AndroidNativeLibrary Include="../../build/native-private/android-arm64/libdncdbg_target.so" Abi="arm64-v8a" />
+	</ItemGroup>
+	<Target Name="ValidatePrivateBootstrapConfiguration" BeforeTargets="PrepareForBuild" Condition="'$(Configuration)' == 'Debug' And '$(EnableExperimentalPrivateBootstrap)' == 'true' And '$(TargetFramework)' != ''">
+		<Error Condition="'$(EnableExperimentalRemoteDebugging)' != 'true' Or '$(UseMonoRuntime)' == 'true' Or '$(PublishAot)' == 'true'"
+		       Text="Private DBI startup requires explicit experimental remote debugging and CoreCLR (not Mono/NativeAOT)." />
+		<Error Condition="'$(RuntimeIdentifier)' != 'iossimulator-arm64' And '$(RuntimeIdentifier)' != 'android-arm64'"
+		       Text="Private DBI startup only permits the pinned arm64 iOS simulator/Android emulator tuples." />
+	</Target>
 	<PropertyGroup Condition="'$(Configuration)' == 'Debug' And $([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'ios'">
 		<CodesignEntitlements>Platforms/iOS/Entitlements.Debug.plist</CodesignEntitlements>
 	</PropertyGroup>

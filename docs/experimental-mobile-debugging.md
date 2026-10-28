@@ -1,7 +1,7 @@
 # Experimental mobile managed-debugging investigation
 
-**Not shipping mobile debugger support. No mobile managed breakpoint has been
-proven. Do not merge this experiment as a completed mobile feature.**
+**Not shipping general mobile debugger support. The private bootstrap is an
+explicit, runtime-version-fragile experiment, not a supported CoreCLR API.**
 
 The local debugger and its DAP launch/attach paths are unchanged. The portable
 solution does not require mobile workloads. The MAUI app is intentionally built
@@ -14,11 +14,12 @@ separately.
 | Explicit, bounded, authenticated loopback protocol | Implemented, version 1 |
 | Host-side typed client | Implemented; **not** an `ICorDebug` COM proxy |
 | Connection-owned handle/callback boundary | Contract and desktop proof |
-| Device startup library | Managed capability probe, explicitly opted in |
-| Native device-side execution owner | **Missing; requires a public startup provider** |
-| Mobile `ICorDebug` proxy/backend integration | **Blocked, not implemented** |
+| Default device startup library | Capability-only probe; execution unavailable |
+| Opt-in target-native startup/owner | Private, exact-build-pinned DBI experiment |
+| Native typed command backend | Single portable-PDB-bound module / int32 proof; not a COM proxy |
+| General mobile engine/DAP integration | **Not implemented** |
 | Managed breakpoint, stack, local, expression, continue, disconnect | Proven over TCP on a separate desktop debuggee only |
-| iOS simulator / Android emulator | MAUI UI and real device-agent handshake; debugging capability rejected |
+| iOS simulator / Android emulator | Dedicated real runtime gates; see current private experiment below |
 | Physical iOS / Android devices | **Not tested or supported by this experiment** |
 
 `src/DncDbg.Remote` has no dependency on the local engine, DBI, DAC, ClrDebug,
@@ -31,10 +32,146 @@ counter does not change that capability.
 `tests/DncDbg.RemoteTests/EngineBackend.cs` is a **desktop test adapter**, not a
 mobile implementation. It wraps the existing engine's public API and therefore
 uses its real, public `ICorDebug` implementation against a separate process.
-The host-side client currently transports a narrow managed-debugging command
+The host-side client transports a narrow managed-debugging command
 surface; it cannot be substituted for an `ICorDebug` object in the engine.
 
-## Current .NET 11 runtime evidence
+## Private target-native experiment
+
+The explicit authorization to use private exports supersedes the earlier
+public-only constraint, **not** CoreCLR's API-support boundary. Both opt-ins are
+required in Debug:
+
+```text
+EnableExperimentalRemoteDebugging=true
+EnableExperimentalPrivateBootstrap=true
+```
+
+`src/DncDbg.Remote.Target` adapts the MIT JaneySprings startup topology with
+retained JaneySprings/SharpDbg notices. DBI is loaded **inside the target**, next
+to its already loaded CoreCLR. `DllMain` and `CoreCLRCreateCordbObject3` run on an
+independently created native pthread. They are private implementation exports;
+their presence does not make this a supported runtime integration.
+
+Before any private export executes, the fixture checks:
+
+- Actual virtual-device status, target platform and arm64 architecture. Physical
+  iOS/Android, macOS, desktop and other architectures are rejected.
+- Exact CoreCLR version `11.0.0-rc.1.26425.128`.
+- Runtime, DBI **and DAC** build identities and executable hashes, pinned in
+  `PrivateBootstrapPolicy.SupportedBuilds`. Apple uses `LC_UUID`, the
+  `IOSSIMULATOR` platform tag and SHA-256 of `__text` (stable across ad-hoc
+  signing); Android uses GNU build IDs and SHA-256 of the entire ELF.
+- Both required DBI exports, their common loaded-image origin and exact target
+  path. A product-version match alone is insufficient. No desktop DBI fallback
+  or target-library load in the macOS host is permitted.
+
+The build is refused for Mono/NativeAOT or unsupported RIDs. Identity mismatch,
+malformed image, missing asset/export or unsupported device leaves the
+capability-only backend active with actionable refusal diagnostics.
+Capabilities expose `Bootstrap`, `SupportedBuild` and the deliberately narrow
+`Scope`, rather than representing this as ordinary supported mobile debugging.
+Release excludes Remote, DevFlow, native helpers and their P/Invokes.
+
+### Execution ownership and proof surface
+
+One target-native thread owns the authenticated/version-1 loopback connection,
+public typed COM calls, callback stops, frame leases, continue and detach.
+Managed code only performs the preflight, creates a random 256-bit token and
+writes the private descriptor **before** debugging starts; it is not needed to
+serve a suspended runtime. Callback threads transfer counted references/stops
+to the native owner and never drive execution. There is no generic vtable or
+machine-word dispatcher and no remote function pointer/address operation.
+
+The proof uses the actual build's PE/portable PDB: matching PDB identity and
+source SHA-256, method token, scope-local slots, parameter indexes and sequence
+point. The target validates the module MVID before binding an IL breakpoint.
+Stack source/line annotations require the actual frame's module, method token
+and IL IP to match. Argument/local reads use real `ICorDebug` values; the small
+native evaluator supports int32 names and addition of an int32 literal only.
+It is **not** general Roslyn evaluation, managed function evaluation or a mobile
+replacement for the desktop engine.
+
+Native startup is single-use per app launch and accepts one connection. Wrong
+tokens/versions are rejected before creating a debugger; sequence replay closes
+the connection. Handles and stop IDs are never reused in a session, and all
+frames expire on continue/disconnect. The portable lease implementation also
+encodes non-reused connection generations. Duplicate continue/release is an
+error, not another runtime operation.
+
+Handshake/read/write/stop waits are bounded (5/30 seconds; initial host wait
+120 seconds). EOF, cancellation and timeout consume an outstanding stop once,
+deactivate the breakpoint, release leases, detach, terminate the DBI object and
+close sockets. A watchdog monitors native-owner progress: a native call that
+cannot be canceled exits **this explicitly opted-in fixture** after 20 seconds
+(exit 86); failed cleanup exits it with 87 rather than leaving it suspended.
+The initialized DBI module stays loaded until app exit: unloading its private
+PAL is not assumed safe. The runner uninstalls the fixture and removes owned
+ADB mappings, and checks native `owner-finished`/successful detach before
+declaring the runtime gate green.
+
+Native ownership/protocol fakes run with:
+
+```sh
+python3 src/DncDbg.Remote.Target/build.py --test-host
+```
+
+These load no runtime or DBI, cannot activate the target bootstrap on a host,
+and are not mobile breakpoint evidence. They supplement the portable negative
+tests and actual desktop target-death/disconnect proof. The build downloads
+only the SHA-256-pinned MIT JSON header declared in `dependencies.json`.
+
+Current runtime-gate results and exact red attempts are preserved under ignored
+`build/validation/mobile/private-bootstrap/`. The public-only results below are
+historical baseline evidence, **not** descriptions of this new private path.
+No physical-device result or general mobile-debugger support is claimed.
+
+### Verified private-path execution, 2026-10-28
+
+| Gate | iOS simulator arm64 | Android emulator arm64 |
+| --- | --- | --- |
+| Default .NET 11 CoreCLR, pinned runtime/DBI/DAC identity/hash preflight | Passed | Passed |
+| Target-side private factory, self-attach and managed callbacks | Passed | Passed |
+| Real `MOBILE_BREAKPOINT`, `MainPage.ManagedScenario`, source line **35** | Passed | Passed |
+| Actual managed argument/local `input=1`, `answer=42` | Passed | Passed |
+| Limited int32 expression `answer + 1=43` | Passed | Passed |
+| Continue, duplicate-continue/stale-handle rejection, normal UI completion | Passed | Passed |
+| Fresh-launch disconnect **while stopped**, normal UI completion without host continue | Passed | Passed |
+| DevFlow reset/result assertions and in-process screenshot | Passed | Passed |
+| Native stop/frame cleanup, breakpoint deactivation, detach, DBI object termination, closed listener | Passed | Passed |
+| DevFlow broker wait | Passed | **Still red**; explicit forwarded 9223 fallback passed |
+
+Continue evidence is in `ios-report.json`, `android-report.json`,
+`*-remote-capability.log`, `*-private-ui.jsonl`, `*-dncdbg-private-startup.jsonl`
+and `*-continued.png`; stopped-disconnect repetitions are in `disconnect/`.
+The runner returned **0 for all four** real private-mode runs. It verifies
+matching PE/PDB identity and source checksum before the native session; the top
+frame's source/line require the observed target module/token/IL IP match.
+Other stack frames without source metadata are explicitly left unmapped rather
+than assigned invented source locations.
+
+The portable Release solution build has zero warnings/errors; **89** portable
+remote/real desktop checks, **11** native ownership/protocol contract checks
+(explicit fakes), and all **96** existing local CLI/protocol smoke checks pass.
+Both Release configurations exclude DevFlow/Remote/native references and private
+defines even with the experimental properties supplied; an actual iOS Release
+build also passes with zero warnings/errors.
+
+Earlier red attempts remain under `red-first-breakpoint/`,
+`red-domain-abi/` and `red-function-module-abi/`. The implementation's incorrect
+hand-indexed COM calls caused the two native stack/attach crashes; replacing
+them with typed public interface declarations fixed those bugs. They are **not**
+reported as runtime impossibility or as successful debugging. The DevFlow
+mutation-lease issue was resolved with one persistent CLI batch, not by taking
+over an unrelated agent.
+
+`cleanup.json` records uninstalled fixture apps, removed endpoint descriptors,
+owned ADB mappings removed, the dedicated simulator shut down/deleted and the
+read-only emulator shut down. The existing broker remains unchanged with zero
+agents. Both apps' managed scenarios completed normally before uninstall.
+Independent review and full CI remain merge gates; these results alone are not
+permission to merge or a claim that the public host startup API now works.
+
+## Pinned .NET 11 toolchain and public-only baseline
 
 The fixture now targets **`net11.0-android;net11.0-ios`**. Its own `global.json`
 selects an already installed SDK; the repository root and debugger remain on
@@ -124,8 +261,8 @@ impossibility or identify the exact missing native component. They do establish
 that changing the fixture's TFM/default runtime has **not produced a working
 public startup path in the tested configuration**. There is still no validated
 native execution/transport owner; the managed capability agent continues to
-reject execution with `RuntimeUnavailable`. No private DBI startup exports or
-runtime layout assumptions were introduced.
+reject execution with `RuntimeUnavailable`. No private DBI startup exports or runtime layout assumptions were introduced
+in that public-only baseline.
 
 Current evidence is under ignored `build/validation/mobile/net11-default/`,
 including `*-properties.json`, `*-runtime-matrix.json`, `*-resolved-packs.json`,
@@ -232,8 +369,8 @@ PID as a host PID.
 The pinned JaneySprings agent loads target-ABI DBI in the target process and
 directly calls `DllMain` and `CoreCLRCreateCordbObject3`. Its native thread also
 avoids suspending a managed execution owner. Those observations explain why
-its topology differs; they do not make those exports public APIs. This branch
-does not call them or adopt its generic vtable invocation.
+its topology differs; they do not make those exports public APIs. The public-only baseline did not call them. The separately opted-in private
+experiment above now does, but does not adopt generic vtable invocation.
 
 The inspected published dbgshim source is pinned to
 `dotnet/diagnostics@ad724c4b85e7ae775e42f393c6e95a7557a57954`.
@@ -290,8 +427,9 @@ Observed with SDK **10.0.401**, MAUI workload/packages **10.0.20**, runtime
    public interfaces, matching runtime assets, and proven shutdown behavior.
    The profiler startup API alone does not provide an `ICorDebug` instance.
 
-We do not replace these missing pieces with undocumented DBI exports, copied
-runtime layout offsets, handcrafted runtime internals, or a simulated breakpoint.
+At this historical stage we did not replace these missing pieces with private
+DBI exports. The new explicitly authorized experiment uses those exports with
+exact build validation, not copied CLR structure offsets or simulated stops.
 
 Useful public contracts:
 
@@ -313,15 +451,16 @@ host proxies, and `docs/remote`.
   credits **SharpDbg by MattParkerDev**, commit
   `e3f2298746c619b16a7d683d39f1fe01aa5ef8b8`, under MIT,
   **Copyright (c) 2026 Matthew Parker**.
-- The reference is research, **not incorporated source**. No C++, generated
-  proxies, COM stubs, wire definitions, assets or build scripts were copied.
-  Future incorporation must retain both applicable MIT notices.
+- The original audit was research only. The new native bootstrap adapts its
+  target-side startup topology and retains both applicable MIT notices in
+  `src/licenses/JaneySprings-clrdbg.LICENSE`. Generated proxies, generic invocation,
+  wire definitions and assets were not incorporated.
 - Its useful separation is native target startup, object handles, host proxies,
   and callback ownership. These are sound concerns to address explicitly.
 - Its bootstrap explicitly invokes DBI's `DllMain` and
   `CoreCLRCreateCordbObject3` exports. Exported implementation entry points are
   not made supported public APIs by being visible or linked in source comments.
-  This experiment does not call them.
+  The new explicit private opt-in calls them and labels the boundary accordingly.
 - Its generic invocation path calls arbitrary interface slots through a
   machine-word function signature. Published COM layouts do not establish that
   one variadic/word ABI correctly marshals every interface signature. Our

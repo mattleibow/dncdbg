@@ -23,6 +23,8 @@ internal static class ExperimentalStartup
             () => DncDbg.Remote.MobileRuntimeCapability.CreateUnavailableBackend(runtime));
         Status = DncDbg.Remote.MobileRuntimeCapability.Detect(runtime).Blocker!;
         File.WriteAllText(DescriptorPath, System.Text.Json.JsonSerializer.Serialize(agent.Endpoint, DncDbg.Remote.RemoteJson.Default.RemoteEndpoint));
+        File.WriteAllText(Path.Combine(FileSystem.AppDataDirectory, "dncdbg-startup.json"),
+            System.Text.Json.JsonSerializer.Serialize(StartupSnapshot.Capture(), StartupSnapshotJson.Default.StartupSnapshot));
     }
 
     public static async Task StopAsync()
@@ -31,7 +33,11 @@ internal static class ExperimentalStartup
             return;
         agent = null;
         try { await current.DisposeAsync(); }
-        finally { File.Delete(DescriptorPath); }
+        finally
+        {
+            File.Delete(DescriptorPath);
+            File.Delete(Path.Combine(FileSystem.AppDataDirectory, "dncdbg-startup.json"));
+        }
     }
 #endif
 }

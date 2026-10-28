@@ -3,11 +3,29 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Text.Json;
+using System.Runtime.InteropServices;
+using ClrDebug;
 using DncDbg.Remote;
 
 using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(60));
 CancellationToken token = deadline.Token;
 int passed = 0;
+
+if (args is ["--load-probe", var nativeLibrary])
+{
+    Environment.ExitCode = StartupProbe.LoadLibrary(nativeLibrary);
+    return;
+}
+if (args is ["--startup-probe", var targetPid, var runtimePath, var startupReport])
+{
+    Environment.ExitCode = await StartupProbe.RunAsync(int.Parse(targetPid, System.Globalization.CultureInfo.InvariantCulture), runtimePath, startupReport);
+    return;
+}
+if (args is ["--startup-probe", var providerPid, var providerRuntime, var providerReport, "--libraries", var providerDirectory])
+{
+    Environment.ExitCode = await StartupProbe.RunAsync(int.Parse(providerPid, System.Globalization.CultureInfo.InvariantCulture), providerRuntime, providerReport, providerDirectory);
+    return;
+}
 
 if (args is ["--attach-probe", var processId])
 {
@@ -44,13 +62,14 @@ if (args is ["--mobile", var descriptor])
 
 await TestFramesAsync();
 TestOwnership();
+TestMachOUuid();
 await TestAgentAsync();
 await TestCancellationAsync();
 await TestCorrelationAsync();
 if (args is ["--desktop", var fixture, var source, var results])
     await TestDesktopAsync(Path.GetFullPath(fixture), Path.GetFullPath(source), Path.GetFullPath(results));
 else if (args.Length != 0)
-    throw new ArgumentException("Use no arguments, --mobile descriptor.json, --attach-probe pid, or --desktop fixture.dll source.cs result-directory.");
+    throw new ArgumentException("Use no arguments, --mobile descriptor.json, --attach-probe pid, --load-probe library, --startup-probe pid runtime report [--libraries directory], or --desktop fixture.dll source.cs result-directory.");
 Console.WriteLine($"Passed {passed} experimental remote checks.");
 
 void Check(bool condition, string name)
@@ -128,6 +147,43 @@ void TestOwnership()
     table.Dispose();
     table.Dispose();
     Check(releases == 3 && table.Count == 0, "disconnect releases all handouts exactly once");
+}
+
+void TestMachOUuid()
+{
+    byte[] image = new byte[56];
+    BinaryPrimitives.WriteUInt32LittleEndian(image, 0xfeedfacf);
+    BinaryPrimitives.WriteUInt32LittleEndian(image.AsSpan(16), 1);
+    BinaryPrimitives.WriteUInt32LittleEndian(image.AsSpan(32), 0x1b);
+    BinaryPrimitives.WriteUInt32LittleEndian(image.AsSpan(36), 24);
+    byte[] identity = Enumerable.Range(1, 16).Select(i => (byte)i).ToArray();
+    identity.CopyTo(image, 40);
+    using var valid = new MemoryStream(image);
+    Check(MachOUuid.Read(valid)!.SequenceEqual(identity), "read public Mach-O UUID metadata");
+    BinaryPrimitives.WriteUInt32LittleEndian(image.AsSpan(36), 4);
+    using var invalidSize = new MemoryStream(image);
+    Check(MachOUuid.Read(invalidSize) == null, "reject malformed Mach-O load command");
+    using var truncated = new MemoryStream(image[..20]);
+    Check(MachOUuid.Read(truncated) == null, "reject truncated Mach-O metadata");
+    string directory = Path.Combine("build", "validation", "startup-provider-" + Environment.ProcessId);
+    Directory.CreateDirectory(directory);
+    try
+    {
+        BinaryPrimitives.WriteUInt32LittleEndian(image.AsSpan(36), 24);
+        File.WriteAllBytes(Path.Combine(directory, "libcoreclr.dylib"), image);
+        File.WriteAllBytes(Path.Combine(directory, "libmscordbi.dylib"), image);
+        var provider = new StartupLibraryProvider(Path.GetFullPath(directory));
+        HRESULT accepted = provider.ProvideUnixLibrary("libmscordbi.dylib", "runtime", LIBRARY_PROVIDER_INDEX_TYPE.Runtime, identity, identity.Length, out nint resolved);
+        try { Check(accepted == HRESULT.S_OK && Marshal.PtrToStringUni(resolved) == Path.GetFullPath(Path.Combine(directory, "libmscordbi.dylib")), "provider accepts exact public runtime identity"); }
+        finally { if (resolved != 0) Marshal.FreeCoTaskMem(resolved); }
+        byte[] wrong = [.. identity];
+        wrong[0] ^= 0xff;
+        Check(provider.ProvideUnixLibrary("libmscordbi.dylib", "runtime", LIBRARY_PROVIDER_INDEX_TYPE.Runtime, wrong, wrong.Length, out resolved) == HRESULT.E_FAIL && resolved == 0,
+            "provider rejects same-name library with wrong identity");
+        Check(provider.ProvideUnixLibrary("libmscordbi.dylib", "runtime", (LIBRARY_PROVIDER_INDEX_TYPE)999, identity, identity.Length, out resolved) == HRESULT.E_INVALIDARG && resolved == 0,
+            "provider rejects unknown identity semantics");
+    }
+    finally { Directory.Delete(directory, recursive: true); }
 }
 
 async Task TestAgentAsync()

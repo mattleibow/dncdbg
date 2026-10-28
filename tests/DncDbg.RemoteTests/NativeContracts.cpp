@@ -36,6 +36,14 @@ template<class T> struct FakeRef : T {
     uint32_t AddRef() override { return ++refs; }
     uint32_t Release() override { return --refs; }
 };
+struct Debugger final : FakeRef<CorDebug> {
+    HResult Initialize() override { return 0; }
+    HResult Terminate() override { return 0; }
+    HResult SetManagedHandler(Unknown*) override { return Fail; }
+    HResult SetUnmanagedHandler(Unknown*) override { return Fail; }
+    HResult CreateProcess(const char16_t*, char16_t*, void*, void*, Bool, uint32_t, void*, const char16_t*, void*, void*, uint32_t, Controller**) override { return Fail; }
+    HResult DebugActiveProcess(uint32_t, Bool, Controller**) override { return Fail; }
+};
 struct Primitive final : FakeRef<GenericValue> {
     uint32_t type, size;
     uint64_t bits = 0;
@@ -74,6 +82,73 @@ struct Array final : FakeRef<ArrayValue> {
         if (index >= 150) return Fail;
         child.bits = index; child.AddRef(); *result = &child; return 0;
     }
+};
+struct ExceptionMetadata final : FakeRef<MetadataImport> {
+    std::u16string name = u"System.InvalidOperationException";
+    void CloseEnum(void*) override {}
+    HResult CountEnum(void*, uint32_t*) override { return Fail; }
+    HResult ResetEnum(void*, uint32_t) override { return Fail; }
+    HResult EnumTypeDefs(void**, uint32_t*, uint32_t, uint32_t*) override { return Fail; }
+    HResult EnumInterfaceImpls(void**, uint32_t, uint32_t*, uint32_t, uint32_t*) override { return Fail; }
+    HResult EnumTypeRefs(void**, uint32_t*, uint32_t, uint32_t*) override { return Fail; }
+    HResult FindTypeDefByName(const char16_t*, uint32_t, uint32_t*) override { return Fail; }
+    HResult GetScopeProps(char16_t*, uint32_t, uint32_t*, Guid*) override { return Fail; }
+    HResult GetModuleFromScope(uint32_t*) override { return Fail; }
+    HResult GetTypeDefProps(uint32_t, char16_t* result, uint32_t capacity, uint32_t* count, uint32_t*, uint32_t*) override {
+        if (capacity <= name.size()) return Fail;
+        std::copy(name.begin(), name.end(), result); result[name.size()] = 0;
+        *count = static_cast<uint32_t>(name.size() + 1); return 0;
+    }
+};
+struct ExceptionModule final : FakeRef<Module> {
+    ExceptionMetadata metadata;
+    HResult GetProcess(Controller**) override { return Fail; }
+    HResult GetBaseAddress(uint64_t*) override { return Fail; }
+    HResult GetAssembly(Unknown**) override { return Fail; }
+    HResult GetName(uint32_t, uint32_t*, char16_t*) override { return Fail; }
+    HResult EnableJITDebugging(Bool, Bool) override { return Fail; }
+    HResult EnableClassLoadCallbacks(Bool) override { return Fail; }
+    HResult GetFunctionFromToken(uint32_t, Function**) override { return Fail; }
+    HResult GetFunctionFromRVA(uint64_t, Function**) override { return Fail; }
+    HResult GetClassFromToken(uint32_t, Unknown**) override { return Fail; }
+    HResult CreateBreakpoint(Unknown**) override { return Fail; }
+    HResult GetEditAndContinueSnapshot(Unknown**) override { return Fail; }
+    HResult GetMetaDataInterface(const Guid&, Unknown** result) override { metadata.AddRef(); *result = &metadata; return 0; }
+};
+struct ExceptionClass final : FakeRef<Class> {
+    ExceptionModule module;
+    HResult GetModule(Module** result) override { module.AddRef(); *result = &module; return 0; }
+    HResult GetToken(uint32_t* result) override { *result = 0x02000001; return 0; }
+    HResult GetStaticFieldValue(uint32_t, Frame*, Value**) override { return Fail; }
+};
+struct ExceptionValue final : FakeRef<ObjectValue> {
+    ExceptionClass klass;
+    HResult QueryInterface(const Guid& id, void** result) override {
+        if (std::memcmp(&id, &ObjectValueId, sizeof(id))) return Fail;
+        *result = this; AddRef(); return 0;
+    }
+    HResult GetType(uint32_t* result) override { *result = 0x12; return 0; }
+    HResult GetSize(uint32_t* result) override { *result = 8; return 0; }
+    HResult GetAddress(uint64_t*) override { return Fail; }
+    HResult CreateBreakpoint(Unknown**) override { return Fail; }
+    HResult GetClass(Class** result) override { klass.AddRef(); *result = &klass; return 0; }
+    HResult GetFieldValue(Class*, uint32_t, Value**) override { return Fail; }
+};
+struct ExceptionThread final : FakeRef<Thread> {
+    ExceptionValue exception;
+    HResult GetProcess(Controller**) override { return Fail; }
+    HResult GetID(uint32_t* result) override { *result = 7; return 0; }
+    HResult GetHandle(void**) override { return Fail; }
+    HResult GetAppDomain(AppDomain**) override { return Fail; }
+    HResult SetDebugState(uint32_t) override { return Fail; }
+    HResult GetDebugState(uint32_t*) override { return Fail; }
+    HResult GetUserState(uint32_t*) override { return Fail; }
+    HResult GetCurrentException(Value** result) override { exception.AddRef(); *result = &exception; return 0; }
+    HResult ClearCurrentException() override { return Fail; }
+    HResult CreateStepper(Unknown**) override { return Fail; }
+    HResult EnumerateChains(Unknown**) override { return Fail; }
+    HResult GetActiveChain(Unknown**) override { return Fail; }
+    HResult GetActiveFrame(Frame**) override { return Fail; }
 };
 void FloatingChecks() {
     for (double input : {1e-10, 1.23456789012345, -0.0, std::numeric_limits<double>::infinity(),
@@ -131,17 +206,39 @@ void Send(Wire& wire, int64_t sequence, int operation, Json body, int version = 
     wire.Transfer(header, 8, true);
     wire.Transfer(text.data(), text.size(), true);
 }
+void ExceptionChecks() {
+    Fake controller;
+    ExceptionThread thread;
+    Debugger debugger;
+    int fd = Connect();
+    debugger.AddRef(); debug = &debugger;
+    std::thread owner(Run, nullptr);
+    Wire wire{fd, [] {}, Clock::now() + std::chrono::seconds(5)};
+    Send(wire, 1, 1, {{"Token", std::string(64, 'a')}}); wire.Read();
+    Send(wire, 2, 18, {{"Filters", {"all", "unhandled"}},
+        {"Types", {"System.ArgumentException", "System.InvalidOperationException"}}});
+    wire.Read();
+    Enqueue(&controller, &thread, CallbackKind::ExceptionThrown);
+    Send(wire, 3, 11, Json::object());
+    Json response = wire.Read();
+    bool caughtInvalidOperationIgnored = response.at("Error").is_null() && response.at("Body").is_array() && response.at("Body").empty();
+    close(fd); owner.join();
+    Check(caughtInvalidOperationIgnored,
+          "caught first-chance InvalidOperationException does not match all:ArgumentException plus unhandled:InvalidOperationException");
+}
 }
 
 int main(int argc, char** argv) {
     if (argc == 2) {
         if (std::strcmp(argv[1], "--floating") == 0) FloatingChecks();
         else if (std::strcmp(argv[1], "--variables") == 0) VariableChecks();
+        else if (std::strcmp(argv[1], "--exceptions") == 0) ExceptionChecks();
         else throw std::runtime_error("Unknown test selection");
         return 0;
     }
     FloatingChecks();
     VariableChecks();
+    ExceptionChecks();
     {
         char16_t text[]{'A', 0xd83d, 0xde80, 0xd800};
         Check(Utf8(text, 4) == "A\xf0\x9f\x9a\x80\xef\xbf\xbd", "UTF-16 strings preserve surrogate pairs and replace isolated surrogates");

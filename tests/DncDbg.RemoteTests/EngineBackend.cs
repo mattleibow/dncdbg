@@ -5,7 +5,8 @@ using DncDbg.Remote;
 
 // Desktop transport proof only. This backend is out of process relative to the debuggee; it is NOT a mobile
 // in-process startup implementation, nor an ICorDebug COM proxy. DebugEngine retains ownership of its native objects.
-internal sealed class EngineBackend(string program, string resultPath) : IRemoteDebugBackend
+internal sealed class EngineBackend(string program, string resultPath, string[]? fixtureArguments = null,
+    Func<Task>? afterRelinquished = null) : IRemoteDebugBackend
 {
     private readonly DebugEngine engine = new();
     private readonly Channel<StopInfo> stops = Channel.CreateBounded<StopInfo>(8);
@@ -39,7 +40,7 @@ internal sealed class EngineBackend(string program, string resultPath) : IRemote
         engine.Stopped += OnStopped;
         engine.Exited += OnExited;
         subscribed = true;
-        try { engine.Launch(new LaunchOptions { Program = program, Args = [resultPath] }); }
+        try { engine.Launch(new LaunchOptions { Program = program, Args = [resultPath, .. fixtureArguments ?? []] }); }
         finally
         {
             ProcessId = engine.ProcessId;
@@ -141,9 +142,16 @@ internal sealed class EngineBackend(string program, string resultPath) : IRemote
             engine.Exited -= OnExited;
         }
         frames.Dispose();
+        bool engineDisposed = false;
         try
         {
             engine.Detach();
+            if (afterRelinquished != null)
+            {
+                engine.Dispose();
+                engineDisposed = true;
+                await afterRelinquished();
+            }
             // Keep the Windows native-debug pipeline and redirected handles alive
             // until the detached fixture has committed its result and exited.
             if (target != null)
@@ -160,6 +168,10 @@ internal sealed class EngineBackend(string program, string resultPath) : IRemote
             Console.Error.WriteLine("[desktop-fixture] Cleanup failed: " + error);
             throw;
         }
-        finally { engine.Dispose(); target?.Dispose(); }
+        finally
+        {
+            if (!engineDisposed) engine.Dispose();
+            target?.Dispose();
+        }
     }
 }

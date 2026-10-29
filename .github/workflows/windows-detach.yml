@@ -1,0 +1,34 @@
+name: Windows detach ownership
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ownership:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - name: Build exact-source fixture and provider
+        run: dotnet build tests/DncDbg.RemoteTests -c Release --nologo
+      - name: Prove stopped detach and correctly owned pre/post-detach I/O
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force build/validation/windows-detach | Out-Null
+          dotnet run --project tests/DncDbg.RemoteTests -c Release --no-build -- --detach-io tests/RemoteBreakpointApp/bin/Release/net10.0/RemoteBreakpointApp.dll tests/RemoteBreakpointApp/Program.cs build/validation/windows-detach 2>&1 | Tee-Object build/validation/windows-detach/proof.log
+          exit $LASTEXITCODE
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-detach-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/validation/windows-detach/
+          if-no-files-found: error
+          retention-days: 7

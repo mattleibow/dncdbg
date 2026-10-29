@@ -43,6 +43,12 @@ if (args is [DncDbg.Engine.Launch.ConsoleCodePage.HelperOption, var consoleOwner
 using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(60));
 CancellationToken token = deadline.Token;
 int passed = 0;
+if (args is ["--detach-io", var ioFixture, var ioSource, var ioOutput])
+{
+    await DetachIoProof.RunAsync(Path.GetFullPath(ioFixture), Path.GetFullPath(ioSource), Path.GetFullPath(ioOutput), Check, token);
+    Console.WriteLine($"Passed {passed} deterministic detach/file-I/O assertions.");
+    return;
+}
 if (args is ["--fixture-control-contracts"])
 {
     await FixtureControlChecks.RunAsync(Check, token);

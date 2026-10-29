@@ -18,6 +18,7 @@ public sealed class AppleSimulatorProvider : IRemoteTargetProvider
 {
     private readonly AppleSimulatorOptions options;
     private readonly ApplicationInstallation installation;
+    private readonly ApplicationPackageIdentity package;
     private string? data;
     private string session = "";
     private bool installed, started;
@@ -36,6 +37,7 @@ public sealed class AppleSimulatorProvider : IRemoteTargetProvider
             !Directory.Exists(options.AppPath) || !options.AppPath.EndsWith(".app", StringComparison.OrdinalIgnoreCase))
             throw new ArgumentException("Apple simulator targets require exact IDs and an installable app bundle.");
         Profile = ApplicationProfiles.ForRid("iossimulator-arm64", agentManifest);
+        package = ApplicationPackagePolicy.Read(agentManifest);
     }
 
     private Task<string> Sim(CancellationToken token, bool allowFailure = false, params string[] arguments) =>
@@ -44,6 +46,7 @@ public sealed class AppleSimulatorProvider : IRemoteTargetProvider
     public async Task AcquireAsync(string sessionId, CancellationToken token)
     {
         session = sessionId;
+        await ApplicationPackagePolicy.VerifyAsync(options.AppPath, options.ApplicationId, Profile.Agent, package, token);
         using JsonDocument devices = JsonDocument.Parse(await Sim(token, false, "list", "devices", "booted", "-j"));
         if (!devices.RootElement.GetProperty("devices").EnumerateObject().SelectMany(x => x.Value.EnumerateArray())
             .Any(x => x.GetProperty("udid").GetString() == options.DeviceId))
@@ -61,6 +64,8 @@ public sealed class AppleSimulatorProvider : IRemoteTargetProvider
         installed = true;
         await Sim(token, false, "install", options.DeviceId, Path.GetFullPath(options.AppPath));
         installation.Owned = true;
+        string installedApp = await Sim(token, false, "get_app_container", options.DeviceId, options.ApplicationId, "app");
+        await ApplicationPackagePolicy.VerifyAsync(installedApp, options.ApplicationId, Profile.Agent, package, token);
         await Sim(token, true, "terminate", options.DeviceId, options.ApplicationId);
         data = await Sim(token, false, "get_app_container", options.DeviceId, options.ApplicationId, "data");
         await File.WriteAllTextAsync(Path.Combine(data, "Library/dncdbg-installation-id"), installation.Id, token);

@@ -88,6 +88,13 @@ are separate. The mobile test facade allows a 20-minute Release build and a
 10-minute Debug build with minimal live logs, progress, status JSON and sanitized
 binlogs; that does not relax debugger operation/fault deadlines.
 
+`target.nativeHost.environment` and SSH/controller `start.environment` are literal
+validated application values. Names must be portable environment identifiers;
+NULs and every case-insensitive `DNCDBG_` name are rejected before launch.
+The host owns that namespace, including generation and credentials. User values
+are applied first, followed by protected internal values; a collision is an
+explicit error, never a silently dropped value or credential override.
+
 Do not combine remote with desktop attach/build/env/JIT/source-map/terminal,
 `noDebug` or `stopAtEntry` options. Unsupported requests fail explicitly. Safe
 remote evaluation supports the generated model's operations; arbitrary managed
@@ -217,6 +224,59 @@ This does not inject a debugger into an arbitrary store/Release application.
 APKs must embed managed assemblies, not depend on SDK Fast Deployment. Installation
 replacement is explicit and journaled; unrelated apps/forwardings are preserved.
 
+### Host-trusted final mobile packages
+
+`assetsPath` must contain the **post-link** `dncdbg-agent.json` and
+`dncdbg-package.json`, produced from the final signed SDK installable output.
+Trust/distribute those host-side files separately from the device and package;
+editing an app's embedded metadata or reporting a build ID cannot replace this
+authority. The fixture seals Debug output automatically after the SDK build.
+For vendor builds, run the product tool explicitly after final linking/signing:
+
+```bash
+dotnet run --project src/DncDbg.TargetControl -c Release -- \
+  seal-mobile android-arm64 /absolute/Sensor-Signed.apk \
+  /trusted/native-build/dncdbg-agent.json /trusted/final-assets 36.0.0
+dotnet run --project src/DncDbg.TargetControl -c Release -- \
+  seal-mobile ios-arm64 /absolute/Sensor.app \
+  /trusted/native-build/dncdbg-agent.json /trusted/final-assets ""
+dotnet run --project src/DncDbg.TargetControl -c Release -- \
+  verify-mobile /absolute/Sensor.app /trusted/final-assets/dncdbg-agent.json
+```
+
+Use the exact Android build-tools version selected by your SDK; it is recorded
+and required for verification. Official `aapt2` and Java `apksigner.jar verify`
+measure application/version and validate the signing certificate. Before install,
+the provider checks the whole APK digest and the exact ABI-specific
+`lib/{arm64-v8a,x86_64}/libdncdbg_target.so` bytes against the trusted native
+build digest. Before launch it pulls the package-manager-resolved installed base
+APK and repeats **all** checks: its application, signature, version, native entry
+and complete bytes must match. Split APKs are not admitted by this monolithic
+package route. Actual loaded library/APK-entry bytes are measured again in the
+target manifest before debugger admission.
+
+On Apple, the agent is statically linked: an intermediate `.a` digest cannot
+identify the executed code. `ImageKind: "linked-executable"` means SHA-256 over
+**every byte of the final linked, signed executable**, covering its agent code,
+data, load commands and embedded CodeDirectory—not a self-reported archive hash.
+The host additionally checks a deterministic whole-bundle digest, plist
+application/version, CodeDirectory identity and `codesign --verify --deep --strict`,
+both before install and against the simulator's installed app bundle. The target
+resolves the actual agent function with `dladdr`, requires that image to be its
+principal executable and measures that final file. Host admission compares that
+measurement with the separately trusted post-link identity before debugger
+activation. Simulator ad-hoc signing is not a claim of vendor certificate
+authentication; the externally trusted digests are authoritative. Physical builds
+retain their normal developer/provisioning/signing requirements.
+
+Re-seal after **any** relink, strip, re-sign or package change. Missing final
+metadata, same-build-ID/different-byte images and installed mismatches fail
+closed before launch/admission. Exact runtime/DBI/DAC hashes/exports remain
+independently required. Generic physical-device command providers must run this
+same verification before deployment, verify the installed image through their
+trusted device route, and supply the resulting profile; a command tunnel does
+not waive package verification or hardware qualification.
+
 ## Apple simulator and physical device
 
 Simulator target:
@@ -264,7 +324,7 @@ dotnet pack src/DncDbg.Remote.Apple -c Release -o build/packages
 
 # Explicit deployment bundle on its matching OS/architecture:
 python3 src/DncDbg.Remote.Target/publish.py --rid linux-arm64 \
-  --include-runtime --payload /absolute/published/Service.dll \
+  --include-runtime --payload-directory /absolute/published \
   --output build/target-linux-arm64-UNIQUE
 
 # Explicit physical Apple build asset (not hardware validation):
@@ -278,6 +338,18 @@ per-file SHA-256 `integrity.json`. Mobile packages contain only the explicit RID
 agent/metadata. Build Linux assets in a matching Linux container/host. Do not mix
 agent RIDs or copy target packages into an ordinary desktop adapter artifact.
 Fault-enabled Release targets are rejected.
+
+`--payload-directory` declares the complete `dotnet publish` output: native
+`runtimes/*` assets, satellite resource assemblies, content subdirectories and
+executable permissions are preserved recursively and inventoried deterministically.
+Build/test/temp/cache directories and secret/key files are excluded; keep required
+credentials outside the published closure and provision them through protected
+configuration. Symbolic links, special files, traversal/nonportable names and
+case-colliding paths fail closed. The old `--payload DLL` heuristic is rejected.
+`--payload-file` is only for a validated standalone .NET version-6 bundle with no
+loose dependencies; vendor command launchers can execute that apphost. The built-in
+native host expects a managed assembly and its directory closure, not a bundled
+apphost.
 
 For a device with its qualified runtime already provisioned, replace
 `--include-runtime` with `--runtime-directory /absolute/exact/runtime-directory`.

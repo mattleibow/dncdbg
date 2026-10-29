@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Portable actual-adapter contracts with fake device tools/runtime; not mobile proof."""
 import json
+import hashlib
 import os
 from pathlib import Path
 import queue
@@ -13,6 +14,7 @@ import threading
 import time
 import unittest
 import uuid
+import zipfile
 
 from fake_adb import FakeAdbDaemon
 
@@ -35,11 +37,24 @@ IDENTITIES = {
 
 FEATURES = ["sourceBreakpoints", "threads", "modules", "scopes", "variables", "safeEvaluate",
             "pause", "stepIn", "next", "stepOut", "exceptions"]
+AGENT_IMAGE = b"fixture native agent:" + b"b" * 64
+LINKED_IMAGE = b"fixture final linked executable:" + AGENT_IMAGE
 
 
 def fake_agent(rid):
+    apple = rid.startswith("ios")
     return {"Name": "dncdbg-target", "Rid": rid, "ProtocolVersion": 1, "ModelVersion": 5,
-            "BuildId": "b" * 64, "Sha256": "c" * 64}
+            "BuildId": "b" * 64, "Sha256": hashlib.sha256(LINKED_IMAGE if apple else AGENT_IMAGE).hexdigest().upper(),
+            "ImageKind": "linked-executable" if apple else "native-library"}
+
+
+def bundle_hash(directory):
+    manifest = b""
+    for path in sorted(p for p in directory.rglob("*") if p.is_file()):
+        data = path.read_bytes()
+        manifest += (path.relative_to(directory).as_posix() + "\0" + str(len(data)) + "\0" +
+                     hashlib.sha256(data).hexdigest().upper() + "\n").encode()
+    return hashlib.sha256(manifest).hexdigest().upper()
 
 
 def fake_profile(platform):
@@ -72,6 +87,23 @@ def tool():
     args = sys.argv[1:]
     with (state / "commands.jsonl").open("a") as log:
         log.write(json.dumps([os.environ["DNCDBG_FAKE_TOOL"], *args]) + "\n")
+    name = os.environ["DNCDBG_FAKE_TOOL"]
+    if name == "aapt2":
+        print("package: name='com.dncdbg.mobiletests' versionCode='1' versionName='1.0'")
+        return
+    if name == "java":
+        if (state / "bad-signature").exists():
+            sys.exit(1)
+        print("Signer #1 certificate SHA-256 digest: " + "e" * 64)
+        return
+    if name == "plutil":
+        print({"CFBundleExecutable": "DncDbg.MauiTestApp", "CFBundleIdentifier": "com.dncdbg.mobiletests",
+               "CFBundleVersion": "1", "CFBundleShortVersionString": "1.0"}[args[1]])
+        return
+    if name == "codesign":
+        if "-d" in args:
+            print("CDHash=" + "f" * 40, file=sys.stderr)
+        return
     if "forward" in args and (state / "daemon-ready.json").exists():
         import runpy
         runpy.run_path(str(Path(__file__).with_name("fake_adb.py")), run_name="__client__")
@@ -82,8 +114,22 @@ def tool():
             while not (state / "release-install").exists():
                 time.sleep(0.01)
         (state / "installed").touch()
+        if name == "adb":
+            shutil.copyfile(args[-1], state / "installed.apk")
+            if (state / "tamper-installed").exists():
+                with (state / "installed.apk").open("ab") as package:
+                    package.write(b"installed bytes differ despite matching claimed build ID")
+        else:
+            shutil.copytree(args[-1], state / "Installed.app", dirs_exist_ok=True)
+            if (state / "tamper-installed").exists():
+                (state / "Installed.app/DncDbg.MauiTestApp").write_bytes(b"installed linked image mismatch")
     if "uninstall" in args:
         (state / "installed").unlink(missing_ok=True)
+        (state / "installed.apk").unlink(missing_ok=True)
+        shutil.rmtree(state / "Installed.app", ignore_errors=True)
+    if "pull" in args:
+        shutil.copyfile(state / "installed.apk", args[-1])
+        return
     if "tee" in args:
         (state / Path(args[-1]).name).write_text(sys.stdin.read())
     if "launch" in args or ("start" in args and "--es" in args):
@@ -105,7 +151,7 @@ def tool():
         print("package:/data/app/com.dncdbg.mobiletests/base.apk")
     elif "get_app_container" in args:
         if (state / "installed").exists():
-            print(state)
+            print(state / "Installed.app" if args[-1] == "app" else state)
     elif "list" in args:
         print(json.dumps({"devices": {"test": [{"udid": "test-simulator", "state": "Booted"}]}}))
     elif "resolve-activity" in args:
@@ -315,13 +361,18 @@ class MobileDapTests(unittest.TestCase):
     def setUp(self):
         self.state = ROOT / "build/mobile-dap-tests" / uuid.uuid4().hex
         (self.state / "tools").mkdir(parents=True)
-        for name in ("adb", "xcrun"):
+        for name in ("adb", "xcrun", "java", "aapt2", "plutil", "codesign"):
             path = self.state / "tools" / name
             path.write_text("#!" + sys.executable + "\nimport runpy, os\n"
                             "import sys; sys.path.insert(0, " + repr(str(Path(__file__).parent)) + ")\n"
                             "os.environ['DNCDBG_FAKE_TOOL'] = " + repr(name) + "\n"
                             "runpy.run_path(" + repr(str(Path(__file__))) + ", run_name='__tool__')\n")
             path.chmod(0o755)
+        tools = self.state / "sdk/build-tools/36.0.0"
+        (tools / "lib").mkdir(parents=True)
+        (tools / "lib/apksigner.jar").touch()
+        shutil.copyfile(self.state / "tools/aapt2", tools / "aapt2")
+        (tools / "aapt2").chmod(0o755)
         (self.state / "fixture.apk").touch()
         (self.state / "Fixture.app").mkdir()
         (self.state / "assets").mkdir()
@@ -329,7 +380,7 @@ class MobileDapTests(unittest.TestCase):
             shutil.copyfile(ROOT / "tests/RemoteBreakpointApp/bin/Release/net10.0" / ("RemoteBreakpointApp." + extension),
                             self.state / "assets" / ("RemoteBreakpointApp." + extension))
         self.env = {**os.environ, "PATH": str(self.state / "tools") + os.pathsep + os.environ["PATH"],
-                    "DNCDBG_FAKE_DEVICE": str(self.state)}
+                    "DNCDBG_FAKE_DEVICE": str(self.state), "ANDROID_HOME": str(self.state / "sdk"), "JAVA_HOME": ""}
         self.dap = Dap(self.env)
         self.dap.request("initialize", {"adapterID": "dncdbg", "linesStartAt1": True})
 
@@ -352,7 +403,24 @@ class MobileDapTests(unittest.TestCase):
                   "uninstallOnDisconnect": True}
 
     def arguments(self, options):
+        rid = options["runtimeIdentifier"]
+        apple = rid.startswith("ios")
+        if apple:
+            app = self.state / "Fixture.app"
+            (app / "DncDbg.MauiTestApp").write_bytes(LINKED_IMAGE)
+            image = "DncDbg.MauiTestApp"
+            digest = bundle_hash(app)
+        else:
+            app = self.state / "fixture.apk"
+            image = "lib/" + ("x86_64" if rid == "android-x64" else "arm64-v8a") + "/libdncdbg_target.so"
+            with zipfile.ZipFile(app, "w") as package:
+                package.writestr(image, AGENT_IMAGE)
+            digest = hashlib.sha256(app.read_bytes()).hexdigest().upper()
         (self.state / "assets/dncdbg-agent.json").write_text(json.dumps(fake_agent(options["runtimeIdentifier"])))
+        (self.state / "assets/dncdbg-package.json").write_text(json.dumps({
+            "SchemaVersion": 1, "Rid": rid, "ApplicationId": "com.dncdbg.mobiletests",
+            "VersionCode": "1", "VersionName": "1.0", "SigningIdentity": ("f" * 40 if apple else "e" * 64),
+            "ImagePath": image, "PackageSha256": digest, "AndroidBuildToolsVersion": None if apple else "36.0.0"}))
         return remote_launch(options)
 
     def launch(self, platform):
@@ -362,6 +430,93 @@ class MobileDapTests(unittest.TestCase):
         self.dap.request("configurationDone")
         self.dap.response(launch)
         self.dap.event("stopped")
+
+    def test_android_same_build_id_with_changed_packaged_agent_is_rejected_before_install(self):
+        self.remote = Remote(self.state, "Android")
+        arguments = self.arguments(self.options("android"))
+        with (self.state / "fixture.apk").open("ab") as package:
+            package.write(b"changed native agent bytes with unchanged claimed build ID")
+        launch = self.dap.send("launch", arguments)
+        self.dap.request("setExceptionBreakpoints", {"filters": []})
+        self.dap.request("configurationDone")
+        self.dap.response(launch, success=False)
+        commands = [json.loads(row) for row in (self.state / "commands.jsonl").read_text().splitlines()] \
+            if (self.state / "commands.jsonl").exists() else []
+        self.assertFalse(any("install" in command or "start" in command for command in commands))
+
+    def test_apple_changed_final_linked_image_is_rejected_before_install(self):
+        self.remote = Remote(self.state, "iOS")
+        arguments = self.arguments(self.options("iosSimulator"))
+        (self.state / "Fixture.app/DncDbg.MauiTestApp").write_bytes(b"tampered final linked agent image")
+        launch = self.dap.send("launch", arguments)
+        self.dap.request("setExceptionBreakpoints", {"filters": []})
+        self.dap.request("configurationDone")
+        self.dap.response(launch, success=False)
+        commands = [json.loads(row) for row in (self.state / "commands.jsonl").read_text().splitlines()] \
+            if (self.state / "commands.jsonl").exists() else []
+        self.assertFalse(any("install" in command or "launch" in command for command in commands))
+
+    def test_android_repacked_same_build_id_cannot_replace_the_trusted_native_hash(self):
+        self.remote = Remote(self.state, "Android")
+        arguments = self.arguments(self.options("android"))
+        with zipfile.ZipFile(self.state / "fixture.apk", "w") as package:
+            package.writestr("lib/arm64-v8a/libdncdbg_target.so", b"altered native code:" + b"b" * 64)
+        path = self.state / "assets/dncdbg-package.json"
+        identity = json.loads(path.read_text())
+        identity["PackageSha256"] = hashlib.sha256((self.state / "fixture.apk").read_bytes()).hexdigest().upper()
+        path.write_text(json.dumps(identity))
+        launch = self.dap.send("launch", arguments)
+        self.dap.request("configurationDone")
+        self.dap.response(launch, success=False)
+        self.assertFalse((self.state / "installed").exists())
+
+    def test_installed_mobile_package_must_match_verified_signature_version_and_image(self):
+        for platform in ("android", "iosSimulator"):
+            with self.subTest(platform=platform):
+                if hasattr(self, "remote"):
+                    self.remote.close()
+                self.dap.close()
+                self.dap = Dap(self.env)
+                self.dap.request("initialize", {"adapterID": "dncdbg"})
+                (self.state / "tamper-installed").touch()
+                self.remote = Remote(self.state, "Android" if platform == "android" else "iOS")
+                launch = self.dap.send("launch", self.arguments(self.options(platform)))
+                self.dap.request("configurationDone")
+                self.dap.response(launch, success=False)
+                self.assertFalse((self.state / "installed").exists(), "Failed admission must clean the owned installation.")
+                commands = [json.loads(row) for row in (self.state / "commands.jsonl").read_text().splitlines()]
+                self.assertTrue(any("install" in command for command in commands))
+                self.assertFalse(any("start" in command or "launch" in command for command in commands),
+                                 "Installed-image admission must precede target/debugger activation.")
+                (self.state / "commands.jsonl").unlink()
+                (self.state / "tamper-installed").unlink()
+
+    def test_android_invalid_signature_is_rejected_before_install(self):
+        self.remote = Remote(self.state, "Android")
+        arguments = self.arguments(self.options("android"))
+        (self.state / "bad-signature").touch()
+        launch = self.dap.send("launch", arguments)
+        self.dap.request("configurationDone")
+        self.dap.response(launch, success=False)
+        self.assertFalse((self.state / "installed").exists())
+
+    def test_android_trusted_signer_and_version_are_explicit_admission_requirements(self):
+        for field, value in (("SigningIdentity", "0" * 64), ("VersionCode", "2")):
+            with self.subTest(field=field):
+                if hasattr(self, "remote"):
+                    self.remote.close()
+                self.dap.close()
+                self.dap = Dap(self.env)
+                self.dap.request("initialize", {"adapterID": "dncdbg"})
+                self.remote = Remote(self.state, "Android")
+                arguments = self.arguments(self.options("android"))
+                path = self.state / "assets/dncdbg-package.json"
+                identity = json.loads(path.read_text()) | {field: value}
+                path.write_text(json.dumps(identity))
+                launch = self.dap.send("launch", arguments)
+                self.dap.request("configurationDone")
+                self.dap.response(launch, success=False)
+                self.assertFalse((self.state / "installed").exists())
 
     def test_android_full_dap_and_owned_forward(self):
         self.launch("android")

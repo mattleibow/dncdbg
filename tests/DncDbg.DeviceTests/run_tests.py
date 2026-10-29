@@ -60,6 +60,10 @@ class DeviceProof(Proof):
         self.run("docker", "cp", self.container + ":/opt/dncdbg-os-packages.txt", self.output / "os-packages.log")
         self.profile = self.bundle / "target-profile.json"
         self.payload = self.bundle / "payload"
+        inventory = json.loads((self.bundle / "integrity.json").read_text())["Files"]
+        require(all(name in inventory for name in (
+            f"payload/runtimes/{self.rid}/native/libclosure_probe.so", "payload/fr/Payload.resources.dll",
+            "payload/content/device.json")), "trusted deployment inventory contains the complete native/resource/content closure")
         self.host = self.bundle / "dncdbg-target-host"
         self.agent = self.bundle / "libdncdbg_target.so"
         self.runtime = Path("/opt/runtime/shared/Microsoft.NETCore.App/11.0.0-rc.1.26425.128")

@@ -18,18 +18,21 @@ public sealed class AndroidTargetProvider : IRemoteTargetProvider
 {
     private readonly AndroidTargetOptions options;
     private readonly ApplicationInstallation installation;
+    private readonly ApplicationPackageIdentity package;
+    private readonly string outputRoot;
     private bool installed, started;
     private string session = "";
     public TargetProfile Profile { get; }
     public string Name => options.ApplicationId;
     public string ExpectedPlatform => Profile.Runtime.Platform;
     public string ExpectedArchitecture => Profile.Runtime.Architecture;
-    public string? ArtifactsPath => null;
+    public string? ArtifactsPath { get; private set; }
 
-    public AndroidTargetProvider(AndroidTargetOptions options, string agentManifest, ApplicationInstallation installation)
+    public AndroidTargetProvider(AndroidTargetOptions options, string agentManifest, ApplicationInstallation installation, string outputRoot)
     {
         this.options = options;
         this.installation = installation;
+        this.outputRoot = Path.GetFullPath(outputRoot);
         if (!Regex.IsMatch(options.DeviceId, @"\A[A-Za-z0-9_.:-]+\z") ||
             !Regex.IsMatch(options.ApplicationId, @"\A[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+\z") ||
             !File.Exists(options.AppPath) || !options.AppPath.EndsWith(".apk", StringComparison.OrdinalIgnoreCase))
@@ -45,6 +48,7 @@ public sealed class AndroidTargetProvider : IRemoteTargetProvider
             !server.StartsWith("tcp:127.0.0.1:", StringComparison.Ordinal) && !server.StartsWith("tcp:localhost:", StringComparison.Ordinal))
             throw new ArgumentException("A remote plaintext ADB daemon cannot carry debugger credentials.");
         Profile = ApplicationProfiles.ForRid(options.RuntimeIdentifier, agentManifest);
+        package = ApplicationPackagePolicy.Read(agentManifest);
     }
 
     private Task<string> Adb(CancellationToken token, bool allowFailure = false, params string[] arguments) =>
@@ -53,6 +57,9 @@ public sealed class AndroidTargetProvider : IRemoteTargetProvider
     public async Task AcquireAsync(string sessionId, CancellationToken token)
     {
         session = sessionId;
+        await ApplicationPackagePolicy.VerifyAsync(options.AppPath, options.ApplicationId, Profile.Agent, package, token);
+        ArtifactsPath = Path.Combine(outputRoot, session, "package-admission");
+        Directory.CreateDirectory(ArtifactsPath);
         if (await Adb(token, false, "shell", "getprop", "sys.boot_completed") != "1")
             throw new IOException("The selected Android target is not booted.");
         string previous = await Adb(token, true, "shell", "pm", "path", options.ApplicationId);
@@ -64,6 +71,19 @@ public sealed class AndroidTargetProvider : IRemoteTargetProvider
         await Adb(token, false, "install", "-r", Path.GetFullPath(options.AppPath));
         installation.Owned = true;
         await Adb(token, false, "shell", "am", "force-stop", options.ApplicationId);
+        string installedPath = await Adb(token, false, "shell", "pm", "path", options.ApplicationId);
+        if (!Regex.IsMatch(installedPath, @"\Apackage:/data/app/[A-Za-z0-9_./=+~-]+/base\.apk\z") ||
+            installedPath.Contains("/../", StringComparison.Ordinal))
+            throw new InvalidDataException("Installed package must resolve to one exact monolithic base APK.");
+        string installedApk = Path.Combine(ArtifactsPath, "installed.apk");
+        try
+        {
+            await Adb(token, false, "pull", installedPath["package:".Length..], installedApk);
+            await ApplicationPackagePolicy.VerifyAsync(installedApk, options.ApplicationId, Profile.Agent, package, token);
+        }
+        finally { File.Delete(installedApk); }
+        await File.WriteAllTextAsync(Path.Combine(ArtifactsPath, "identity.json"),
+            System.Text.Json.JsonSerializer.Serialize(package, TargetJson.Default.ApplicationPackageIdentity), token);
         await Adb(token, true, "shell", "run-as", options.ApplicationId, "rm", "-f",
             "files/dncdbg-remote.json", "files/dncdbg-startup-error.json");
         await Adb(token, false, "shell", "run-as", options.ApplicationId, "mkdir", "-p", "files");

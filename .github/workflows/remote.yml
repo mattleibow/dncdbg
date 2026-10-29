@@ -81,7 +81,7 @@ jobs:
       - name: Publish explicit qualified RID deployment assets
         run: >-
           python3 src/DncDbg.Remote.Target/publish.py --rid ${{ matrix.rid }}
-          --include-runtime --payload tests/DncDbg.NativeHostTests/Payload/bin/Debug/net10.0/Payload.dll
+          --include-runtime --payload-directory tests/DncDbg.NativeHostTests/Payload/bin/Debug/net10.0
           --output build/target-package-${{ matrix.rid }}
       - name: Upload explicit target deployment package
         uses: actions/upload-artifact@v4

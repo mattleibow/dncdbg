@@ -96,6 +96,11 @@ class Proof:
         self.run("dotnet", "tests/DncDbg.RemoteTests/bin/Release/net10.0/DncDbg.RemoteTests.dll",
                  "--native-host-capabilities", self.runtime)
         self.run("dotnet", "build", HERE / "Payload/Payload.csproj", "-c", "Debug", "--nologo", "-v:q")
+        native = self.payload / "runtimes" / self.rid / "native"
+        native.mkdir(parents=True, exist_ok=True)
+        self.run("c++", "-dynamiclib" if self.rid.startswith("osx") else "-shared", "-fPIC",
+                 HERE / "Payload/closure.cpp", "-o",
+                 native / ("libclosure_probe.dylib" if self.rid.startswith("osx") else "libclosure_probe.so"))
         application = self.bin / "application"
         self.run("dotnet", "publish", ROOT / "tests/RemoteBreakpointApp", "-c", "Debug",
                  "--artifacts-path", self.output / "application-compilation", "-o", application, "--nologo", "-v:q")
@@ -159,6 +164,9 @@ class Proof:
         dap.response(pending)
         info = dap.request("dotnet/info")
         wait_for(lambda: (self.session(info) / "managed-ready").exists(), "managed payload never started")
+        require(json.loads((self.session(info) / "payload-closure.json").read_text()) ==
+                {"Native": 42, "Resource": "closure-fr", "Content": "closure-content"},
+                "deployed target executes nested native library, satellite resource and content closure")
         require(info["remote"]["provider"] == "coreclr" and info["remote"]["modelVersion"] == 5,
                 "actual native host advertises the same private provider/generated model")
         return breakpoint, info, line
@@ -233,6 +241,27 @@ class Proof:
             matches = [row for row in phases if row["Phase"] == phase]
             require(len(matches) == 1 and matches[0]["HResult"] == "0x00000000", "native exact-once " + phase)
         require(not (session / "endpoint.json").exists(), "owned native-host endpoint credential removed")
+
+    def environment(self, provider):
+        directory = self.output / ("environment-" + provider)
+        directory.mkdir()
+        dap = self.dap(directory, self.adapter)
+        try:
+            options = self.options(directory, provider)
+            expected = 'literal value; $HOME "quoted" 🚀'
+            options["target"]["nativeHost"]["environment"] = {"VENDOR_DEVICE_CONFIG": expected}
+            _, info, _ = self.start(dap, options)
+            session = self.session(info)
+            self.command(session, 1, "environment")
+            require(self.result(session, 1) == expected, provider + " preserves validated literal application environment")
+            dap.request("terminate")
+            dap.event("terminated")
+            self.native_cleanup(session)
+            wait_for(lambda: not self.process_alive(info["debuggeeProcessId"]), "environment target was not reaped")
+            self.checks.append(provider + "-environment")
+        finally:
+            dap.close()
+            (directory / "dap.json").write_text(json.dumps(dap.transcript, indent=2))
 
     def complete(self, provider):
         directory = self.output / ("direct" if provider == "directLoopback" else "proxy")
@@ -506,7 +535,7 @@ def main():
     parser.add_argument("--output", type=Path, default=ROOT / "build/native-host" / uuid.uuid4().hex)
     parser.add_argument("--runtime-directory", type=Path)
     parser.add_argument("--cleanup", action="store_true", help="Recover only this run's journaled processes/listeners/credentials")
-    parser.add_argument("--case", choices=["all", "natural-completion", "application"], default="all")
+    parser.add_argument("--case", choices=["all", "natural-completion", "application", "environment"], default="all")
     args = parser.parse_args()
     if args.cleanup and not args.output.exists():
         return 0
@@ -523,6 +552,9 @@ def main():
     signal.signal(signal.SIGTERM, interrupted)
     try:
         proof.build()
+        if args.case in ("all", "environment"):
+            for provider in ("directLoopback", "localTcpProxy"):
+                proof.environment(provider)
         if args.case in ("all", "application"):
             for provider in ("directLoopback", "localTcpProxy"):
                 proof.application(provider)

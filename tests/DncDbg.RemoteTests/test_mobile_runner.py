@@ -45,6 +45,16 @@ class MobileRunnerTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/mobile.yml").read_text()
         self.assertNotIn("--version " + PIN["workload"], workflow)
 
+    def test_windows_detach_checks_and_records_the_exact_reviewed_head(self):
+        workflow = (ROOT / ".github/workflows/windows-detach.yml").read_text()
+        expression = "${{ github.event.pull_request.head.sha || github.sha }}"
+        self.assertIn("ref: " + expression, workflow)
+        self.assertIn("EXPECTED_HEAD: " + expression, workflow)
+        self.assertIn("git rev-parse HEAD", workflow)
+        self.assertIn('$actual -ne $env:EXPECTED_HEAD', workflow)
+        self.assertIn("source-head.txt", workflow)
+        self.assertIn("windows-detach-${{ github.event.pull_request.head.sha || github.sha }}", workflow)
+
     def test_mobile_restore_is_scoped_to_the_selected_platform(self):
         self.suite.state |= {"uiPort": 9223, "name": "ownedrun"}
         with patch.object(self.suite, "json", side_effect=RuntimeError("evaluation only")) as evaluate:
@@ -114,7 +124,7 @@ class MobileRunnerTests(unittest.TestCase):
         source.mkdir()
         names = {f"{name}.{extension}" for name in ("DncDbg.MauiTestApp", "DncDbg.ReloadFixture")
                  for extension in ("dll", "pdb")}
-        names.add("dncdbg-agent.json")
+        names |= {"dncdbg-agent.json", "dncdbg-package.json"}
         for name in names | {"DncDbg.Remote.dll", "DncDbg.Remote.pdb"}:
             (source / name).write_bytes(name.encode())
         destination = copy_debug_assets(source, self.output / "catalog")
@@ -227,6 +237,62 @@ class MobileRunnerTests(unittest.TestCase):
         for name in ("nlohmann-json.LICENSE", "Microsoft.MIT.LICENSE", "JaneySprings-clrdbg.LICENSE"):
             self.assertIn("(licenses/" + name + ")", notices)
             self.assertEqual((self.output / "licenses" / name).read_bytes(), (ROOT / "src/licenses" / name).read_bytes())
+
+    def test_publisher_packages_complete_declared_publish_directory(self):
+        publisher = runpy.run_path(str(ROOT / "src/DncDbg.Remote.Target/publish.py"))
+        source = self.output / "published"
+        files = {"Service.dll": b"managed", "Service.runtimeconfig.json": b"{}",
+                 "runtimes/linux-x64/native/libvendor.so": b"native bytes",
+                 "fr/Service.resources.dll": b"satellite", "content/device/config.bin": b"content",
+                 "tools/vendor-helper": b"executable"}
+        for name, value in files.items():
+            path = source / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(value)
+        destination = self.output / "payload"
+        publisher["copy_payload"](source, destination)
+        actual = {p.relative_to(destination).as_posix(): p.read_bytes() for p in destination.rglob("*") if p.is_file()}
+        self.assertEqual(actual, files)
+        publisher["write_inventory"](destination, "linux-x64")
+        first = (destination / "integrity.json").read_bytes()
+        publisher["write_inventory"](destination, "linux-x64")
+        self.assertEqual((destination / "integrity.json").read_bytes(), first)
+        inventory = json.loads(first)["Files"]
+        self.assertEqual(list(inventory), sorted(files))
+
+    def test_publisher_excludes_build_test_temp_and_secret_artifacts(self):
+        publisher = runpy.run_path(str(ROOT / "src/DncDbg.Remote.Target/publish.py"))
+        source = self.output / "published"
+        for name in ("Service.dll", "bin/old.dll", "obj/cache.json", "tests/test.json",
+                     "TestResults/run.trx", "temp/pending.json", "secrets.json", ".env",
+                     "private.key", "signing.pfx", "app.binlog", "pending.tmp"):
+            path = source / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"fixture")
+        destination = self.output / "payload"
+        publisher["copy_payload"](source, destination)
+        self.assertEqual([p.relative_to(destination).as_posix() for p in destination.rglob("*") if p.is_file()],
+                         ["Service.dll"])
+
+    def test_publisher_rejects_symbolic_links_and_portable_path_substitution(self):
+        publisher = runpy.run_path(str(ROOT / "src/DncDbg.Remote.Target/publish.py"))
+        source = self.output / "published"
+        source.mkdir()
+        (self.output / "outside.dll").write_bytes(b"outside")
+        (source / "linked.dll").symlink_to(self.output / "outside.dll")
+        with self.assertRaisesRegex(RuntimeError, "symbolic"):
+            publisher["copy_payload"](source, self.output / "payload-links")
+        (source / "linked.dll").unlink()
+        (source / "bad\\name.dll").write_bytes(b"ambiguous on Windows")
+        with self.assertRaisesRegex(RuntimeError, "path"):
+            publisher["copy_payload"](source, self.output / "payload-paths")
+
+    def test_publisher_never_guesses_a_payload_closure_from_a_dll(self):
+        publisher = runpy.run_path(str(ROOT / "src/DncDbg.Remote.Target/publish.py"))
+        source = self.output / "Service.dll"
+        source.write_bytes(b"not a standalone bundle")
+        with self.assertRaisesRegex(RuntimeError, "published-output directory"):
+            publisher["copy_payload"](source, self.output / "payload")
 
     def test_rejects_renamed_native_code(self):
         (self.output / "ordinary-binary").write_bytes(b"Mach-O\0_dncdbg_prepare\0")

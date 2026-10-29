@@ -105,13 +105,19 @@ public sealed class CommandTargetProvider : IRemoteTargetProvider
             return;
         }
         var failures = new List<Exception>();
-        if (options.Stop != null)
+        await cleanupGate.WaitAsync(token);
+        try
         {
-            try { await ExecuteAsync("stop", options.Stop, token); }
+            if (cleanupDone) return;
+            if (options.Stop != null)
+            {
+                try { await ExecuteAsync("stop", options.Stop, token); }
+                catch (Exception error) { failures.Add(error); }
+            }
+            try { await CleanupCoreAsync(token); }
             catch (Exception error) { failures.Add(error); }
         }
-        try { await CleanupAsync(token); }
-        catch (Exception error) { failures.Add(error); }
+        finally { cleanupGate.Release(); }
         if (failures.Count != 0) throw new AggregateException("Owned device stop/cleanup failed.", failures);
     }
 
@@ -141,12 +147,17 @@ public sealed class CommandTargetProvider : IRemoteTargetProvider
         await cleanupGate.WaitAsync(token);
         try
         {
-            if (cleanupDone) return;
-            if (options.Cleanup != null) await ExecuteAsync("cleanup", options.Cleanup, token);
-            cleanupDone = true;
-            journal?.Record("closed", null, processId > 0 ? processId : null);
+            await CleanupCoreAsync(token);
         }
         finally { cleanupGate.Release(); }
+    }
+
+    private async Task CleanupCoreAsync(CancellationToken token)
+    {
+        if (cleanupDone) return;
+        if (options.Cleanup != null) await ExecuteAsync("cleanup", options.Cleanup, token);
+        cleanupDone = true;
+        journal?.Record("closed", null, processId > 0 ? processId : null);
     }
 
     private async Task<CommandResult> ExecuteAsync(string action, CommandSpec template, CancellationToken token, bool allowFailure = false)

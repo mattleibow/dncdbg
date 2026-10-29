@@ -116,6 +116,17 @@
 		       Text="This fixture has qualified iOS simulator/Android RID assets only. Physical Apple targets require an independently qualified runtime profile and external device route." />
 		<Exec Command="python3 &quot;$(MSBuildProjectDirectory)/../../src/DncDbg.Remote.Target/build.py&quot; $(RuntimeIdentifier) --configuration Debug $(_DncDbgFaultArgument)" />
 	</Target>
+	<Target Name="SealDebugMobilePackage" AfterTargets="Build" Condition="'$(Configuration)' == 'Debug' And '$(TargetFramework)' != ''">
+		<MSBuild Projects="$(MSBuildProjectDirectory)/../../src/DncDbg.TargetControl/DncDbg.TargetControl.csproj"
+		         Targets="Restore;Build" BuildInParallel="false"
+		         RemoveProperties="RuntimeIdentifier;RuntimeIdentifiers;TargetFrameworks;TargetFramework;SelfContained;PublishAot"
+		         Properties="Configuration=$(Configuration);TargetFramework=net10.0;SelfContained=false" />
+		<PropertyGroup>
+			<_DncDbgInstallable>$(OutputPath)$(AssemblyName).app</_DncDbgInstallable>
+			<_DncDbgInstallable Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'android'">$(OutputPath)$(ApplicationId)-Signed.apk</_DncDbgInstallable>
+		</PropertyGroup>
+		<Exec Command="dotnet &quot;$(MSBuildProjectDirectory)/../../src/DncDbg.TargetControl/bin/$(Configuration)/net10.0/dncdbg-target-control.dll&quot; seal-mobile $(RuntimeIdentifier) &quot;$(_DncDbgInstallable)&quot; &quot;$(MSBuildProjectDirectory)/../../build/native-private/$(RuntimeIdentifier)/dncdbg-agent.json&quot; &quot;$(OutputPath).&quot; &quot;$(AndroidSdkBuildToolsVersion)&quot;" />
+	</Target>
 	<PropertyGroup Condition="'$(Configuration)' == 'Debug' And $([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'ios'">
 		<CodesignEntitlements>Platforms/iOS/Entitlements.Debug.plist</CodesignEntitlements>
 	</PropertyGroup>

@@ -9,6 +9,19 @@ using DncDbg.Remote;
 
 try
 {
+    if (args is ["seal-mobile", var packageRid, var packageApp, var sourceAgent, var packageAssets, var buildTools])
+    {
+        await ApplicationPackagePolicy.SealAsync(packageRid, packageApp, sourceAgent, packageAssets, buildTools, CancellationToken.None);
+        return 0;
+    }
+    if (args is ["verify-mobile", var verifyApp, var verifyAgentManifest])
+    {
+        TargetAgentIdentity agent = JsonSerializer.Deserialize(File.ReadAllText(verifyAgentManifest), TargetJson.Default.TargetAgentIdentity)!;
+        ApplicationPackageIdentity package = ApplicationPackagePolicy.Read(verifyAgentManifest);
+        await ApplicationPackagePolicy.VerifyAsync(verifyApp, package.ApplicationId, agent, package, CancellationToken.None);
+        Console.WriteLine(JsonSerializer.Serialize(package, TargetJson.Default.ApplicationPackageIdentity));
+        return 0;
+    }
     if (args is ["profile", var runtime, var agentManifest])
     {
         Console.WriteLine(JsonSerializer.Serialize(TargetHostConfiguration.Profile(runtime, agentManifest), TargetJson.Default.TargetProfile));
@@ -168,7 +181,7 @@ internal static partial class DeviceControl
         foreach (string value in new[] { options.RuntimeDirectory, options.AgentPath, options.AssemblyPath,
                      configuration, directory, options.RuntimeConfigPath })
             start.ArgumentList.Add(value);
-        foreach (var (name, value) in options.Environment) start.Environment[name] = value;
+        TargetEnvironment.Apply(start, options.Environment);
         start.Environment["DNCDBG_NATIVE_TOKEN"] = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
         start.Environment["DNCDBG_SESSION_ID"] = request.SessionId;
         using Process child = Process.Start(start) ?? throw new IOException("Owned device process did not start.");

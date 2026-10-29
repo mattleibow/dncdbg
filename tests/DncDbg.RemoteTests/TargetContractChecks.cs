@@ -35,6 +35,19 @@ internal static class TargetContractChecks
         try { RemoteCommand.Validate(new CommandSpec { Executable = "/bin/sh", Arguments = ["-c", "anything"] }); }
         catch (ArgumentException) { shellRejected = true; }
         check(shellRejected, "shell command strings are not a structured device command");
+        foreach (var invalid in new Dictionary<string, string>[]
+        {
+            new() { ["DNCDBG_SESSION_ID"] = "spoofed" },
+            new() { ["dncdbg_native_token"] = "spoofed" },
+            new() { ["BAD=NAME"] = "invalid" },
+            new() { ["VALUE"] = "invalid\0value" },
+        })
+        {
+            bool rejected = false;
+            try { TargetEnvironment.Validate(invalid); }
+            catch (ArgumentException) { rejected = true; }
+            check(rejected, "target application environment rejects invalid names/values and host-owned credentials");
+        }
 
         string[] literal = ["space argument", "$(not-a-command)", ";not-a-command", "\"quoted\""];
         var command = new CommandSpec
@@ -56,6 +69,37 @@ internal static class TargetContractChecks
         Directory.CreateDirectory(path);
         try
         {
+            string providerState = Path.Combine(path, "command-provider");
+            Directory.CreateDirectory(providerState);
+            string providerProfilePath = Path.Combine(providerState, "profile.json");
+            File.WriteAllText(providerProfilePath, JsonSerializer.Serialize(profile, TargetJson.Default.TargetProfile));
+            File.WriteAllText(Path.Combine(providerState, "manifest.json"), JsonSerializer.Serialize(manifest, TargetJson.Default.TargetManifest));
+            File.WriteAllText(Path.Combine(providerState, "observe.json"),
+                JsonSerializer.Serialize(new TargetProcessObservation(session, manifest.Process.Id, true, 7),
+                    TargetJson.Default.TargetProcessObservation));
+            CommandSpec ProviderCommand(string operation) => new()
+            {
+                Executable = command.Executable,
+                Arguments = [.. command.Arguments[..(command.Arguments.Length - literal.Length - 1)],
+                    "--command-provider", operation, providerState],
+            };
+            // Use the actual command provider and actual owned child commands, not a lifecycle fake.
+            var provider = new CommandTargetProvider(new()
+            {
+                ProfilePath = providerProfilePath, ReadManifest = ProviderCommand("manifest"),
+                Stop = ProviderCommand("stop"), Detach = ProviderCommand("detach"),
+                Observe = ProviderCommand("observe"), Cleanup = ProviderCommand("cleanup"),
+            }, Path.Combine(providerState, "audit"));
+            await provider.AcquireAsync(session, token);
+            await provider.ReadDescriptorAsync(token);
+            await provider.CloseAsync(false, token);
+            int? observedCode = await provider.WaitForExitAsync(token);
+            await provider.CloseAsync(true, token);
+            await provider.CloseAsync(true, token);
+            check(observedCode == 7 && File.ReadAllLines(Path.Combine(providerState, "actions.txt"))
+                .SequenceEqual(new[] { "detach", "cleanup" }),
+                "observed command target exit settles deployment once; late/repeated terminate never stops a cleaned generation");
+
             string symbolsDirectory = Path.Combine(path, "symbols"), mappedDirectory = Path.Combine(path, "mapped-source");
             Directory.CreateDirectory(symbolsDirectory);
             Directory.CreateDirectory(mappedDirectory);

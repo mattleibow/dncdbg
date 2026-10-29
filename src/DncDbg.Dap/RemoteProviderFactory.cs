@@ -28,7 +28,7 @@ internal static class RemoteProviderFactory
                 "commands" or "appleDevice" when target.Commands != null => new CommandTargetProvider(target.Commands, options.OutputPath),
                 "ssh" when target.Ssh != null => new SshTargetProvider(target.Ssh, options.OutputPath),
                 "android" when target.Android != null => new AndroidTargetProvider(target.Android,
-                    Path.Combine(options.AssetsPath, "dncdbg-agent.json"), installation),
+                    Path.Combine(options.AssetsPath, "dncdbg-agent.json"), installation, options.OutputPath),
                 "appleSimulator" when target.Apple != null => new AppleSimulatorProvider(target.Apple,
                     Path.Combine(options.AssetsPath, "dncdbg-agent.json"), installation),
                 _ => throw new PlatformNotSupportedException("Unknown target provider or incompatible typed configuration."),

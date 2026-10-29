@@ -81,13 +81,29 @@ class FixtureApp:
         return (self.container / "Library" / name).read_text()
 
     def prepare(self, debugger_only):
+        verifier = ROOT / "src/DncDbg.TargetControl/bin/Debug/net10.0/dncdbg-target-control.dll"
+        def verify(path):
+            self.run("dotnet", str(verifier), "verify-mobile", str(path),
+                     str(self.args.assets / "dncdbg-agent.json"))
+        verify(self.args.app)
         self.installed = True
         if self.serial:
             self.device("install", "-r", str(self.args.app))
             self.device("shell", "am", "force-stop", APP)
+            installed = self.device("shell", "pm", "path", APP).stdout.strip()
+            if not installed.startswith("package:/data/app/") or "\n" in installed or not installed.endswith("/base.apk"):
+                raise RuntimeError("The installed fixture must resolve to one exact monolithic APK.")
+            actual = self.args.output / "installed.apk"
+            try:
+                self.device("pull", installed[len("package:"):], str(actual))
+                verify(actual)
+            finally:
+                actual.unlink(missing_ok=True)
             self.device("shell", "run-as", APP, "mkdir", "-p", "files")
         else:
             self.run("xcrun", "simctl", "install", self.args.device, str(self.args.app))
+            installed = self.run("xcrun", "simctl", "get_app_container", self.args.device, APP, "app").stdout.strip()
+            verify(installed)
             self.container = Path(self.run("xcrun", "simctl", "get_app_container", self.args.device, APP, "data").stdout.strip())
         if debugger_only:
             self.write("dncdbg-fixture-mode", "debugger")

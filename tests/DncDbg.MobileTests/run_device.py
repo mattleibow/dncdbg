@@ -22,7 +22,8 @@ def copy_debug_assets(source, destination):
     for name in ("DncDbg.MauiTestApp", "DncDbg.ReloadFixture"):
         for extension in ("dll", "pdb"):
             shutil.copyfile(source / f"{name}.{extension}", destination / f"{name}.{extension}")
-    shutil.copyfile(source / "dncdbg-agent.json", destination / "dncdbg-agent.json")
+    for metadata in ("dncdbg-agent.json", "dncdbg-package.json"):
+        shutil.copyfile(source / metadata, destination / metadata)
     return destination
 
 

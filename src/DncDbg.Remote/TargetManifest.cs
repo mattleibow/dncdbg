@@ -5,7 +5,7 @@ using System.Text.Json.Serialization;
 namespace DncDbg.Remote;
 
 public sealed record TargetAgentIdentity(string Name, string Rid, int ProtocolVersion, int ModelVersion,
-    string BuildId, string Sha256);
+    string BuildId, string Sha256, string ImageKind = "native-library");
 public sealed record TargetProfile(int SchemaVersion, string Os, string Architecture,
     PrivateBootstrapIdentity Runtime, TargetAgentIdentity Agent, string[] Capabilities);
 public sealed record TargetProcess(int Id, string Payload, string OwnershipId);
@@ -43,6 +43,7 @@ public static class TargetManifestPolicy
         TargetAgentIdentity agent = profile.Agent;
         if (string.IsNullOrWhiteSpace(agent.Name) || agent.ProtocolVersion != RemoteProtocol.Version ||
             agent.ModelVersion != RemoteContract.ModelVersion || !Hex(agent.BuildId, 64) || !Hex(agent.Sha256, 64) ||
+            agent.ImageKind != (os == "ios" ? "linked-executable" : "native-library") ||
             agent.Rid != (os == "macos" ? "osx" : os == "ios" && profile.Runtime.Platform == "iOSSimulator" ? "iossimulator" : os)
                 + "-" + architecture)
             throw new InvalidDataException("The target agent must have an exact RID, build/hash and matching protocol/model.");
@@ -96,6 +97,7 @@ public static class TargetManifestPolicy
 [JsonSerializable(typeof(TargetProfile))]
 [JsonSerializable(typeof(TargetManifest))]
 [JsonSerializable(typeof(TargetAgentIdentity))]
+[JsonSerializable(typeof(ApplicationPackageIdentity))]
 [JsonSerializable(typeof(TargetProcessObservation))]
 [JsonSerializable(typeof(CommandSpec))]
 [JsonSerializable(typeof(CommandTargetOptions))]

@@ -33,6 +33,19 @@ if (args is ["--command-eof"])
 {
     return;
 }
+if (args is ["--command-provider", var providerAction, var providerState])
+{
+    if (providerAction is "manifest" or "observe")
+        Console.Write(File.ReadAllText(Path.Combine(providerState, providerAction + ".json")));
+    else
+    {
+        File.AppendAllText(Path.Combine(providerState, "actions.txt"), providerAction + "\n");
+        if (providerAction == "stop" && File.Exists(Path.Combine(providerState, "cleaned")))
+            throw new InvalidOperationException("A settled target must not be stopped after deployment cleanup.");
+        if (providerAction == "cleanup") File.WriteAllText(Path.Combine(providerState, "cleaned"), "complete");
+    }
+    return;
+}
 
 if (args is [DncDbg.Engine.Launch.ConsoleCodePage.HelperOption, var consoleOwner] && int.TryParse(consoleOwner, out int consolePid))
 {
@@ -59,6 +72,12 @@ if (args is ["--target-contracts"])
 {
     await TargetContractChecks.RunAsync(Check, token);
     Console.WriteLine($"Passed {passed} target manifest/structured-command contracts.");
+    return;
+}
+if (args is ["--lifecycle-contracts"])
+{
+    await LifecycleChecks.RunAsync(Check, token);
+    Console.WriteLine($"Passed {passed} monotonic remote-lifecycle contracts.");
     return;
 }
 if (args is ["--tunnel-contracts"])
@@ -143,6 +162,7 @@ if (args is ["--mobile", var descriptor])
     return;
 }
 
+await LifecycleChecks.RunAsync(Check, token);
 await TestFramesAsync();
 TestOwnership();
 TestMachOUuid();

@@ -12,6 +12,7 @@ internal sealed class NativeHostProvider(TargetStartInfo options, string outputR
     private Process? process;
     private Task<string>? output, errors;
     private Task<int>? exitCode;
+    private readonly SemaphoreSlim closeGate = new(1, 1);
     private string? sessionId;
     public string Name => Path.GetFileName(options.AssemblyPath);
     public string ExpectedPlatform => OperatingSystem.IsMacOS() ? "MacOSNativeHost" : "LinuxNativeHost";
@@ -21,6 +22,7 @@ internal sealed class NativeHostProvider(TargetStartInfo options, string outputR
 
     public async Task AcquireAsync(string sessionId, CancellationToken token)
     {
+        TargetEnvironment.Validate(options.Environment);
         this.sessionId = sessionId;
         if (!(OperatingSystem.IsMacOS() || OperatingSystem.IsLinux()) ||
             !File.Exists(options.HostPath) || !File.Exists(options.AgentPath) || !File.Exists(options.AssemblyPath) ||
@@ -46,6 +48,7 @@ internal sealed class NativeHostProvider(TargetStartInfo options, string outputR
         foreach (string value in new[] { options.RuntimeDirectory, options.AgentPath, options.AssemblyPath,
                      configuration, ArtifactsPath, options.RuntimeConfigPath })
             start.ArgumentList.Add(Path.GetFullPath(value));
+        TargetEnvironment.Apply(start, options.Environment);
         start.Environment["DNCDBG_NATIVE_TOKEN"] = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
         start.Environment["DNCDBG_SESSION_ID"] = sessionId;
         token.ThrowIfCancellationRequested();
@@ -76,6 +79,13 @@ internal sealed class NativeHostProvider(TargetStartInfo options, string outputR
     }
 
     public async Task CloseAsync(bool terminate, CancellationToken token)
+    {
+        await closeGate.WaitAsync(token);
+        try { await CloseCoreAsync(terminate, token); }
+        finally { closeGate.Release(); }
+    }
+
+    private async Task CloseCoreAsync(bool terminate, CancellationToken token)
     {
         if (process == null) return;
         Exception? failure = null;
@@ -134,7 +144,7 @@ internal sealed class NativeHostProvider(TargetStartInfo options, string outputR
                 if (process.HasExited)
                 {
                     try { await exitCode!; }
-                    finally { process.Dispose(); }
+                    finally { process.Dispose(); process = null; }
                 }
                 else _ = ReapDetachedAsync(process, exitCode!);
             }
@@ -142,9 +152,21 @@ internal sealed class NativeHostProvider(TargetStartInfo options, string outputR
         if (failure != null) throw failure;
     }
 
-    private static async Task ReapDetachedAsync(Process detached, Task<int> exit)
+    private async Task ReapDetachedAsync(Process detached, Task<int> exit)
     {
         try { await exit; }
-        finally { detached.Dispose(); }
+        finally
+        {
+            await closeGate.WaitAsync();
+            try
+            {
+                if (ReferenceEquals(process, detached))
+                {
+                    detached.Dispose();
+                    process = null;
+                }
+            }
+            finally { closeGate.Release(); }
+        }
     }
 }

@@ -6,8 +6,10 @@
     <DebugType>portable</DebugType>
     <Optimize>false</Optimize>
     <GenerateRuntimeConfigurationFiles>false</GenerateRuntimeConfigurationFiles>
+    <RootNamespace>NativeHostPayload</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
     <None Include="Payload.runtimeconfig.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="content/device.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

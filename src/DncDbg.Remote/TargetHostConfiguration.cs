@@ -8,6 +8,7 @@ public static class TargetHostConfiguration
 {
     public static string Write(string directory, TargetProfile profile, TargetStartInfo start)
     {
+        TargetEnvironment.Validate(start.Environment);
         TargetManifestPolicy.ValidateProfile(profile);
         RemoteCapabilities capabilities = PrivateBootstrapPolicy.NativeHostCapabilities(start.RuntimeDirectory);
         if (capabilities.SupportedBuild != profile.Runtime)

@@ -18,12 +18,15 @@ RUN dotnet build tests/DncDbg.NativeHostTests/Payload/Payload.csproj -c Debug --
     && cp build/application/*.dll build/application/*.pdb build/application/*.json tests/DncDbg.NativeHostTests/Payload/bin/Debug/net10.0/ \
     && arch="$(uname -m)" \
     && if [ "$arch" = aarch64 ]; then rid=linux-arm64; else rid=linux-x64; fi \
+    && mkdir -p "tests/DncDbg.NativeHostTests/Payload/bin/Debug/net10.0/runtimes/$rid/native" \
+    && c++ -shared -fPIC tests/DncDbg.NativeHostTests/Payload/closure.cpp \
+       -o "tests/DncDbg.NativeHostTests/Payload/bin/Debug/net10.0/runtimes/$rid/native/libclosure_probe.so" \
     && python3 src/DncDbg.Remote.Target/publish.py --rid "$rid" --include-runtime \
-      --payload tests/DncDbg.NativeHostTests/Payload/bin/Debug/net10.0/Payload.dll --output build/device-package \
+      --payload-directory tests/DncDbg.NativeHostTests/Payload/bin/Debug/net10.0 --output build/device-package \
     && cp -a build/device-package/control /opt/control \
     && cp -a build/device-package/runtime /opt/runtime \
     && python3 src/DncDbg.Remote.Target/publish.py --rid "$rid" \
       --runtime-directory /opt/runtime/shared/Microsoft.NETCore.App/11.0.0-rc.1.26425.128 \
-      --payload tests/DncDbg.NativeHostTests/Payload/bin/Debug/net10.0/Payload.dll --output build/device-bundle \
+      --payload-directory tests/DncDbg.NativeHostTests/Payload/bin/Debug/net10.0 --output build/device-bundle \
     && cp -a build/device-bundle /opt/source-package
 CMD ["sleep", "infinity"]

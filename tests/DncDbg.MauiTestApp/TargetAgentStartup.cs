@@ -46,6 +46,37 @@ internal static class TargetAgentStartup
                 ?? throw new InvalidDataException("Agent integrity manifest is missing.");
             if (agent.Rid != rid || agent.BuildId != Marshal.PtrToStringUTF8(Native.BuildId()))
                 throw new InvalidDataException("Loaded target agent differs from the packaged integrity manifest.");
+            string agentImage = Marshal.PtrToStringUTF8(Native.AgentPath())
+                ?? throw new InvalidDataException("The actual loaded target-agent image cannot be located.");
+            if (apple)
+            {
+#if IOS
+                string executable = Foundation.NSBundle.MainBundle.ExecutablePath
+                    ?? throw new InvalidDataException("The final Apple executable cannot be located.");
+                if (Path.GetFullPath(agentImage) != Path.GetFullPath(executable))
+                    throw new InvalidDataException("The Apple agent must execute from the measured final linked executable.");
+#endif
+                agent = agent with { Sha256 = ApplicationPackagePolicy.FileHash(agentImage), ImageKind = "linked-executable" };
+            }
+            else
+            {
+                string actual;
+                if (File.Exists(agentImage)) actual = ApplicationPackagePolicy.FileHash(agentImage);
+                else
+                {
+#if ANDROID
+                    string apk = global::Android.App.Application.Context.ApplicationInfo!.SourceDir!;
+                    if (agentImage != apk + "!/" + ApplicationPackagePolicy.AndroidImagePath(rid))
+                        throw new InvalidDataException("Loaded Android agent does not belong to the installed ABI-specific APK entry.");
+                    actual = ApplicationPackagePolicy.AndroidAgentHash(apk, rid);
+#else
+                    throw new PlatformNotSupportedException("No Android package measurement is available.");
+#endif
+                }
+                if (!actual.Equals(agent.Sha256, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException("Actual loaded Android agent bytes differ from the packaged native build.");
+                agent = agent with { Sha256 = actual, ImageKind = "native-library" };
+            }
             string runtime = Marshal.PtrToStringUTF8(Native.RuntimePath())
                 ?? throw new PlatformNotSupportedException("The qualified CoreCLR runtime could not be located.");
             string extension = apple ? ".dylib" : ".so";
@@ -117,6 +148,7 @@ internal static class TargetAgentStartup
 #endif
         [DllImport(Library, EntryPoint = "dncdbg_runtime_path")] internal static extern nint RuntimePath();
         [DllImport(Library, EntryPoint = "dncdbg_agent_build_id")] internal static extern nint BuildId();
+        [DllImport(Library, EntryPoint = "dncdbg_agent_path")] internal static extern nint AgentPath();
         [DllImport(Library, EntryPoint = "dncdbg_contract_version")] internal static extern int ContractVersion();
         [DllImport(Library, EntryPoint = "dncdbg_prepare")] internal static extern int Prepare(
             [MarshalAs(UnmanagedType.LPUTF8Str)] string runtime, [MarshalAs(UnmanagedType.LPUTF8Str)] string dbi,

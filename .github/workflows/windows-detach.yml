@@ -19,7 +19,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
+      - name: Assert and record the exact reviewed source head
+        shell: pwsh
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          $actual = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $actual -ne $env:EXPECTED_HEAD) { throw "Checked-out source differs from the requested head." }
+          New-Item -ItemType Directory -Force build/validation/windows-detach | Out-Null
+          $actual | Set-Content -Encoding utf8 build/validation/windows-detach/source-head.txt
       - uses: actions/setup-dotnet@v4
         with:
           global-json-file: global.json
@@ -39,7 +49,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: windows-detach-${{ github.run_id }}-${{ github.run_attempt }}
+          name: windows-detach-${{ github.event.pull_request.head.sha || github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: build/validation/windows-detach/
           if-no-files-found: error
           retention-days: 7

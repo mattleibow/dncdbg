@@ -8,8 +8,11 @@ internal sealed class RemoteLifecycle(IRemoteTargetProvider target, ITunnelProvi
 {
     private readonly object gate = new();
     private readonly CancellationTokenSource acquisitionCancellation = new();
-    private Task? acquisition, closing;
-    private bool disposed;
+    private readonly CancellationTokenSource settlementCancellation = new();
+    private readonly SemaphoreSlim targetCloseGate = new(1, 1);
+    private Task? acquisition, closing, terminating, tunnelClosing;
+    private bool disposed, terminationRequested;
+    private int targetCloseLevel;
     private TargetOwnershipJournal? journal;
     public string SessionId { get; } = Guid.NewGuid().ToString("N");
     public string Name => target.Name;
@@ -104,22 +107,47 @@ internal sealed class RemoteLifecycle(IRemoteTargetProvider target, ITunnelProvi
     {
         lock (gate)
         {
-            if (closing != null) return closing;
-            disposed = true;
-            acquisitionCancellation.Cancel();
-            return closing = CloseCoreAsync(terminate);
+            if (terminate && !terminationRequested)
+            {
+                terminationRequested = true;
+                settlementCancellation.Cancel();
+            }
+            if (!disposed)
+            {
+                disposed = true;
+                acquisitionCancellation.Cancel();
+            }
+            closing ??= CloseCoreAsync();
+            return terminate ? terminating ??= TerminateCoreAsync(closing) : closing;
         }
     }
 
-    public Task CloseTunnelAsync() => tunnel.DisposeAsync().AsTask();
+    public Task CloseTunnelAsync()
+    {
+        lock (gate) return tunnelClosing ??= tunnel.DisposeAsync().AsTask();
+    }
 
     public async Task<int?> CompleteExitAsync(int? reportedExitCode, CancellationToken token)
     {
-        await CloseAsync(terminate: false);
-        return await target.WaitForExitAsync(token) ?? reportedExitCode;
+        using var settlement = CancellationTokenSource.CreateLinkedTokenSource(token, settlementCancellation.Token);
+        try
+        {
+            await CloseAsync(terminate: false);
+            int? observed = await target.WaitForExitAsync(settlement.Token);
+            settlement.Token.ThrowIfCancellationRequested();
+            if (observed != null && reportedExitCode != null && observed != reportedExitCode)
+                throw new InvalidDataException("Remote exit notification differs from the owned process exit code.");
+            return observed ?? reportedExitCode;
+        }
+        catch (Exception observation)
+        {
+            try { await CloseAsync(terminate: true); }
+            catch (Exception cleanup) { throw new AggregateException("Exit settlement and terminating cleanup failed.", observation, cleanup); }
+            throw;
+        }
     }
 
-    private async Task CloseCoreAsync(bool terminate)
+    private async Task CloseCoreAsync()
     {
         if (acquisition != null)
         {
@@ -136,15 +164,48 @@ internal sealed class RemoteLifecycle(IRemoteTargetProvider target, ITunnelProvi
             try { await Client.DisposeAsync(); }
             catch (Exception error) { failures.Add(error); }
         }
-        try { await tunnel.DisposeAsync(); }
+        try { await CloseTunnelAsync(); }
         catch (Exception error) { failures.Add(error); }
-        using (var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(30)))
-        {
-            try { await target.CloseAsync(terminate, cleanup.Token); }
-            catch (Exception error) { failures.Add(error); }
-        }
+        try { await CloseTargetAsync(); }
+        catch (Exception error) { failures.Add(error); }
         acquisitionCancellation.Dispose();
-        journal?.Record(failures.Count == 0 ? "closed" : "cleanup-failed", null, ProcessId > 0 ? ProcessId : null);
         if (failures.Count > 0) throw new AggregateException("Remote cleanup failed.", failures);
+    }
+
+    private async Task TerminateCoreAsync(Task initialClose)
+    {
+        var failures = new List<Exception>();
+        try { await initialClose; }
+        catch (Exception error) { failures.Add(error); }
+        try { await CloseTargetAsync(); }
+        catch (Exception error) { failures.Add(error); }
+        if (failures.Count > 0) throw new AggregateException("Terminating remote cleanup failed.", failures);
+    }
+
+    private async Task CloseTargetAsync()
+    {
+        await targetCloseGate.WaitAsync();
+        try
+        {
+            bool terminate;
+            lock (gate) terminate = terminationRequested;
+            int level = terminate ? 2 : 1;
+            if (targetCloseLevel >= level) return;
+            // A failed operation may already have stopped/disposed its resources. Do not retry it;
+            // only the strictly stronger detach-to-terminate transition gets another provider call.
+            targetCloseLevel = level;
+            using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            try
+            {
+                await target.CloseAsync(terminate, cleanup.Token);
+                journal?.Record(terminate ? "closed" : "detached", null, ProcessId > 0 ? ProcessId : null);
+            }
+            catch
+            {
+                journal?.Record("cleanup-failed", null, ProcessId > 0 ? ProcessId : null);
+                throw;
+            }
+        }
+        finally { targetCloseGate.Release(); }
     }
 }

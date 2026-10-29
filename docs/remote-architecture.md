@@ -64,6 +64,15 @@ taken. The client, route, target stop and deployment cleanup settle through
 idempotent gates with independent bounded cleanup budgets. A failure is an error,
 not a successful detach or hidden emergency cleanup.
 
+Close intent is monotonic. A natural-exit settlement or explicit detach releases
+the debugger/route once but does not cache away ownership of later termination.
+Terminate cancels concurrent exit observation, serializes with any in-flight
+provider detach, and upgrades to owned stop/deployment cleanup exactly once.
+Observer failure/cancellation, early exit notification and conflicting actual
+exit codes force that stronger cleanup with an independent budget. Already
+settled deployment cleanup is not repeated and a completed transport is never
+disposed twice.
+
 `dncdbg-target-control` owns a detached device worker and the actual `Process`
 object, not a guessed guest PID. It validates the deployed inventory, records the
 process before acknowledging start, observes its real exit code, and kills/reaps

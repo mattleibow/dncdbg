@@ -18,6 +18,7 @@ from argparse import Namespace
 from mobile_tools import android_sdk
 from run_suite import PIN, Suite
 from run_device import verify_ui
+from run_direct import direct_ui_port
 from assert_artifacts import verify
 
 
@@ -90,6 +91,14 @@ class MobileRunnerTests(unittest.TestCase):
         self.assertEqual({p.name for p in destination.iterdir()}, names)
         for name in names:
             self.assertEqual((destination / name).read_bytes(), (source / name).read_bytes())
+
+    def test_android_direct_ui_uses_the_owned_configured_port_not_cli_status_text(self):
+        self.assertEqual(direct_ui_port("android", "Agent is reachable on the selected device.\n",
+                                       123, "owned-run", 12345), 12345)
+        registration = json.dumps({"platform": "iOS", "processId": 123, "sessionId": "owned-run", "port": 23456})
+        self.assertEqual(direct_ui_port("ios", registration, 123, "owned-run", 12345), 23456)
+        with self.assertRaisesRegex(AssertionError, "different process"):
+            direct_ui_port("ios", registration, 124, "owned-run", 12345)
 
     def test_emulator_ports_stay_inside_the_official_console_and_adb_range(self):
         from run_suite import ANDROID_CONSOLE_PORTS

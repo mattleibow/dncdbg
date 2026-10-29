@@ -10,9 +10,15 @@ import uuid
 
 from mobile_tools import ROOT, adb_path
 from process_tools import run_owned
-from run_device import verify_ui
+from run_device import verify_ui, ios_ui_port
 
 APP = "com.dncdbg.mobiletests"
+
+
+def direct_ui_port(platform, registration, pid, session, configured):
+    if platform == "android":
+        return configured
+    return ios_ui_port(json.loads(registration), pid, session)
 
 
 def main():
@@ -90,16 +96,11 @@ def main():
         endpoint_path = private / "endpoint.json"
         endpoint_path.write_text(json.dumps(endpoint))
         endpoint_path.chmod(0o600)
-        wait = run("maui", "devflow", "--device", args.device, "wait", "--wait-platform",
-                   "iOS" if args.platform == "ios" else "Android", "--timeout", "30",
-                   check=False, timeout=45, log="devflow-wait.log")
-        registration = json.loads(wait.stdout) if wait.returncode == 0 else None
-        if registration:
-            assert registration["platform"] == ("iOS" if args.platform == "ios" else "Android")
-            assert registration["processId"] == manifest["Process"]["Id"]
-            assert registration["sessionId"] == args.ui_session
-        ui_port = registration["port"] if args.platform == "ios" and registration else args.ui_port
-        assert registration or args.platform == "android", "No owned iOS UI registration"
+        registration = ""
+        if args.platform == "ios":
+            registration = run("maui", "devflow", "--device", args.device, "wait", "--wait-platform",
+                               "iOS", "--timeout", "30", timeout=45, log="devflow-wait.log").stdout
+        ui_port = direct_ui_port(args.platform, registration, manifest["Process"]["Id"], args.ui_session, args.ui_port)
         if args.platform == "android":
             ui_port = forward(ui_port)
         verify_ui(ui_port, args.platform, manifest["Process"]["Id"])

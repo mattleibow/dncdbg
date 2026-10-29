@@ -14,6 +14,13 @@ public partial class MainPage : ContentPage
 #if DEBUG
 		RuntimeStatus.Text = TargetAgentStartup.Status;
 		ReloadControls.IsVisible = true;
+		TargetAgentStartup.RegisterFixture((command, token) => MainThread.InvokeOnMainThreadAsync(() =>
+		{
+			token.ThrowIfCancellationRequested();
+			if (command == "reset") OnResetClicked(null, EventArgs.Empty);
+			else if (command == "run") OnCounterClicked(null, EventArgs.Empty);
+			return new DncDbg.Testing.FixtureState(count, CounterStatus.Text, ResultStatus.Text);
+		}));
 #else
 		RuntimeStatus.Text = "Application build without target debugging assets.";
 #endif

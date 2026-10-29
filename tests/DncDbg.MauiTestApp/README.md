@@ -46,6 +46,15 @@ and matching DevFlow identity. A screenshot or handshake alone is not debugger
 proof. Shared correctness also runs through the workload-independent native-host
 and generic Linux device suites.
 
+Debugger-only launches of this same app use an owned, single-use fixture mode
+marker. They do not register a DevFlow agent and use the Debug-only authenticated
+loopback `reset`/`run`/`snapshot` control channel to dispatch the existing scenario
+handlers. This is fixture state control, not a second debugger or a UI-automation
+fallback. The DAP/native direct proofs deliberately make the host broker CLI
+unavailable and must still prove 1/42/43, continue/detach and exact cleanup.
+The separate DevFlow-only and explicitly combined DAP/DevFlow proofs retain the
+same AutomationIds and require a real broker/agent; their UI failures remain red.
+
 Physical Android USB/paired-TLS and generic externally managed Apple routes use
 the same profile/manifest/protocol. Their RID assets can be built, but this
 fixture's automated facade executes simulators/emulators only. No physical

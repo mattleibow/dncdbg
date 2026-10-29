@@ -313,9 +313,11 @@ class Suite:
     def execute(self):
         self.preflight()
         self.boot()
-        self.broker()
         self.build("Release", faults=True)
         app, assets = self.build()
+        self.independent_proofs(app, assets)
+        self.broker()
+        self.fixture_proof(app, assets, "ui", "devflow-only")
         self.proof("run_device.py", app, assets, "dap")
         try:
             app, assets = self.build(faults=True)
@@ -324,14 +326,21 @@ class Suite:
             # Faults must not leave the ordinary helper/package in a poisoned build state.
             app, assets = self.build()
         self.proof("run_device.py", app, assets, "restored-dap")
-        for disconnect in (False, True):
-            command = [sys.executable, str(Path(__file__).with_name("run_direct.py")), "--platform", self.args.platform,
-                       "--device", self.state["device"], "--app", str(app), "--assets", str(assets), "--output",
-                       str(self.output / ("direct-disconnect" if disconnect else "direct-continue")),
-                       "--ui-session", self.state["name"], "--ui-port", str(self.state["uiPort"])]
-            if disconnect:
-                command.append("--disconnect-stopped")
-            self.run(*command, timeout=600)
+
+    def fixture_proof(self, app, assets, proof, name, disconnect=False):
+        command = [sys.executable, str(Path(__file__).with_name("run_direct.py")), "--platform", self.args.platform,
+                   "--device", self.state["device"], "--app", str(app), "--assets", str(assets), "--output",
+                   str(self.output / name), "--proof", proof, "--ui-session", self.state["name"],
+                   "--ui-port", str(self.state["uiPort"]), "--runtime-identifier",
+                   "iossimulator-arm64" if self.args.platform == "ios" else self.android["rid"]]
+        if disconnect:
+            command.append("--disconnect-stopped")
+        self.run(*command, timeout=600)
+
+    def independent_proofs(self, app, assets):
+        self.fixture_proof(app, assets, "dap", "debugger-dap-broker-unavailable")
+        self.fixture_proof(app, assets, "client", "direct-continue")
+        self.fixture_proof(app, assets, "client", "direct-disconnect", disconnect=True)
 
     def cleanup(self):
         errors = []
@@ -493,6 +502,7 @@ class Suite:
 
 
 def contracts(suite):
+    suite.run("dotnet", "tests/DncDbg.RemoteTests/bin/Release/net10.0/DncDbg.RemoteTests.dll", "--fixture-control-contracts")
     for path in ("src/DncDbg.Remote/generate_contract.py", "tests/DncDbg.RemoteTests/test_dap.py",
                  "tests/DncDbg.RemoteTests/test_mobile_processes.py", "tests/DncDbg.RemoteTests/test_mobile_runner.py",
                  "tests/DncDbg.RemoteTests/test_android_provisioning.py"):

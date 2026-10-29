@@ -72,6 +72,7 @@ try
         foreach (string name in new[] { "DncDbg.NativeHostTests", "DncDbg.RemoteTests", "RemoteBreakpointApp" })
             CopySource(Path.Combine(root, "tests", name), Path.Combine(source, "tests", name));
         File.Copy(Path.Combine(root, "tests/CommonRunner.cs"), Path.Combine(source, "tests/CommonRunner.cs"));
+        File.Copy(Path.Combine(root, "tests/FixtureControl.cs"), Path.Combine(source, "tests/FixtureControl.cs"));
         File.Copy(Path.Combine(root, "tests/DncDbg.NativeHostTests/Dockerfile"), Path.Combine(source, "Dockerfile"));
         await Commands.Run("docker", ["build", "--platform", platform, "--label", label, "--tag", nativeImage, source], 600);
         string head = (await Commands.Run("git", ["rev-parse", "HEAD"], 15)).Trim();

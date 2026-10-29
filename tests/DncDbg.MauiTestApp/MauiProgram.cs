@@ -20,7 +20,8 @@ public static class MauiProgram
 
 #if DEBUG
 		builder.Logging.AddDebug();
-		builder.AddMauiDevFlowAgent();
+		if (!TargetAgentStartup.ConsumeDebuggerOnlyMode())
+			builder.AddMauiDevFlowAgent();
 		TargetAgentStartup.Start();
 #endif
 

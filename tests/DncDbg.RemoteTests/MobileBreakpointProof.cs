@@ -1,15 +1,15 @@
-using System.Diagnostics;
 using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
 using System.Reflection.PortableExecutable;
 using System.Security.Cryptography;
 using System.Text.Json;
 using DncDbg.Remote;
+using DncDbg.Testing;
 
 internal static class MobileBreakpointProof
 {
     public static async Task RunAsync(string descriptor, string source, string assembly, string pdbPath,
-        string agentPort, bool disconnect, CancellationToken token)
+        string fixtureDescriptor, bool disconnect, CancellationToken token)
     {
         source = Path.GetFullPath(source);
         int line = File.ReadAllLines(source).Select((text, index) => (text, index))
@@ -21,13 +21,17 @@ internal static class MobileBreakpointProof
             client.Capabilities.SupportedBuild is { } supported &&
             PrivateBootstrapPolicy.Validate(supported, ["DllMain", "CoreCLRCreateCordbObject3"]) == null, "exact pinned private capability");
         Console.WriteLine(JsonSerializer.Serialize(client.Capabilities, RemoteJson.Default.RemoteCapabilities));
-        using var ui = new UiSession(agentPort, descriptor, client.Capabilities.Platform, token);
-        await ui.Command("MAUI tree --depth 15");
+        FixtureEndpoint fixture = JsonSerializer.Deserialize(File.ReadAllText(fixtureDescriptor), FixtureJson.Default.FixtureEndpoint)!;
+        Require(fixture.SessionId == endpoint.SessionId && fixture.ProcessId == endpoint.ProcessId,
+            "fixture control belongs to the exact debugger process/generation");
+        Require(!fixture.BrokerRequired, "independent debugger fixture has no registered DevFlow transport");
+        var control = new FixtureControlClient(fixture);
         await client.SetBreakpointsAsync(new(source, [line], location), token);
-        await ui.Command("MAUI tap --automationId reset-scenario");
+        Require(await control.CommandAsync("reset", token) == new FixtureState(0, "Count: 0", "Result: not run"),
+            "app-local deterministic reset needs no UI automation broker");
         await client.StartAsync(token);
         Task<RemoteStop> waiting = client.WaitForStopAsync(token);
-        Task tap = ui.Command("MAUI tap --automationId run-scenario");
+        Task<FixtureState> run = control.CommandAsync("run", token);
         RemoteStop stop = await waiting;
         Require(stop.Reason == "breakpoint", "real target-native managed breakpoint callback");
         RemoteFrame[] stack = await client.StackAsync(stop.Id, token);
@@ -49,14 +53,11 @@ internal static class MobileBreakpointProof
             await Invalid(() => client.EvaluateAsync(stack[^1].Handle, "answer", token));
             await client.DisposeAsync();
         }
-        await tap.WaitAsync(token);
-        await ui.Command("MAUI assert --automationId result-status Text \"Result: 42\"");
-        await ui.Command("MAUI tap --automationId reset-scenario");
-        await ui.Command("MAUI assert --automationId counter-status Text \"Count: 0\"");
-        await ui.Command("MAUI tap --automationId run-scenario");
-        await ui.Command("MAUI assert --automationId result-status Text \"Result: 42\"");
-        string screenshot = Path.Combine(Path.GetDirectoryName(descriptor)!, client.Capabilities.Platform.ToLowerInvariant() + "-continued.png");
-        await ui.Command("MAUI screenshot --output " + JsonSerializer.Serialize(screenshot) + " --overwrite");
+        Require(await run.WaitAsync(token) == new FixtureState(1, "Count: 1", "Result: 42"), "continued fixture state is exactly 1/42");
+        Require(await control.CommandAsync("reset", token) == new FixtureState(0, "Count: 0", "Result: not run"),
+            "detached app-local reset remains usable");
+        Require(await control.CommandAsync("run", token) == new FixtureState(1, "Count: 1", "Result: 42"),
+            "detached scenario still executes normally without the debugger or broker");
         Console.WriteLine(disconnect ? "PASS: mobile disconnect relinquishes the callback stop; scenario completed normally"
             : "PASS: mobile continue completed normally; duplicate continue and stale handles rejected");
         async Task Invalid(Func<Task> action)
@@ -64,47 +65,6 @@ internal static class MobileBreakpointProof
             try { await action(); }
             catch (RemoteRequestException error) when (error.Code == "InvalidState") { return; }
             throw new InvalidOperationException("Expected stale native stop/frame rejection.");
-        }
-    }
-
-    private sealed class UiSession : IDisposable
-    {
-        private readonly Process process;
-        private readonly StreamWriter log;
-        private readonly CancellationToken token;
-        private readonly Task<string> errors;
-        public UiSession(string port, string descriptor, string platform, CancellationToken token)
-        {
-            this.token = token;
-            var start = new ProcessStartInfo("maui")
-            {
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                RedirectStandardInput = true,
-            };
-            foreach (string arg in new[] { "devflow", "--agent-port", port, "batch" }) start.ArgumentList.Add(arg);
-            process = Process.Start(start)!;
-            errors = process.StandardError.ReadToEndAsync(token);
-            log = new(Path.Combine(Path.GetDirectoryName(descriptor)!, platform.ToLowerInvariant() + "-private-ui.jsonl"));
-        }
-        public async Task Command(string command)
-        {
-            await process.StandardInput.WriteLineAsync(command);
-            await process.StandardInput.FlushAsync(token);
-            string response = await process.StandardOutput.ReadLineAsync(token)
-                ?? throw new InvalidOperationException("DevFlow batch ended: " + await errors);
-            await log.WriteLineAsync(response);
-            await log.FlushAsync(token);
-            using JsonDocument document = JsonDocument.Parse(response);
-            if (document.RootElement.GetProperty("exit_code").GetInt32() != 0)
-                throw new InvalidOperationException("DevFlow action failed: " + response);
-        }
-        public void Dispose()
-        {
-            process.StandardInput.Close();
-            if (!process.WaitForExit(5000)) { process.Kill(entireProcessTree: true); process.WaitForExit(); }
-            log.Dispose();
-            process.Dispose();
         }
     }
 

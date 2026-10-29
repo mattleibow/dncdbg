@@ -43,6 +43,12 @@ if (args is [DncDbg.Engine.Launch.ConsoleCodePage.HelperOption, var consoleOwner
 using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(60));
 CancellationToken token = deadline.Token;
 int passed = 0;
+if (args is ["--fixture-control-contracts"])
+{
+    await FixtureControlChecks.RunAsync(Check, token);
+    Console.WriteLine($"Passed {passed} broker-independent fixture contracts.");
+    return;
+}
 if (args is ["--target-contracts"])
 {
     await TargetContractChecks.RunAsync(Check, token);
@@ -70,9 +76,9 @@ if (args is ["--symbols", var symbolAssets])
     Console.WriteLine(JsonSerializer.Serialize(new { Modules = symbols.Modules.Length, Chunks = chunks.Length, Largest = largest }));
     return;
 }
-if (args is ["--mobile-proof", var mobileDescriptor, var mobileSource, var mobileAssembly, var mobilePdb, var mobileAgentPort, var mobileMode])
+if (args is ["--mobile-proof", var mobileDescriptor, var mobileSource, var mobileAssembly, var mobilePdb, var fixtureDescriptor, var mobileMode])
 {
-    await MobileBreakpointProof.RunAsync(mobileDescriptor, mobileSource, mobileAssembly, mobilePdb, mobileAgentPort,
+    await MobileBreakpointProof.RunAsync(mobileDescriptor, mobileSource, mobileAssembly, mobilePdb, fixtureDescriptor,
         mobileMode == "disconnect", token);
     return;
 }

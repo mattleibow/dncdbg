@@ -1,5 +1,7 @@
 """Portable regression gates for mobile orchestration, isolation and evidence (no device required)."""
 import json
+import io
+import queue
 import os
 import runpy
 from pathlib import Path
@@ -18,8 +20,8 @@ sys.path.insert(0, str(ROOT / "tests/DncDbg.MobileTests"))
 from argparse import Namespace
 from mobile_tools import android_sdk
 from run_suite import PIN, Suite
-from run_device import verify_ui
-from run_direct import direct_ui_port
+from run_device import verify_ui, Ui
+from run_direct import unavailable_broker_environment, FixtureApp
 from assert_artifacts import verify
 
 
@@ -103,14 +105,38 @@ class MobileRunnerTests(unittest.TestCase):
         for name in names:
             self.assertEqual((destination / name).read_bytes(), (source / name).read_bytes())
 
-    def test_android_direct_ui_uses_the_owned_configured_port_not_cli_status_text(self):
-        self.assertEqual(direct_ui_port("android", "Agent is reachable on the selected device.\n",
-                                       123, "owned-run", 12345), 12345)
-        registration = json.dumps({"platform": "iOS", "processId": 123, "sessionId": "owned-run", "port": 23456})
-        self.assertEqual(direct_ui_port("ios", registration, 123, "owned-run", 12345), 23456)
-        with self.assertRaisesRegex(AssertionError, "different process"):
-            direct_ui_port("ios", registration, 124, "owned-run", 12345)
+    def test_direct_debugger_control_does_not_invoke_devflow_when_broker_is_unavailable(self):
+        source = (ROOT / "tests/DncDbg.RemoteTests/MobileBreakpointProof.cs").read_text()
+        self.assertNotIn("UiSession", source)
+        self.assertIn("FixtureControlClient", source)
 
+    def test_devflow_ui_proof_fails_honestly_when_broker_authority_is_unavailable(self):
+        ui = Ui.__new__(Ui)
+        ui.responses, ui.log = queue.Queue(), io.StringIO()
+        ui.responses.put(json.dumps({"command": "MAUI tap --automationId reset-scenario", "exit_code": 1,
+                                     "output": "The DevFlow broker lease authority is temporarily unavailable."}))
+        with self.assertRaisesRegex(AssertionError, "lease authority is temporarily unavailable"):
+            ui.receive()
+
+    def test_unavailable_broker_regression_is_a_real_failing_cli_not_a_success_fallback(self):
+        environment, trace = unavailable_broker_environment(self.output)
+        result = subprocess.run(["maui", "devflow", "ui", "tree"], env=environment,
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("lease authority is temporarily unavailable", result.stdout)
+        self.assertTrue(trace.exists())
+
+    def test_direct_native_cleanup_waits_for_the_same_exact_owner_fence_as_dap(self):
+        app = FixtureApp(Namespace(platform="ios", output=self.output))
+        finished = "\n".join(json.dumps({"Phase": phase, "HResult": "0x00000000"}, separators=(",", ":"))
+                             for phase in ("cleanup-detach-return", "terminate-return", "owner-finished"))
+        with patch.object(app, "read", side_effect=['{"Phase":"cleanup-stop-return"}', finished]) as read, \
+                patch("run_direct.time.sleep"):
+            app.native_cleanup()
+        self.assertEqual(read.call_count, 2)
+        with patch.object(app, "read", return_value=finished.replace("0x00000000", "0x80004005")):
+            with self.assertRaises(AssertionError):
+                app.native_cleanup()
     def test_emulator_ports_stay_inside_the_official_console_and_adb_range(self):
         from run_suite import ANDROID_CONSOLE_PORTS
         self.assertEqual(list(ANDROID_CONSOLE_PORTS), list(range(5554, 5586, 2)))
@@ -314,10 +340,23 @@ class MobileRunnerTests(unittest.TestCase):
                 raise RuntimeError("fault regression")
 
         with patch.object(self.suite, "preflight"), patch.object(self.suite, "boot"), patch.object(self.suite, "broker"), \
+                patch.object(self.suite, "independent_proofs"), patch.object(self.suite, "fixture_proof"), \
                 patch.object(self.suite, "build", side_effect=build), patch.object(self.suite, "proof", side_effect=proof):
             with self.assertRaisesRegex(RuntimeError, "fault regression"):
                 self.suite.execute()
         self.assertEqual(builds, [("Release", True), ("Debug", False), ("Debug", True), ("Debug", False)])
+
+    def test_independent_debugger_proofs_run_before_broker_required_ui(self):
+        order = []
+        with patch.object(self.suite, "preflight"), patch.object(self.suite, "boot"), \
+                patch.object(self.suite, "build", return_value=(Path("fixture"), Path("assets"))), \
+                patch.object(self.suite, "independent_proofs", side_effect=lambda *a: order.append("debugger")), \
+                patch.object(self.suite, "broker", side_effect=RuntimeError("broker unavailable")), \
+                patch.object(self.suite, "fixture_proof") as ui:
+            with self.assertRaisesRegex(RuntimeError, "broker unavailable"):
+                self.suite.execute()
+        self.assertEqual(order, ["debugger"])
+        ui.assert_not_called()
 
     def test_evidence_contains_head_and_hashes_but_not_credential_files(self):
         (self.output / "report.json").write_text('{"passed": true}')

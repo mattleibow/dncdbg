@@ -4,7 +4,7 @@ import sys
 import zipfile
 
 MARKERS = (b"dncdbg_prepare", b"dncdbg_complete", b"dncdbg_test_stall_owner", b"libdncdbg_target",
-           b"dotnet/testCloseTunnel", "dotnet/testCloseTunnel".encode("utf-16-le"))
+           b"dotnet/testCloseTunnel", "dotnet/testCloseTunnel".encode("utf-16-le"), b"FixtureControlServer")
 
 
 def inspect(name, data):

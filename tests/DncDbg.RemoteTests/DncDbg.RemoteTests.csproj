@@ -8,6 +8,7 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../FixtureControl.cs" Link="FixtureControl.cs" />
     <ProjectReference Include="../../src/DncDbg.Remote/DncDbg.Remote.csproj" />
     <ProjectReference Include="../../src/DncDbg.Engine/DncDbg.Engine.csproj" />
     <ProjectReference Include="../RemoteBreakpointApp/RemoteBreakpointApp.csproj" ReferenceOutputAssembly="false" />

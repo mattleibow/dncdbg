@@ -108,20 +108,31 @@ requested RID's architecture against the actual target capability.
 2. Build **ordinary Release**, reject a Release test-fault request, inspect its
    evaluated items/constants and actual bundle/APK, and require native helper,
    imports, remote/DevFlow references to be absent.
-3. Build the ordinary Debug native helper and fixture, run the **full real DAP +
-   DevFlow suite**, including 1/42/43, stepping, inspection, deep stacks/array
+3. Build the ordinary Debug native helper and the same fixture app. Before
+   starting/requiring a DevFlow broker, run independent DAP and both direct-client
+   modes with DevFlow registration disabled for that owned launch and a real
+   failing `maui` CLI shim reproducing unavailable broker authority. Reset/run/
+   committed state come from the app-local authenticated fixture control channel,
+   not UI automation. Breakpoints, inspection/evaluation, continue/detach,
+   stale handles, resumed app usability and exact cleanup must all pass; any
+   attempted broker invocation fails the regression.
+4. Require the real broker and exact agent identity for the distinct
+   **DevFlow-only** reset/run/assert/screenshot proof. This proof has no debugger
+   transport and fails honestly on unavailable broker authority. Then run the
+   existing explicitly **combined real DAP + DevFlow suite**, including 1/42/43,
+   stepping, inspection, deep stacks/array
    bounds, collectible module generations, exception filters, pause, restart,
    stable IDs and stopped detach/UI screenshot.
-4. Build explicit Debug-only native/managed watchdog fault injection and run
+5. Build explicit Debug-only native/managed watchdog fault injection and run
    **all** acquisition, redeployment, running/stopped target-death and watchdog
    faults (plus Android committed allocation/rebind cancellation races).
    Positive and fault drivers use the same copied fixture/collectible PE+PDB
    catalog, not thousands of unrelated infrastructure symbol fragments from
    the complete build directory.
-5. Always restore the ordinary helper/package; require its fault export absent;
-   rerun the full real suite. Retain the original direct-client **continue and
-   stopped-disconnect** proofs on each platform as additional regressions.
-6. Always terminate/uninstall the fixture, remove owned forwards, shut down and
+6. Always restore the ordinary helper/package; require its fault export absent;
+   rerun the full combined real suite. The independent direct-client **continue
+   and stopped-disconnect** assertions remain mandatory, not weakened UI fallbacks.
+7. Always terminate/uninstall the fixture, remove owned forwards, shut down and
    delete the dedicated device/AVD and scratch data, and stop only a broker this
    run started (not a pre-existing shared broker). Do not reset the ADB daemon.
 
@@ -136,6 +147,14 @@ session must all match before its route is admitted. Before querying or
 mutating any UI, both DAP/fault helpers verify exact package, platform and native
 process ID. A reachable unrelated agent/ADB port is an error, never a fallback
 UI target.
+The Debug-only fixture control listener is separate from debugger execution and
+DevFlow: three fixed operations (`reset`, `run`, `snapshot`) dispatch the existing
+scenario handlers on the app's main thread. Its dynamic loopback endpoint has its
+own 256-bit credential bound to the exact debugger PID/generation, bounded frames,
+owner-only descriptor and idempotent teardown. It cannot evaluate arbitrary code
+or control debugger stops. The native agent remains the only execution controller.
+The important AutomationIds and same target app are unchanged. Ordinary Release
+apps and desktop packages exclude the fixture control implementation.
 Owned POSIX group liveness uses a kernel signal-zero probe; only ambiguous
 macOS `EPERM` requires a global process snapshot. An ordinary completed CLI
 command must not depend on scanning every process on a loaded hosted runner.

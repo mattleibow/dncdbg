@@ -72,6 +72,7 @@
 		<EmbedAssembliesIntoApk>true</EmbedAssembliesIntoApk>
 	</PropertyGroup>
 	<ItemGroup Condition="'$(Configuration)' == 'Debug'">
+		<Compile Include="../FixtureControl.cs" Link="FixtureControl.cs" />
 		<ProjectReference Include="../../src/DncDbg.Remote/DncDbg.Remote.csproj" />
 		<ProjectReference Include="../DncDbg.ReloadFixture/DncDbg.ReloadFixture.csproj" ReferenceOutputAssembly="false"
 		                  GlobalPropertiesToRemove="RuntimeIdentifier;RuntimeIdentifiers;TargetFrameworks" />

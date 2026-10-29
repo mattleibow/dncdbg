@@ -3,14 +3,33 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text.Json;
 using DncDbg.Remote;
+using DncDbg.Testing;
 
 namespace DncDbg.MauiTestApp;
 
 internal static class TargetAgentStartup
 {
     private static int running;
+    private static FixtureControlServer? fixture;
+    public static string? SessionId { get; private set; }
+    public static bool DebuggerOnly { get; private set; }
     public static string Status { get; private set; } = "Target agent not started.";
     private static string PathFor(string name) => Path.Combine(FileSystem.AppDataDirectory, name);
+
+    public static bool ConsumeDebuggerOnlyMode()
+    {
+        string path = PathFor("dncdbg-fixture-mode");
+        if (!File.Exists(path)) return false;
+        string mode = File.ReadAllText(path);
+        File.Delete(path);
+        if (mode != "debugger") throw new InvalidDataException("Unknown test fixture startup mode.");
+        return DebuggerOnly = true;
+    }
+
+    public static void RegisterFixture(Func<string, CancellationToken, Task<FixtureState>> execute)
+    {
+        if (SessionId != null) fixture = new(PathFor("dncdbg-fixture-control.json"), SessionId, execute, !DebuggerOnly);
+    }
 
     public static void Start()
     {
@@ -66,6 +85,7 @@ internal static class TargetAgentStartup
             string staging = PathFor("dncdbg-remote.pending");
             File.WriteAllText(staging, JsonSerializer.Serialize(manifest, TargetJson.Default.TargetManifest));
             File.Move(staging, PathFor("dncdbg-remote.json"), true);
+            SessionId = session;
             Status = "Remote debugger ready: " + rid + " / " + identity.RuntimeVersion;
         }
         catch (Exception error)
@@ -78,6 +98,9 @@ internal static class TargetAgentStartup
 
     public static void Stop()
     {
+        fixture?.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        fixture = null;
+        SessionId = null;
         if (Interlocked.Exchange(ref running, 0) != 0) Native.Cancel();
         File.Delete(PathFor("dncdbg-remote.json"));
     }

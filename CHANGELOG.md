@@ -2,6 +2,8 @@
 Upcoming changes compared to the previous version.
 
 #### DAP
+- Renamed the console-relay setting to `DNCDBG_REMOTECONSOLE_PORT`, with default 22534 and range 1-65535. Invalid values log and fall back to the default; the former spelling is no longer interpreted. Apply launch/restart overrides before opening the relay and allow retry after a bind failure.
+- Matched upstream complete unsigned-decimal configuration parsing: inner-exception limits with trailing characters now log and use the default 32 rather than accepting a numeric prefix.
 - Report the actual `allThreadsContinued` outcome in continue responses and continued events, including successful steps. Redundant already-running continues return `true` without an extra event; failed state inspection logs and falls back to the requested mode.
 - Ported parsed unsigned hit conditions for source/function breakpoints: `<N`, `<=N`, `==N`, `>N`, `N`/`>=N`, and `%N` (`%0` rejected). Validate complete requests before mutation; count without function evaluation and preserve function IDs/counts across replacements.
 - Added `DNCDBG_INNER_EXCEPTION_WALK_LIMIT` with native-compatible process/session configuration, a default of 32 inner exceptions, and fully populated terminal details. Exception traversal and DAP conversion are iterative; outgoing chains may exceed the incoming message depth limit.

@@ -158,6 +158,10 @@ apps and desktop packages exclude the fixture control implementation.
 Owned POSIX group liveness uses a kernel signal-zero probe; only ambiguous
 macOS `EPERM` requires a global process snapshot. An ordinary completed CLI
 command must not depend on scanning every process on a loaded hosted runner.
+SDK processes explicitly disable the persistent MSBuild server
+(`DOTNET_CLI_USE_MSBUILD_SERVER=false`, `MSBUILDUSESERVER=0`). Structured
+`-getProperty/-getItem` output must remain exact JSON; the runner does not strip
+or ignore a server-fallback diagnostic to turn an unhealthy evaluation green.
 
 `state.json` journals ownership for recovery. The workflow repeats cleanup with
 the **same command/options plus `--cleanup`** in an `always()` step after timeout/

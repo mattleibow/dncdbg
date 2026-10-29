@@ -52,6 +52,10 @@ class MobileRunnerTests(unittest.TestCase):
                 self.suite.build("Release")
         self.assertIn("-p:DncDbgMobileTestPlatform=android", evaluate.call_args.args)
 
+    def test_mobile_sdk_uses_explicit_in_process_msbuild_not_noisy_server_fallback(self):
+        self.assertEqual(self.suite.env.get("DOTNET_CLI_USE_MSBUILD_SERVER"), "false")
+        self.assertEqual(self.suite.env.get("MSBUILDUSESERVER"), "0")
+
     def test_simulator_signing_does_not_require_a_developer_identity_or_device_profile(self):
         project = ET.parse(ROOT / "tests/DncDbg.MauiTestApp/DncDbg.MauiTestApp.csproj").getroot()
         groups = [group for group in project.findall("PropertyGroup")

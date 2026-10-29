@@ -50,6 +50,8 @@ class Suite:
         require(self.output.is_relative_to((ROOT / "build").resolve()), "Evidence must be under this checkout's build/.")
         self.state_path = self.output / "state.json"
         self.env = dict(os.environ)
+        self.env["DOTNET_CLI_USE_MSBUILD_SERVER"] = "false"
+        self.env["MSBUILDUSESERVER"] = "0"
         self.state = {}
         self.number = max((int(p.name.split("-", 1)[0]) for p in self.output.glob("*.log")
                            if p.name.split("-", 1)[0].isdigit()), default=0)

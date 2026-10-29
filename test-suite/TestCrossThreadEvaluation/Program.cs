@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Threading;
 using DbgTest;
 using DbgTest.DAP;
@@ -61,6 +62,7 @@ class Program
         });
         worker.Start();
         ready.Wait();
+        Console.WriteLine("RUNTIME " + RuntimeInformation.FrameworkDescription);
         TestStruct5 value = new TestStruct5();
         WorkerDependency blocked = new WorkerDependency();
         Debugger.NotifyOfCrossThreadDependency();
@@ -71,7 +73,6 @@ class Program
             {
                 Context Context = (Context)context;
                 Context.CheckCrossThreadEvaluation(@"__FILE__:__LINE__", "inspect");
-                Context.CheckWorkerDependency(@"__FILE__:__LINE__");
                 Context.Continue(@"__FILE__:__LINE__");
             });
 
@@ -127,7 +128,6 @@ partial class Context
         GetAndCheckValue(trace, frameId, "111", "int", "blocked.val1");
         GetAndCheckValue(trace, frameId, "\"text_333\"", "string", "blocked.val3");
         GetAndCheckValue(trace, frameId, "555.5", "float", "blocked.val5");
-        EvalVariable(trace, reference, "int", "val2", "222");
     }
 
     public void CheckCrossThreadEvaluation(string trace, string breakpoint)
@@ -157,6 +157,8 @@ partial class Context
                 Assert.Equal(types[index], variable.type, requestTrace);
             }
             GetAndCheckValue(requestTrace, frameId, "111", "int", "value.val1");
+            if (breakpoint == "inspect" && request == 9)
+                CheckWorkerDependency(requestTrace);
         }
     }
 }

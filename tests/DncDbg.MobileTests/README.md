@@ -156,7 +156,7 @@ or control debugger stops. The native agent remains the only execution controlle
 The important AutomationIds and same target app are unchanged. Ordinary Release
 apps and desktop packages exclude the fixture control implementation.
 Owned POSIX group liveness uses a kernel signal-zero probe; only ambiguous
-macOS `EPERM` requires a global process snapshot. An ordinary completed CLI
+macOS `EPERM` requires a targeted owned-process-group query. An ordinary completed CLI
 command must not depend on scanning every process on a loaded hosted runner.
 SDK processes explicitly disable the persistent MSBuild server
 (`DOTNET_CLI_USE_MSBUILD_SERVER=false`, `MSBUILDUSESERVER=0`). Structured

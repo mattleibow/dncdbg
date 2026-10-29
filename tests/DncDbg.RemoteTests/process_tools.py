@@ -25,10 +25,12 @@ def stop_owned(process, grace_period=1, settle_timeout=1):
             return False
         except PermissionError:
             # Some macOS/Python combinations report EPERM for vanished groups.
-            # Only that ambiguous case needs an independent system snapshot.
-            groups = subprocess.run(["ps", "-axo", "pgid="], check=True, capture_output=True,
-                                    text=True, timeout=5).stdout.split()
-            return str(process.pid) in groups
+            # Query only the owned group, not every process on a loaded runner.
+            probe = subprocess.run(["ps", "-g", str(process.pid), "-o", "pgid="], check=False,
+                                   capture_output=True, text=True, timeout=5)
+            if probe.returncode not in (0, 1) or probe.stderr.strip() or probe.returncode == 1 and probe.stdout.strip():
+                raise RuntimeError("Cannot independently verify the owned process group: " + probe.stderr.strip())
+            return str(process.pid) in probe.stdout.split()
 
     def signal_group(value):
         if value == 0:

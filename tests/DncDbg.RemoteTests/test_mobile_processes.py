@@ -61,9 +61,20 @@ class ProcessOwnershipTests(unittest.TestCase):
         with patch.object(validate.os, "killpg", side_effect=PermissionError(1, "Operation not permitted")), \
                 patch.object(validate.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, " 12\n 34\n", "")) as snapshot:
             validate.stop_owned(process)
-        snapshot.assert_called_with(["ps", "-axo", "pgid="], check=True, capture_output=True, text=True, timeout=5)
+        snapshot.assert_called_with(["ps", "-g", str(process.pid), "-o", "pgid="],
+                                    check=False, capture_output=True, text=True, timeout=5)
         self.assertEqual(snapshot.call_count, 2)
         process.wait.assert_called_once_with(timeout=1)
+
+    def test_exact_group_probe_accepts_only_verified_empty_group_not_a_probe_error(self):
+        process = Mock(pid=123456)
+        with patch.object(validate.os, "killpg", side_effect=PermissionError(1, "Operation not permitted")), \
+                patch.object(validate.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", "")):
+            validate.stop_owned(process)
+        with patch.object(validate.os, "killpg", side_effect=PermissionError(1, "Operation not permitted")), \
+                patch.object(validate.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", "probe failed")):
+            with self.assertRaises(RuntimeError):
+                validate.stop_owned(process)
 
     def test_live_group_eperm_is_not_ignored(self):
         process = Mock(pid=123456)

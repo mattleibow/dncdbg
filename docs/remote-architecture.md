@@ -1,173 +1,129 @@
-# Generic remote managed debugging
+# Remote debugging architecture
 
-The shared debugger is not a collection of separate Android/iOS engines.
-`RemoteSession` translates DAP to the generated typed model, `RemoteLifecycle`
-owns the remote session, and target/tunnel providers supply only platform
-lifecycle and routing. Desktop native hosting is the canonical fast proof;
-mobile adds packaging/startup and platform integration proof.
+Remote debugging has one execution controller and no platform-specific DAP engine:
 
 ```text
-dncdbg-dap (C#, .NET 10)
-  RemoteSession                 DAP IDs, source/PDB catalogs, typed operations
-    RemoteLifecycle             settle acquisition/cancel/restart/auth/cleanup
-      IRemoteTargetProvider     start/install/path/descriptor/stop
-      ITunnelProvider           owned host endpoint and transactional disposal
-        DirectLoopback | LocalTcpProxy | AdbForwardProvider | future Apple USB
-    RemoteDebugClient           the same framed/authenticated generated contract
-       -> target C++ agent      the same Bootstrap.cpp / RemoteModel.h
-          native owner thread   private DBI / ICorDebug / callback-stop leases
-          CoreCLR managed code
+dncdbg-dap (.NET 10, stdio DAP)
+  RemoteSession                 DAP handles, symbols, generated typed operations
+    RemoteLifecycle             acquisition, admission, cancellation, restart, exit
+      IRemoteTargetProvider     deployment, process, manifest, observation, cleanup
+      ITunnelProvider           owned loopback route and transport trust
+    RemoteDebugClient           authenticated bounded model/protocol
+       -> target-native agent   Bootstrap.cpp / generated RemoteModel.h
+          native owner thread   exact DBI/DAC, ICorDebug, callback-stop leases
+          CoreCLR application
 ```
 
-There is **one execution controller in the target**. The C# DAP host does not
-attach the ordinary desktop engine as a second controller. Unsupported remote
-requests fail explicitly, rather than falling back to desktop execution.
-Normal DNCDbg remains C#; the native code is an explicit Debug experimental
-target/provider fixture, absent from ordinary Release adapter artifacts.
+`DncDbg.Remote` contains neutral manifests, commands, SSH, transport and ownership
+contracts. It has no dependency on Android, Apple, MAUI, ClrDebug or the local
+engine. `DncDbg.Remote.Android` and `DncDbg.Remote.Apple` are separate thin
+host-side packages. `RemoteSession` and `RemoteLifecycle` contain no mobile paths,
+ADB, installation or simulator logic. The ordinary desktop engine is not attached
+as a second execution controller.
 
-## Provider responsibilities
+## Composition
 
-`IRemoteTargetProvider.AcquireAsync(sessionId, token)` performs target startup;
-`ReadDescriptorAsync` supplies only the platform-specific descriptor read.
-The core polls/parses that descriptor and enforces nonce/credential admission.
-The provider's close operation stops/releases only that target.
-Its optional `WaitForExitAsync` supplies an observed target exit code when the
-platform can obtain one; native hosting observes the actual owned OS process,
-not an assumed successful transport disconnect.
-`ITunnelProvider.OpenAsync(descriptor, token)` returns the
-owned host endpoint; it must preserve the target credential/session/process
-identity. The coordinator enforces that invariant.
+| Target | Responsibility | Route |
+|---|---|---|
+| Local native host | Start public nethost/hostfxr product host and observe its actual process | Direct loopback or owned TCP proxy |
+| Structured commands | Optional deploy/start, manifest read, process observation, stop and cleanup | Structured stdio command or managed loopback endpoint |
+| SSH | Fixed target controller, SFTP copy, exact identity and host key | Built-in encrypted `ssh -W` |
+| Android | SDK install/start/app-data ownership only | Transactional ADB forwarding |
+| Apple simulator | simctl install/start/app-data ownership only | Simulator loopback |
+| Physical device/vendor | Structured vendor controller and provisioned runtime/agent | USB helper or authenticated encrypted managed/command tunnel |
 
-The shared coordinator:
+Target and tunnel providers never implement stepping, inspection or evaluation.
+They expose a trusted `TargetProfile` and a version-1 `TargetManifest`. The shared
+lifecycle validates OS, architecture, exact runtime/DBI/DAC build IDs and code
+hashes, agent RID/build/content hash, protocol/model, capabilities, payload/PID,
+generation and transport requirements before authentication. Admission of unknown
+private ABI images is impossible through a self-declared vendor manifest.
 
-1. Creates a fresh session nonce and bounded acquisition cancellation source.
-2. Acquires the target, validates descriptor generation/port/credential shape,
-   acquires the owned route, and authenticates `RemoteDebugClient`.
-3. Checks provider/model version and exact target runtime/DBI/DAC identity and
-   code hashes. Product versions and matching filenames are insufficient.
-4. On close, cancels and **settles acquisition before taking the resource
-   snapshot**. It disconnects/disposes the client, disposes the owned tunnel and
-   closes the target with independent bounded cleanup budgets.
-5. On restart or reconnect after transport loss, creates a new target, endpoint,
-   credential, client and tunnel generation. DAP integer handles are invalidated
-   and never reused; source breakpoint request IDs remain stable.
+The separate `DncDbg.TargetHost` executable loads the agent before initializing
+the runtime. It supports a normal managed application's `Main` through public
+`hostfxr_initialize_for_dotnet_command_line` / `hostfxr_run_app`, as well as an
+explicitly named unmanaged-callable managed component. Payload execution waits
+for debugger configuration. The tests execute both paths; component fixtures
+provide additional long-lived commands and fault coverage.
 
-Shutdown signals the lifetime cancellation source **before** acquiring the
-state lock held by synchronous inspection RPCs. The blocked operation is
-interrupted first; the existing acquisition/close ownership gates then settle
-and clean the session once. Terminate cannot wait for an inspection's RPC
-deadline before it becomes able to cancel that inspection.
+## Ownership and cancellation
 
-Attached natural completion is a separate path from EOF or detach. The native
-embedding caller publishes completion through `dncdbg_complete(exitCode)` and
-holds the runtime alive while the owner publishes the typed exit event and
-settles disconnect/DBI cleanup. The lifecycle closes the route, observes the
-provider's actual process exit, then emits DAP `exited` followed by `terminated`
-exactly once. Unknown mobile exit codes remain unknown; abrupt EOF is not
-silently reclassified as successful completion.
+Every launch creates a new 32-hex generation and random credential. Target,
+tunnel and DAP handles belong to that generation. Restart/reconnect acquires new
+providers/routes/credentials; old stack/value/module handles are invalidated and
+never reused. Source breakpoint request IDs remain stable.
 
-Providers do not implement shared stepping/inspection/evaluation or transport
-authentication:
+Acquisition records action intent before invoking a structured command. The
+owner-only journal retains executable/argv, environment **names**, settlement and
+owned command PIDs, never environment values, stdin or bearer tokens. Command
+arguments are not a place for secrets.
 
-| Provider | Responsibility |
-|---|---|
-| `NativeHostProvider` | Public nethost/hostfxr C++ fixture process, scoped descriptor/log discovery and stop/reap |
-| `MobileTargetProvider` | Exact simctl/ADB install, launch, app-data paths, markers and owned app cleanup |
-| `DirectLoopback` | Local native host / iOS simulator loopback; no tunnel process or forwarding state |
-| `LocalTcpProxy` | Real dynamic localhost listener, bidirectional forwarding, partial writes, half-close, bounded buffers and cancellation |
-| `AdbForwardProvider` | Android CLI syntax/parsing and transactional daemon mapping ownership |
-| future Apple USB | Explicitly unavailable today; no physical-device claim or silent direct fallback |
+Terminate cancels the control/lifetime path **before** waiting for the state lock
+used by synchronous inspection. Acquisition settles before cleanup snapshots are
+taken. The client, route, target stop and deployment cleanup settle through
+idempotent gates with independent bounded cleanup budgets. A failure is an error,
+not a successful detach or hidden emergency cleanup.
 
-Android allocates `tcp:0` using a unique staging nonce, then rebinds only that
-acquired port to the target's ephemeral listener. Lost allocation/rebind replies
-are recovered transactionally by the exact serial/nonce; unrelated mappings are
-never reset. This is Android-specific plumbing, not a second debugger model.
-ADB command fakes verify syntax, parsing and committed-daemon rollback; the
-generic lifecycle and tunnel invariants additionally run against real sockets
-and the real target agent.
+`dncdbg-target-control` owns a detached device worker and the actual `Process`
+object, not a guessed guest PID. It validates the deployed inventory, records the
+process before acknowledging start, observes its real exit code, and kills/reaps
+that exact child if publication or diagnostic capture fails. After the application
+exits it erases credentials and its bundle, including after adapter detach. It
+retains nonsecret ownership/exit/log/result records for recovery. An explicit
+stop request is generation-bound. Recovery never signals a recycled PID.
 
-## Local correctness before mobile CI
+An owned command provider must define `stop` and `observe`; deployment must define
+`cleanup`. A custom vendor controller must preserve these semantics, including
+autonomous cleanup when a detached application eventually exits. Merely launching
+a background shell process does not satisfy the ownership contract.
 
-Run the [native-host architecture suite](../tests/DncDbg.NativeHostTests/README.md):
+## Completion is not transport failure
 
-```sh
-dotnet run --project tests/DncDbg.NativeHostTests -c Release
-```
+Attached natural completion is distinct from EOF, detach and terminate. The
+native embedding host publishes `dncdbg_complete(exitCode)` while its native owner
+is alive. The owner publishes the typed exit event and settles DBI cleanup.
+The lifecycle disposes the route and observes the provider's actual OS exit code,
+then DAP emits `exited`, followed by `terminated`, exactly once. Abrupt target EOF
+does not manufacture exit code zero; unknown mobile exit codes remain unknown.
 
-It uses public `get_hostfxr_path`, `hostfxr_initialize_for_runtime_config` and
-`hostfxr_get_runtime_delegate`, loading the **same target agent before runtime
-initialization** and holding the user payload until native debugger startup.
-The host then calls a managed entrypoint and proves return into C++.
-`hostfxr` can execute framework initialization internally; the proof does not
-mislabel that as “no managed instruction anywhere before attach.”
+Debuggee detach releases the callback stop and debugger owner, leaving the
+application usable. The provider does not kill a detached application or remove a
+bundle it is still executing. The target worker removes deployment assets only
+after process exit.
 
-Both direct and actual TCP-proxy paths go through `dncdbg-dap`, not only a
-direct client. They prove source breakpoints, stack/scopes/primitive/string/
-array/object inspection, safe evaluation, stepping, CLR exceptions, pause,
-restart/reconnect, stale-handle/client rejection, stopped detach, termination,
-target EOF and exact-once native cleanup. Real network contracts cover
-fragmentation, half-close, backpressure, connection refusal/timeouts, listener
-allocation/cancellation/collision and disposal races. Debug-only fault gates
-cancel a real allocated-but-unpublished listener and kill the real route while
-the target is running/stopped.
+## Transport trust
 
-The same suite runs on normal macOS/Linux CI and inside the **existing required
-Docker integration gate**. No mobile SDK/workload/device is necessary. A change
-to target bootstrap, generated contract/model or generic lifecycle must run this
-gate; mobile CI is not the sole oracle for debugger correctness.
+The authenticated protocol is **not encryption**. Raw TCP is loopback-only.
+Non-loopback target access requires a derived authenticated SSH route or an
+explicitly configured secure external transport terminating on local loopback.
+There is no arbitrary plaintext host/port option. An externally managed transport
+is a trusted provisioning assertion, not a TLS implementation in DNCDbg.
 
-Mobile testing remains a separate [single entrypoint](../tests/DncDbg.MobileTests/README.md).
-It proves fixture packaging, Debug-only startup, exact device runtime admission,
-ADB/direct routing, DevFlow app/process identity and owned device cleanup.
-Existing comprehensive device assertions remain; generic correctness is now
-proved headlessly first. DevFlow 9223 (Android) and broker 19223 are **UI-only**,
-never debugger routes. iOS UI ports/session metadata are run-scoped to avoid
-colliding with another app or ADB forward.
+SSH uses explicit identity and known-host files, strict host-key checking,
+noninteractive authentication, disabled ambient config/agent forwarding, modern
+SFTP `scp`, and a fixed validated absolute controller executable. JSON is sent
+through stdin; no caller-generated remote shell command is constructed. `ssh -W`
+opens only the exact target loopback port. Its local listener/child process,
+half-closes, cancellation and reaping use the common stdio tunnel.
 
-## Exact private ABI and native-code boundary
+ADB allocation first reserves a dynamic daemon mapping with a unique staging
+nonce and rebinds only that acquired mapping. Lost replies are recovered using
+the exact device/nonce; unrelated mappings are never reset. Physical network ADB
+requires explicit paired TLS, not `adb tcpip`.
 
-`PrivateBootstrapPolicy.SupportedBuilds` retains the two original arm64 mobile
-tuples and separately admits Android x64 for hosted Linux/KVM proof.
-`NativeHostBuilds` separately admits the SHA-locked .NET 11 RC1 desktop
-runtime/DBI/DAC tuples for macOS arm64 and Linux x64/arm64. A desktop tuple cannot
-pass the iOS/Android identity check. No nearest-version, desktop-DBI-for-mobile,
-Mono, NativeAOT or physical-device fallback is allowed.
+## Validation and packaging
 
-The private path remains `DllMain` / `CoreCLRCreateCordbObject3`; public hosting
-APIs do **not** make this private debugger startup a supported public ABI.
-The agent exports its compiled generated model version, and both native host
-and mobile startup reject mismatched/old helpers before payload execution.
-Native startup also rejects a capability document with a different model version.
+The normal solution requires no mobile workload. Normal CI runs neutral contracts,
+the existing desktop proof/smoke/acceptance suite, and artifact-isolation checks.
+The remote workflow requires the same real native host on Linux/macOS and a real
+Linux x64 Docker device through both structured commands and SSH. Local Docker
+arm64 runs the same proof. Mobile adds real pinned Android/iOS deployment,
+DevFlow identity/interaction, fault and cleanup proofs, not a replacement engine.
 
-Target-native code is necessary for pre-user-managed startup hooks/private ABI
-access and an independent execution thread: a managed execution owner cannot
-reliably resume itself when all managed threads are suspended. Only explicit
-Debug fixtures build/link the C++ agent. Release configuration ignores mobile,
-watchdog and remote-test-hook opt-ins; CI inspects the actual desktop publish
-output and mobile Release packages. Stock CLR/dbgshim/PDB-reader native
-dependencies are still permitted.
+The upstream `test-suite` executable/assertion sources remain unchanged.
+Release adapters and managed provider packages cannot contain target-native
+agents or test hooks. Target agents/hosts/controllers are explicit RID assets
+published separately with an integrity inventory. Fault injection is compiled
+only into internal Debug test artifacts and rejected for Release.
 
-## Reference comparison (not protocol compatibility)
-
-- [JaneySprings/clrdbg at bb5e52b7](https://github.com/JaneySprings/clrdbg/tree/bb5e52b7d0fdef874288a46a4a2aa0f1643e37d7/DotNet.Debugging.Remote)
-  separates a **C++ target agent**
-  ([Target](https://github.com/JaneySprings/clrdbg/tree/bb5e52b7d0fdef874288a46a4a2aa0f1643e37d7/DotNet.Debugging.Remote/Target))
-  and a **NativeAOT shared host proxy**
-  ([host project](https://github.com/JaneySprings/clrdbg/blob/bb5e52b7d0fdef874288a46a4a2aa0f1643e37d7/DotNet.Debugging.Remote/Host/DotNet.Debugging.Remote.csproj)).
-  Android uses ADB Forward, iOS device routing uses an Apple TCP/USB tunnel
-  (`TcpTunnel`), and the simulator can use direct networking. Those are transport
-  choices, not separate debugger semantics. DNCDbg follows the target/host and
-  lease/ownership separation but keeps its host in ordinary C#, with a **closed
-  typed operation model**, not Janey's arbitrary COM/vtable proxy generator or
-  wire protocol. Prior MIT adaptation attribution remains in
-  `THIRD-PARTY-NOTICES.md`; no interoperability claim is made.
-- [dotnet/android tracing/deployment](https://github.com/dotnet/android/blob/main/Documentation/guides/tracing.md)
-  configures packaging, diagnostic ports and `dotnet-dsrouter`. Those transport
-  **EventPipe diagnostics**, not `ICorDebug` execution control.
-- Runtime supplies DBI/DAC and the
-  [official mobile initialization API guidance](https://learn.microsoft.com/dotnet/core/unmanaged-api/debugging/initialize-debugger-mobile).
-  Visual Studio's `vsdbg` remote debugger components/proxy protocol are separate
-  from Android packaging tooling; DNCDbg does not redistribute proprietary
-  `vsdbgremotecoreclrtarget`/`remotemscordbihost` binaries or claim their protocol.
-- Public hosting reference:
-  [.NET native hosting](https://learn.microsoft.com/dotnet/core/tutorials/netcore-hosting).
+See [configuration, provisioning, support and migration](remote-devices.md).

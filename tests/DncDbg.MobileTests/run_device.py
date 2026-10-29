@@ -14,7 +14,7 @@ import threading
 import time
 
 from mobile_tools import adb_path, tool_environment
-from test_dap import Dap, ROOT
+from test_dap import Dap, ROOT, remote_launch
 
 
 def copy_debug_assets(source, destination):
@@ -22,6 +22,7 @@ def copy_debug_assets(source, destination):
     for name in ("DncDbg.MauiTestApp", "DncDbg.ReloadFixture"):
         for extension in ("dll", "pdb"):
             shutil.copyfile(source / f"{name}.{extension}", destination / f"{name}.{extension}")
+    shutil.copyfile(source / "dncdbg-agent.json", destination / "dncdbg-agent.json")
     return destination
 
 
@@ -130,11 +131,11 @@ def main():
 
     def native_report():
         if args.platform == "android":
-            result = device("exec-out", "run-as", "com.dncdbg.mobiletests", "cat", "files/dncdbg-private-startup.jsonl", check=False)
+            result = device("exec-out", "run-as", "com.dncdbg.mobiletests", "cat", "files/dncdbg-startup.jsonl", check=False)
             return result.stdout
         container = subprocess.run(["xcrun", "simctl", "get_app_container", args.device,
                                     "com.dncdbg.mobiletests", "data"], capture_output=True, text=True, timeout=15)
-        path = Path(container.stdout.strip()) / "Library/dncdbg-private-startup.jsonl"
+        path = Path(container.stdout.strip()) / "Library/dncdbg-startup.jsonl"
         return path.read_text() if container.returncode == 0 and path.exists() else ""
 
     source = ROOT / "tests/DncDbg.MauiTestApp/MainPage.xaml.cs"
@@ -142,11 +143,12 @@ def main():
     deep_line = next(i + 1 for i, text in enumerate(source.read_text().splitlines()) if "// MOBILE_DEEP_BREAKPOINT:" in text)
     try:
         dap.request("initialize", {"adapterID": "dncdbg", "linesStartAt1": True, "columnsStartAt1": True})
-        launch = dap.send("launch", {"mobile": {
+        launch = dap.send("launch", remote_launch({
             "platform": args.platform, "appPath": str(args.app.resolve()), "applicationId": "com.dncdbg.mobiletests",
             "deviceId": args.device, "assetsPath": str(assets.resolve()),
             "runtimeIdentifier": args.runtime_identifier or ("android-arm64" if args.platform == "android" else "iossimulator-arm64"),
-            "replaceExisting": False, "uninstallOnDisconnect": False, "startupTimeoutSeconds": 90}})
+            "replaceExisting": False, "uninstallOnDisconnect": False, "startupTimeoutSeconds": 90,
+            "outputPath": str(args.output / "targets")}))
         breakpoint = dap.request("setBreakpoints", {"source": {"path": str(source)},
                                                   "breakpoints": [{"line": line}, {"line": deep_line}]})["breakpoints"][0]
         reload_source = ROOT / "tests/DncDbg.ReloadFixture/ReloadScenario.cs"

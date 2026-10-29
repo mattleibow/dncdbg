@@ -20,11 +20,11 @@ ROOT = Path(__file__).resolve().parents[2]
 ADAPTER = ROOT / "src/DncDbg.Dap/bin/Release/net10.0/dncdbg-dap.dll"
 IDENTITIES = {
     "AndroidX64": [
-        "AndroidEmulator", "A3ABA7AECC5E3B02CEF376BA080FEEFD5D3C992F", "CEB01AE9B0CCCE2437C768CB2EE1BE0E719D6B60903F5521AEDFA1C7D16FD736",
+        "Android", "A3ABA7AECC5E3B02CEF376BA080FEEFD5D3C992F", "CEB01AE9B0CCCE2437C768CB2EE1BE0E719D6B60903F5521AEDFA1C7D16FD736",
         "6182AB42360380FF67C9F829EBCEBEFE500D51D2", "911AEE78E1143BD419228C4D2B768DE7092DEC2586867AF07CB08F274935C3A1",
         "7EB51F456695097C1DCD69996D6929B605F9685A", "FD0CA02BF29CB75A23C7E96F53E1B10CAFB5ED0829A9DD39E3C7AB1C20B8C6E8"],
     "Android": [
-        "AndroidEmulator", "F741D77EAE68D01DA37161129423DEC3AA9DFBF9", "E2FAE5E1F10FA61CDE54D9CC8E6E4537C3EDCE24B8E0216E078F655B04EACC92",
+        "Android", "F741D77EAE68D01DA37161129423DEC3AA9DFBF9", "E2FAE5E1F10FA61CDE54D9CC8E6E4537C3EDCE24B8E0216E078F655B04EACC92",
         "25A4607527A49B76F797C582AFB6D45338D2DB85", "363A647DCADB9D8200F2098B9C4313A6EC38735D970B6F2890D7A9951932A52A",
         "5A52173745A3C9B69D48A6A27B9E045C5DEAC1B4", "7956F691D19540801FC55E91D7F2F7258E26C0107C3F7E2B8AF709850E0AA3DB"],
     "iOS": [
@@ -32,6 +32,39 @@ IDENTITIES = {
         "E5520AE2A6593A3A9CBE2DD3B8B60DA7", "A6D01239286F0141DC3D6A90E425C022F96340CA052B41757D2AB26CC84FC0DC",
         "2267F3F5CDC63995B4E0D3B89F52C148", "81CB0104D53425EC22F006C382D706370C4B2A5A99A54FE816866C25ACF06928"],
 }
+
+FEATURES = ["sourceBreakpoints", "threads", "modules", "scopes", "variables", "safeEvaluate",
+            "pause", "stepIn", "next", "stepOut", "exceptions"]
+
+
+def fake_agent(rid):
+    return {"Name": "dncdbg-target", "Rid": rid, "ProtocolVersion": 1, "ModelVersion": 5,
+            "BuildId": "b" * 64, "Sha256": "c" * 64}
+
+
+def fake_profile(platform):
+    identity = dict(zip(["Platform", "RuntimeBuildId", "RuntimeHash", "DbiBuildId", "DbiHash", "DacBuildId", "DacHash"],
+                        IDENTITIES[platform]))
+    identity |= {"Architecture": "X64" if platform == "AndroidX64" else "Arm64",
+                 "RuntimeVersion": "11.0.0-rc.1.26425.128"}
+    rid = "android-x64" if platform == "AndroidX64" else "android-arm64" if platform == "Android" else "iossimulator-arm64"
+    return {"SchemaVersion": 1, "Os": "ios" if platform == "iOS" else "android",
+            "Architecture": identity["Architecture"].lower(), "Runtime": identity, "Agent": fake_agent(rid), "Capabilities": FEATURES}
+
+
+def remote_launch(options):
+    options = dict(options)
+    platform = options.pop("platform")
+    assets = options.pop("assetsPath")
+    output = options.pop("outputPath", str(ROOT / "build/remote-sessions" / uuid.uuid4().hex))
+    tunnel = options.pop("tunnel", None)
+    timeout = options.pop("startupTimeoutSeconds", 60)
+    provider = options.pop("provider", "android" if platform == "android" else "appleSimulator")
+    remote = {"assetsPath": assets, "outputPath": output, "startupTimeoutSeconds": timeout,
+              "target": {"provider": provider, "android" if platform == "android" else "apple": options}}
+    if tunnel is not None:
+        remote["tunnel"] = tunnel
+    return {"remote": remote}
 
 
 def tool():
@@ -56,14 +89,18 @@ def tool():
     if "launch" in args or ("start" in args and "--es" in args):
         endpoint = json.loads((state / "endpoint.json").read_text())
         endpoint["SessionId"] = os.environ.get("SIMCTL_CHILD_DNCDBG_SESSION_ID") or args[-1]
+        endpoint["Endpoint"]["SessionId"] = endpoint["SessionId"]
+        endpoint["Process"]["OwnershipId"] = endpoint["SessionId"]
         (state / "endpoint.json").write_text(json.dumps(endpoint))
         (state / "Library/dncdbg-remote.json").write_text(json.dumps(endpoint))
     if "forward" in args and "--remove" not in args:
-        print(json.loads((state / "endpoint.json").read_text())["Port"])
+        print(json.loads((state / "endpoint.json").read_text())["Endpoint"]["Port"])
     elif "cat" in args:
         path = state / ("endpoint.json" if args[-1].endswith("dncdbg-remote.json") else Path(args[-1]).name)
         if path.exists():
             print(path.read_text())
+        elif "exec-out" in args:
+            print("cat: " + args[-1] + ": No such file or directory")
     elif "path" in args and (state / "installed").exists():
         print("package:/data/app/com.dncdbg.mobiletests/base.apk")
     elif "get_app_container" in args:
@@ -85,9 +122,12 @@ class Remote:
         self.listener.bind(("127.0.0.1", 0))
         self.listener.listen()
         self.endpoint = {"Port": self.listener.getsockname()[1], "Token": "a" * 64, "ProcessId": 123}
-        (state / "endpoint.json").write_text(json.dumps(self.endpoint))
+        manifest = {"SchemaVersion": 1, "SessionId": "", "Profile": fake_profile(platform),
+                    "Process": {"Id": 123, "Payload": "fixture.dll", "OwnershipId": ""},
+                    "Endpoint": self.endpoint, "Transport": {"Host": "127.0.0.1", "RequiresEncryption": False}}
+        (state / "endpoint.json").write_text(json.dumps(manifest))
         (state / "Library").mkdir(exist_ok=True)
-        (state / "Library/dncdbg-remote.json").write_text(json.dumps(self.endpoint))
+        (state / "Library/dncdbg-remote.json").write_text(json.dumps(manifest))
         self.platform = platform
         self.model_version = model_version
         self.start_error = start_error
@@ -128,7 +168,7 @@ class Remote:
                         result = {
                             "Runtime": "explicit test fake", "Platform": self.platform,
                             "ManagedDebugging": True, "Blocker": None, "ModelVersion": self.model_version,
-                            "Provider": "private-coreclr", "Bootstrap": "private-dbi-v1 (experimental; runtime-version-fragile)",
+                            "Provider": "coreclr", "Bootstrap": "coreclr-dbi-v1",
                             "SupportedBuild": dict(zip(
                                 ["Platform", "RuntimeBuildId", "RuntimeHash", "DbiBuildId", "DbiHash", "DacBuildId", "DacHash"],
                                 identity)) | {"Architecture": "X64" if self.platform == "AndroidX64" else "Arm64",
@@ -284,6 +324,10 @@ class MobileDapTests(unittest.TestCase):
             path.chmod(0o755)
         (self.state / "fixture.apk").touch()
         (self.state / "Fixture.app").mkdir()
+        (self.state / "assets").mkdir()
+        for extension in ("dll", "pdb"):
+            shutil.copyfile(ROOT / "tests/RemoteBreakpointApp/bin/Release/net10.0" / ("RemoteBreakpointApp." + extension),
+                            self.state / "assets" / ("RemoteBreakpointApp." + extension))
         self.env = {**os.environ, "PATH": str(self.state / "tools") + os.pathsep + os.environ["PATH"],
                     "DNCDBG_FAKE_DEVICE": str(self.state)}
         self.dap = Dap(self.env)
@@ -304,12 +348,16 @@ class MobileDapTests(unittest.TestCase):
                   "applicationId": "com.dncdbg.mobiletests",
                   "deviceId": "emulator-5556" if platform == "android" else "test-simulator",
                   "runtimeIdentifier": "android-arm64" if platform == "android" else "iossimulator-arm64",
-                  "assetsPath": str(ROOT / "tests/RemoteBreakpointApp/bin/Release/net10.0"),
+                  "assetsPath": str(self.state / "assets"),
                   "uninstallOnDisconnect": True}
+
+    def arguments(self, options):
+        (self.state / "assets/dncdbg-agent.json").write_text(json.dumps(fake_agent(options["runtimeIdentifier"])))
+        return remote_launch(options)
 
     def launch(self, platform):
         self.remote = Remote(self.state, "Android" if platform == "android" else "iOS")
-        launch = self.dap.send("launch", {"mobile": self.options(platform)})
+        launch = self.dap.send("launch", self.arguments(self.options(platform)))
         self.dap.request("setExceptionBreakpoints", {"filters": ["all"]})
         self.dap.request("configurationDone")
         self.dap.response(launch)
@@ -351,7 +399,7 @@ class MobileDapTests(unittest.TestCase):
 
     def test_android_x64_uses_the_same_mobile_provider(self):
         self.remote = Remote(self.state, "AndroidX64")
-        launch = self.dap.send("launch", {"mobile": self.options("android") | {"runtimeIdentifier": "android-x64"}})
+        launch = self.dap.send("launch", self.arguments(self.options("android") | {"runtimeIdentifier": "android-x64"}))
         self.dap.request("setExceptionBreakpoints", {"filters": []})
         self.dap.request("configurationDone")
         self.dap.response(launch)
@@ -362,7 +410,7 @@ class MobileDapTests(unittest.TestCase):
 
     def test_android_x64_rejects_an_arm64_target_identity(self):
         self.remote = Remote(self.state, "Android")
-        launch = self.dap.send("launch", {"mobile": self.options("android") | {"runtimeIdentifier": "android-x64"}})
+        launch = self.dap.send("launch", self.arguments(self.options("android") | {"runtimeIdentifier": "android-x64"}))
         self.dap.response(launch, success=False)
 
     def test_terminate_interrupts_a_blocked_inspection_before_taking_the_state_lock(self):
@@ -433,7 +481,7 @@ class MobileDapTests(unittest.TestCase):
 
     def test_source_breakpoint_verification_events_keep_dap_identity(self):
         self.remote = Remote(self.state, "Android")
-        launch = self.dap.send("launch", {"mobile": self.options("android")})
+        launch = self.dap.send("launch", self.arguments(self.options("android")))
         source = ROOT / "tests/RemoteBreakpointApp/Program.cs"
         line = next(i + 1 for i, text in enumerate(source.read_text().splitlines()) if "// REMOTE_BREAKPOINT" in text)
         breakpoint = self.dap.request("setBreakpoints", {"source": {"path": str(source)},
@@ -449,7 +497,7 @@ class MobileDapTests(unittest.TestCase):
 
     def test_module_reload_and_context_stops_keep_source_breakpoint_identity(self):
         self.remote = Remote(self.state, "Android")
-        launch = self.dap.send("launch", {"mobile": self.options("android")})
+        launch = self.dap.send("launch", self.arguments(self.options("android")))
         source = ROOT / "tests/RemoteBreakpointApp/Program.cs"
         line = next(i + 1 for i, text in enumerate(source.read_text().splitlines()) if "// REMOTE_BREAKPOINT" in text)
         bp = self.dap.request("setBreakpoints", {"source": {"path": str(source)},
@@ -495,14 +543,30 @@ class MobileDapTests(unittest.TestCase):
         self.dap.event("module")
         self.assertFalse(any(m.get("event") == "breakpoint" for m in self.dap.history))
 
-    def test_physical_android_rejected_before_deployment(self):
-        options = self.options("android") | {"deviceId": "physical-device"}
-        self.dap.request("launch", {"mobile": options}, success=False)
+    def test_plaintext_network_adb_rejected_before_deployment(self):
+        options = self.options("android") | {"deviceId": "192.0.2.1:5555"}
+        self.dap.request("launch", self.arguments(options), success=False)
+        self.assertFalse((self.state / "commands.jsonl").exists())
+
+    def test_usb_android_serial_uses_the_same_qualified_provider(self):
+        self.remote = Remote(self.state, "Android")
+        pending = self.dap.send("launch", self.arguments(self.options("android") | {"deviceId": "usb-serial-01"}))
+        self.dap.request("configurationDone")
+        self.dap.response(pending)
+        self.dap.event("stopped")
+        self.dap.request("disconnect")
+        self.dap.event("terminated")
+
+    def test_legacy_mobile_and_opt_in_flags_are_explicit_errors(self):
+        self.dap.request("launch", {"mobile": self.options("android")}, success=False)
+        arguments = self.arguments(self.options("android"))
+        arguments["remote"]["experimental"] = True
+        self.dap.request("launch", arguments, success=False)
         self.assertFalse((self.state / "commands.jsonl").exists())
 
     def test_model_mismatch_cleans_owned_device_route(self):
         self.remote = Remote(self.state, "Android", model_version=99)
-        self.dap.request("launch", {"mobile": self.options("android")}, success=False)
+        self.dap.request("launch", self.arguments(self.options("android")), success=False)
         self.assertEqual(self.remote.operations, [1, 9])
         commands = [json.loads(x) for x in (self.state / "commands.jsonl").read_text().splitlines()]
         self.assertTrue(any("forward" in c and "--remove" in c for c in commands))
@@ -510,7 +574,7 @@ class MobileDapTests(unittest.TestCase):
 
     def test_native_start_failure_cleans_before_dap_disconnect(self):
         self.remote = Remote(self.state, "Android", start_error="CorDebugCallFailed")
-        launch = self.dap.send("launch", {"mobile": self.options("android")})
+        launch = self.dap.send("launch", self.arguments(self.options("android")))
         self.dap.request("configurationDone", success=False)
         self.dap.response(launch, success=False)
         commands = [json.loads(x) for x in (self.state / "commands.jsonl").read_text().splitlines()]
@@ -518,15 +582,15 @@ class MobileDapTests(unittest.TestCase):
         self.assertTrue(any("uninstall" in c for c in commands))
 
     def test_official_provider_never_falls_back_to_private(self):
-        self.dap.request("launch", {"mobile": self.options("android") | {"provider": "remotemscordbihost"}}, success=False)
+        self.dap.request("launch", self.arguments(self.options("android") | {"provider": "remotemscordbihost"}), success=False)
         self.assertFalse((self.state / "commands.jsonl").exists())
 
     def test_unknown_tunnel_never_deploys(self):
-        self.dap.request("launch", {"mobile": self.options("android") | {"tunnel": {"provider": "physical-device"}}}, success=False)
+        self.dap.request("launch", self.arguments(self.options("android") | {"tunnel": {"provider": "unknown-route"}}), success=False)
         self.assertFalse((self.state / "commands.jsonl").exists())
 
     def test_desktop_environment_options_are_not_silently_ignored(self):
-        self.dap.request("launch", {"mobile": self.options("android"), "env": {"IGNORED": "not-allowed"}}, success=False)
+        self.dap.request("launch", self.arguments(self.options("android")) | {"env": {"IGNORED": "not-allowed"}}, success=False)
         self.assertFalse((self.state / "commands.jsonl").exists())
 
     def test_eof_releases_owned_forward(self):
@@ -552,7 +616,7 @@ class MobileDapTests(unittest.TestCase):
             self.old_remote = self.remote
         self.remote = Remote(self.state, "Android" if platform == "android" else "iOS")
         (self.state / "block-install").touch()
-        acquisition = self.dap.send("restart") if restart else self.dap.send("launch", {"mobile": self.options(platform)})
+        acquisition = self.dap.send("restart") if restart else self.dap.send("launch", self.arguments(self.options(platform)))
         self.wait_for_install()
         command_count = len(self.commands())
         before = time.monotonic()
@@ -586,8 +650,8 @@ class MobileDapTests(unittest.TestCase):
 
     def default_restart(self, platform):
         self.remote = Remote(self.state, "Android" if platform == "android" else "iOS")
-        launch = self.dap.send("launch", {"mobile": self.options(platform) | {
-            "replaceExisting": False, "uninstallOnDisconnect": False}})
+        launch = self.dap.send("launch", self.arguments(self.options(platform) | {
+            "replaceExisting": False, "uninstallOnDisconnect": False}))
         self.dap.request("configurationDone")
         self.dap.response(launch)
         self.dap.event("stopped")
@@ -609,7 +673,7 @@ class MobileDapTests(unittest.TestCase):
         for platform in ("android", "iosSimulator"):
             with self.subTest(platform=platform):
                 (self.state / "installed").touch()
-                self.dap.request("launch", {"mobile": self.options(platform)}, success=False)
+                self.dap.request("launch", self.arguments(self.options(platform)), success=False)
         self.assertFalse(any("install" in c for c in self.commands()))
 
     def test_restart_rejects_lost_installation_identity_on_both_platforms(self):
@@ -620,7 +684,7 @@ class MobileDapTests(unittest.TestCase):
                 self.dap = Dap(self.env)
                 self.dap.request("initialize", {"adapterID": "dncdbg"})
                 self.remote = Remote(self.state, "Android" if platform == "android" else "iOS")
-                launch = self.dap.send("launch", {"mobile": self.options(platform) | {"uninstallOnDisconnect": False}})
+                launch = self.dap.send("launch", self.arguments(self.options(platform) | {"uninstallOnDisconnect": False}))
                 self.dap.request("configurationDone")
                 self.dap.response(launch)
                 self.dap.event("stopped")
@@ -664,7 +728,7 @@ class MobileDapTests(unittest.TestCase):
     def daemon_launch(self, mode):
         self.remote = Remote(self.state, "Android")
         self.daemon = FakeAdbDaemon(self.state, mode)
-        return self.dap.send("launch", {"mobile": self.options("android")})
+        return self.dap.send("launch", self.arguments(self.options("android")))
 
     def assert_exact_rollback(self):
         self.assertEqual(self.daemon.mappings(), self.daemon.baseline)
@@ -778,7 +842,7 @@ daemon(state, sys.argv[2])
         for stage in ("allocation", "rebind"):
             state = self.state / stage
             state.mkdir()
-            (state / "endpoint.json").write_text(json.dumps({"Port": 34567}))
+            (state / "endpoint.json").write_text(json.dumps({"Endpoint": {"Port": 34567}}))
             process = subprocess.Popen([sys.executable, "-c", script, str(state), "hold-" + stage],
                                        cwd=Path(__file__).parent)
             def wait_file(name):

@@ -96,6 +96,11 @@ class Proof:
         self.run("dotnet", "tests/DncDbg.RemoteTests/bin/Release/net10.0/DncDbg.RemoteTests.dll",
                  "--native-host-capabilities", self.runtime)
         self.run("dotnet", "build", HERE / "Payload/Payload.csproj", "-c", "Debug", "--nologo", "-v:q")
+        application = self.bin / "application"
+        self.run("dotnet", "publish", ROOT / "tests/RemoteBreakpointApp", "-c", "Debug",
+                 "--artifacts-path", self.output / "application-compilation", "-o", application, "--nologo", "-v:q")
+        (application / "RemoteBreakpointApp.runtimeconfig.json").write_text(json.dumps({"runtimeOptions": {
+            "tfm": "net11.0", "framework": {"name": "Microsoft.NETCore.App", "version": LOCK["version"]}}}))
         metadata = json.loads(self.run("dotnet", "msbuild", HERE / "Payload/Payload.csproj",
                                       "-getProperty:NetCoreRoot", "-getItem:KnownAppHostPack"))
         pack = next(item for item in metadata["Items"]["KnownAppHostPack"] if item["TargetFramework"] == "net10.0")
@@ -105,6 +110,7 @@ class Proof:
                 "public nethost/hostfxr SDK headers and static library are available")
         self.run(sys.executable, "src/DncDbg.Remote.Target/build.py", self.rid)
         shutil.copy2(ROOT / "build/native-private" / self.rid / self.agent.name, self.agent)
+        shutil.copy2(ROOT / "build/native-private" / self.rid / "dncdbg-agent.json", self.bin / "dncdbg-agent.json")
         require(b"dncdbg_test_stall_owner" not in self.agent.read_bytes(), "ordinary native host agent excludes watchdog fault export")
         command = ["c++", "-std=c++17", "-O0", "-g", "-Wall", "-Wextra", "-Werror",
                    "-I", headers, "-I", ROOT / "build/native-private/deps",
@@ -113,11 +119,11 @@ class Proof:
         self.run(*command)
         self.adapter = self.bin / "release-adapter/dncdbg-dap.dll"
         self.run("dotnet", "publish", ROOT / "src/DncDbg.Dap", "-c", "Release",
-                 "-p:EnableExperimentalRemoteTestHooks=true", "--artifacts-path", self.output / "release-compilation",
+                 "-p:DncDbgTestHooks=true", "--artifacts-path", self.output / "release-compilation",
                  "-o", self.adapter.parent, "--nologo", "-v:q")
         self.run(sys.executable, "tests/DncDbg.RemoteTests/assert_artifacts.py", self.adapter.parent)
         self.run("dotnet", "publish", ROOT / "src/DncDbg.Dap", "-c", "Debug",
-                 "-p:EnableExperimentalRemoteTestHooks=true", "--artifacts-path", self.output / "compilation",
+                 "-p:DncDbgTestHooks=true", "--artifacts-path", self.output / "compilation",
                  "-o", self.fault_adapter.parent, "--nologo", "-v:q")
         self.run("dotnet", "tests/DncDbg.RemoteTests/bin/Release/net10.0/DncDbg.RemoteTests.dll", "--tunnel-contracts")
         self.checks.append("real-tcp-provider-contracts")
@@ -125,12 +131,17 @@ class Proof:
         self.run(sys.executable, "src/DncDbg.Remote.Target/build.py", "--test-host")
 
     def options(self, directory, provider, gate=None, listen=0):
-        tunnel = {"provider": provider, "writeChunkBytes": 3 if provider == "localTcpProxy" else 4096, "listenPort": listen}
+        tunnel = {"provider": "proxy" if provider == "localTcpProxy" else "loopback",
+                  "writeChunkBytes": 3 if provider == "localTcpProxy" else 4096}
+        if listen:
+            tunnel["listenPort"] = listen
         if gate:
             tunnel["testGateDirectory"] = str(gate)
-        return {"hostPath": str(self.host), "agentPath": str(self.agent), "assemblyPath": str(self.payload / "Payload.dll"),
-                "runtimeDirectory": str(self.runtime), "assetsPath": str(self.payload),
-                "outputPath": str(directory / "targets"), "tunnel": tunnel, "startupTimeoutSeconds": 30}
+        return {"assetsPath": str(self.payload), "outputPath": str(directory / "targets"), "tunnel": tunnel,
+                "startupTimeoutSeconds": 30, "target": {"provider": "nativeHost", "nativeHost": {
+                    "hostPath": str(self.host), "agentPath": str(self.agent), "assemblyPath": str(self.payload / "Payload.dll"),
+                    "runtimeDirectory": str(self.runtime), "runtimeConfigPath": str(self.payload / "Payload.runtimeconfig.json"),
+                    "entryPointType": "NativeHostPayload.Entry, Payload", "mode": "component"}}}
 
     def dap(self, directory, adapter):
         result = Dap(self.env | {"DNCDBG_LOG_DIR": str(directory)}, timeout=30, adapter=adapter,
@@ -147,10 +158,57 @@ class Proof:
         dap.request("configurationDone")
         dap.response(pending)
         info = dap.request("dotnet/info")
-        wait_for(lambda: (Path(info["artifactsPath"]) / "managed-ready").exists(), "managed payload never started")
-        require(info["remote"]["provider"] == "private-coreclr" and info["remote"]["modelVersion"] == 5,
+        wait_for(lambda: (self.session(info) / "managed-ready").exists(), "managed payload never started")
+        require(info["remote"]["provider"] == "coreclr" and info["remote"]["modelVersion"] == 5,
                 "actual native host advertises the same private provider/generated model")
         return breakpoint, info, line
+
+    def session(self, info):
+        return Path(info["artifactsPath"])
+
+    def application_options(self, directory, provider):
+        options = self.options(directory, provider)
+        options["assetsPath"] = str(self.bin / "application")
+        options["target"]["nativeHost"].update({
+            "assemblyPath": str(self.bin / "application/RemoteBreakpointApp.dll"),
+            "runtimeConfigPath": str(self.bin / "application/RemoteBreakpointApp.runtimeconfig.json"),
+            "mode": "application", "entryPointType": None, "arguments": [str(directory / "application-result")]})
+        return options
+
+    def application(self, provider):
+        directory = self.output / ("application-" + provider)
+        directory.mkdir()
+        dap = self.dap(directory, self.adapter)
+        source = ROOT / "tests/RemoteBreakpointApp/Program.cs"
+        line = next(i + 1 for i, row in enumerate(source.read_text().splitlines()) if "// REMOTE_BREAKPOINT" in row)
+        try:
+            dap.request("initialize", {"adapterID": "dncdbg"})
+            launch = dap.send("launch", {"remote": self.application_options(directory, provider)})
+            dap.request("setBreakpoints", {"source": {"path": str(source)}, "breakpoints": [{"line": line}]})
+            dap.request("configurationDone")
+            dap.response(launch)
+            info = dap.request("dotnet/info")
+            event, frame = self.stack(dap)
+            require(event["reason"] == "breakpoint" and frame["line"] == line,
+                    provider + " ordinary console Main runs under public hostfxr application hosting")
+            require(dap.request("evaluate", {"frameId": frame["id"], "expression": "answer + 1"})["result"] == "43",
+                    "ordinary application uses the same breakpoint and inspection controller")
+            dap.request("continue", {"threadId": event["threadId"]})
+            require(dap.event("exited")["exitCode"] == 0, "ordinary managed Main publishes its actual natural exit code")
+            dap.event("terminated")
+            wait_for(lambda: not self.process_alive(info["debuggeeProcessId"]), "ordinary application host did not exit")
+            self.native_cleanup(self.session(info))
+            self.checks.append("application-" + provider)
+        finally:
+            dap.close()
+            (directory / "dap.json").write_text(json.dumps(dap.transcript, indent=2))
+            (directory / "adapter-stderr.log").write_text(dap.stderr)
+
+    def process_alive(self, pid):
+        return alive(pid)
+
+    def crash_target(self, pid):
+        os.kill(pid, signal.SIGKILL)
 
     def command(self, session, sequence, command):
         staging = session / f"command-{sequence}.staging"
@@ -183,7 +241,7 @@ class Proof:
         sessions = []
         try:
             breakpoint, info, line = self.start(dap, self.options(directory, provider))
-            session = Path(info["artifactsPath"])
+            session = self.session(info)
             sessions.append(session)
             host = (session / "host.log").read_text()
             require(host.index("agent-loaded-before-runtime") < host.index("hostfxr-initialize") <
@@ -228,15 +286,15 @@ class Proof:
             dap.request("continue", {"threadId": stopped["threadId"]})
             require(dap.request("modules")["totalModules"] > 0 and dap.request("threads")["threads"], "actual module/thread model")
             old_pid, old_port, old_generation = info["debuggeeProcessId"], info["route"]["hostPort"], info["sessionId"]
-            old_credential = json.loads((session / "endpoint.json").read_text())["Token"]
+            old_credential = json.loads((session / "endpoint.json").read_text())["Endpoint"]["Token"]
             dap.request("restart")
             info = dap.request("dotnet/info")
-            session = Path(info["artifactsPath"])
+            session = self.session(info)
             sessions.append(session)
             wait_for(lambda: (session / "managed-ready").exists(), "restart did not enter managed payload")
-            require(info["sessionId"] != old_generation and info["debuggeeProcessId"] != old_pid and not alive(old_pid),
+            require(info["sessionId"] != old_generation and info["debuggeeProcessId"] != old_pid and not self.process_alive(old_pid),
                     "restart owns a new target/endpoint/tunnel generation")
-            require(json.loads((session / "endpoint.json").read_text())["Token"] != old_credential,
+            require(json.loads((session / "endpoint.json").read_text())["Endpoint"]["Token"] != old_credential,
                     "restart rotates the real native agent credential rather than reusing a stale client session")
             wait_for(lambda: closed(old_port), "old host route remains after restart")
             dap.request("variables", {"variablesReference": scope}, success=False)
@@ -252,7 +310,7 @@ class Proof:
             for owned in sessions:
                 self.native_cleanup(owned)
             self.command(session, 2, "exit")
-            wait_for(lambda: not alive(info["debuggeeProcessId"]), "detached native host did not exit/reap")
+            wait_for(lambda: not self.process_alive(info["debuggeeProcessId"]), "detached native host did not exit/reap")
             require("managed-entry-returned-to-native-host" in (session / "host.log").read_text(),
                     "managed entrypoint actually returns into the native caller")
             self.checks.append(provider + "-complete")
@@ -267,7 +325,7 @@ class Proof:
         dap = self.dap(directory, self.adapter)
         try:
             _, info, _ = self.start(dap, self.options(directory, provider))
-            session = Path(info["artifactsPath"])
+            session = self.session(info)
             self.command(session, 1, "scenario")
             stopped, frame = self.stack(dap)
             require(dap.request("evaluate", {"frameId": frame["id"], "expression": "answer + 1"})["result"] == "43",
@@ -278,7 +336,7 @@ class Proof:
             dap.timeout = 5
             require(dap.event("exited")["exitCode"] == exit_code, "attached natural completion reports the actual exit code")
             dap.event("terminated")
-            wait_for(lambda: not alive(info["debuggeeProcessId"]), "naturally completed native host did not exit/reap")
+            wait_for(lambda: not self.process_alive(info["debuggeeProcessId"]), "naturally completed native host did not exit/reap")
             self.native_cleanup(session)
             wait_for(lambda: closed(info["route"]["hostPort"]), "natural exit left an owned route")
             time.sleep(0.1)
@@ -334,17 +392,17 @@ class Proof:
                     require("native-host-calls-managed-entry" not in host.read_text(), "no managed execution after canceled/unpublished acquisition")
             else:
                 breakpoint, info, _ = self.start(dap, self.options(directory, "directLoopback" if terminate else "localTcpProxy"))
-                session = Path(info["artifactsPath"])
+                session = self.session(info)
                 if stopped:
                     self.command(session, 1, "scenario")
                     event, old_frame = self.stack(dap)
                     require(event["reason"] == "breakpoint", "tunnel-death fixture owns a real outstanding native stop")
                 if target_death:
-                    os.kill(info["debuggeeProcessId"], signal.SIGKILL)
+                    self.crash_target(info["debuggeeProcessId"])
                 else:
                     dap.request("terminate" if terminate else "dotnet/testCloseTunnel")
                 dap.event("terminated")
-                wait_for(lambda: not alive(info["debuggeeProcessId"]), "tunnel failure did not clean target")
+                wait_for(lambda: not self.process_alive(info["debuggeeProcessId"]), "tunnel failure did not clean target")
                 if not target_death:
                     self.native_cleanup(session)
                 else:
@@ -356,7 +414,7 @@ class Proof:
                     old_generation = info["sessionId"]
                     dap.request("restart")
                     info = dap.request("dotnet/info")
-                    session = Path(info["artifactsPath"])
+                    session = self.session(info)
                     wait_for(lambda: (session / "managed-ready").exists(), "reconnect did not start a fresh native target")
                     require(info["sessionId"] != old_generation, "reconnect replaces the dead target/tunnel generation")
                     dap.request("scopes", {"frameId": old_frame["id"]}, success=False)
@@ -366,7 +424,7 @@ class Proof:
                             "reconnect restores source identity without reusing stale DAP handles")
                     dap.request("terminate")
                     dap.event("terminated")
-                    wait_for(lambda: not alive(info["debuggeeProcessId"]), "reconnected native host did not terminate")
+                    wait_for(lambda: not self.process_alive(info["debuggeeProcessId"]), "reconnected native host did not terminate")
                     self.native_cleanup(session)
             self.checks.append(name)
         finally:
@@ -426,7 +484,7 @@ class Proof:
         total = 0
         for path in sorted(self.output.rglob("*")):
             relative = path.relative_to(self.output)
-            if not path.is_file() or any(p in relative.parts for p in ("evidence", "compilation", "release-compilation", "fault-adapter", "bin", "scratch")):
+            if not path.is_file() or any(p in relative.parts for p in ("evidence", "compilation", "release-compilation", "application-compilation", "fault-adapter", "bin", "scratch")):
                 continue
             if path.name.startswith("endpoint") or path.suffix not in (".log", ".json", ".jsonl"):
                 continue
@@ -448,7 +506,7 @@ def main():
     parser.add_argument("--output", type=Path, default=ROOT / "build/native-host" / uuid.uuid4().hex)
     parser.add_argument("--runtime-directory", type=Path)
     parser.add_argument("--cleanup", action="store_true", help="Recover only this run's journaled processes/listeners/credentials")
-    parser.add_argument("--case", choices=["all", "natural-completion"], default="all")
+    parser.add_argument("--case", choices=["all", "natural-completion", "application"], default="all")
     args = parser.parse_args()
     if args.cleanup and not args.output.exists():
         return 0
@@ -465,10 +523,14 @@ def main():
     signal.signal(signal.SIGTERM, interrupted)
     try:
         proof.build()
-        for provider in ("directLoopback", "localTcpProxy"):
-            for exit_code in (0, 7):
-                for attempt in range(3):
-                    proof.natural_completion(provider, exit_code, attempt)
+        if args.case in ("all", "application"):
+            for provider in ("directLoopback", "localTcpProxy"):
+                proof.application(provider)
+        if args.case in ("all", "natural-completion"):
+            for provider in ("directLoopback", "localTcpProxy"):
+                for exit_code in (0, 7):
+                    for attempt in range(3):
+                        proof.natural_completion(provider, exit_code, attempt)
         if args.case == "all":
             proof.complete("directLoopback")
             proof.complete("localTcpProxy")

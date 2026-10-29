@@ -19,9 +19,9 @@ internal static class PrivateBootstrapChecks
         Reject(supported with { DacBuildId = new string('0', 32) }, exports, "DAC build identity");
         Reject(supported, ["CoreCLRCreateCordbObject3"], "missing DllMain export");
         Reject(supported, ["DllMain"], "missing factory export");
-        check(PrivateBootstrapPolicy.SupportedBuilds.Count == 3, "mobile allowlist retains original arm64 tuples and separately pins Android x64");
+        check(PrivateBootstrapPolicy.SupportedBuilds.Count == 4, "application allowlist separately pins Android architectures and Apple simulator/device images");
         PrivateBootstrapIdentity androidX64 = PrivateBootstrapPolicy.SupportedBuilds.Single(x =>
-            x.Platform == "AndroidEmulator" && x.Architecture == "X64");
+            x.Platform == "Android" && x.Architecture == "X64");
         check(PrivateBootstrapPolicy.Validate(androidX64, exports) == null, "exact Android x64 mobile private tuple accepted");
         Reject(androidX64 with { Platform = "LinuxNativeHost" }, exports, "Android x64 DBI substituted for desktop Linux");
         Reject(androidX64 with { DbiHash = supported.DbiHash }, exports, "iOS DBI substituted for Android x64");
@@ -40,18 +40,18 @@ internal static class PrivateBootstrapChecks
         BinaryPrimitives.WriteUInt32LittleEndian(elf.AsSpan(124), 4);
         BinaryPrimitives.WriteUInt32LittleEndian(elf.AsSpan(128), 3);
         "GNU\0"u8.CopyTo(elf.AsSpan(132));
-        check(NativeImageIdentity.Read(elf, "AndroidEmulator").BuildId == "00000000",
+        check(NativeImageIdentity.Read(elf, "Android").BuildId == "00000000",
             "read Android x64 ELF build identity and code hash");
         check(PrivateBootstrapPolicy.NativeHostBuilds.Count == 3, "native host has explicit macOS arm64 and Linux x64/arm64 tuples");
         foreach (PrivateBootstrapIdentity native in PrivateBootstrapPolicy.NativeHostBuilds)
         {
             check(PrivateBootstrapPolicy.Validate(native, exports) == null, "exact native-host private tuple accepted: " + native.Platform + "/" + native.Architecture);
             Reject(native with { Platform = "iOSSimulator" }, exports, "native-host DBI substituted for simulator DBI");
-            Reject(native with { Platform = "AndroidEmulator" }, exports, "native-host DBI substituted for Android DBI");
+            Reject(native with { Platform = "Android" }, exports, "native-host DBI substituted for Android DBI");
             Reject(native with { DbiHash = new string('0', 64) }, exports, "changed native-host DBI hash");
             Reject(native with { RuntimeVersion = "11.0.0" }, exports, "unapproved native-host runtime patch");
         }
-        foreach (string platform in new[] { "iOSSimulator", "AndroidEmulator", "macOS" })
+        foreach (string platform in new[] { "iOSSimulator", "Android", "macOS" })
         {
             foreach (int length in new[] { 0, 3, 32, 63 })
             {

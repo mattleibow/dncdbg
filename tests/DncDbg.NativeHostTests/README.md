@@ -94,7 +94,7 @@ Ordinary **Release** adapter binaries run the positive direct/proxy proofs.
 Both publishes use run-owned, separate intermediate/build directories so a
 native-host run cannot clean an adapter being used by acceptance tests.
 Only a separate **Debug** adapter built with
-`EnableExperimentalRemoteTestHooks=true` admits the acquisition barrier and
+internal `DncDbgTestHooks=true` admits the acquisition barrier and
 `dotnet/testCloseTunnel` fault operation. Ordinary Release artifacts are scanned
 to prove those hooks and the C++ agent are absent. The target agent itself is the
 ordinary helper without native watchdog fault injection.

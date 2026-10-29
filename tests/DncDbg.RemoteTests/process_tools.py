@@ -15,7 +15,7 @@ def start_owned(*args, **kwargs):
     return subprocess.Popen(*args, start_new_session=True, **kwargs)
 
 
-def stop_owned(process):
+def stop_owned(process, grace_period=1, settle_timeout=1):
     def group_exists():
         process.poll()
         try:
@@ -45,7 +45,7 @@ def stop_owned(process):
             raise
 
     if signal_group(signal.SIGTERM):
-        deadline = time.monotonic() + 1
+        deadline = time.monotonic() + grace_period
         while time.monotonic() < deadline:
             process.poll()
             if not signal_group(0):
@@ -54,7 +54,7 @@ def stop_owned(process):
         else:
             signal_group(signal.SIGKILL)
     process.wait(timeout=1)
-    deadline = time.monotonic() + 1
+    deadline = time.monotonic() + settle_timeout
     while signal_group(0):
         if time.monotonic() >= deadline:
             raise RuntimeError(f"Owned process group {process.pid} remained after termination")

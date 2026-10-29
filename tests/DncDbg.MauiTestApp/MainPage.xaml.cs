@@ -11,9 +11,11 @@ public partial class MainPage : ContentPage
 	public MainPage()
 	{
 		InitializeComponent();
-		RuntimeStatus.Text = ExperimentalStartup.Status;
-#if DNCDBG_PRIVATE_BOOTSTRAP
+#if DEBUG
+		RuntimeStatus.Text = TargetAgentStartup.Status;
 		ReloadControls.IsVisible = true;
+#else
+		RuntimeStatus.Text = "Application build without target debugging assets.";
 #endif
 #if DNCDBG_TEST_FAULTS
 		WatchdogScenario.IsVisible = true;
@@ -90,7 +92,7 @@ public partial class MainPage : ContentPage
 	private void OnWatchdogClicked(object? sender, EventArgs e)
 	{
 #if DNCDBG_TEST_FAULTS
-		PrivateStartup.StallOwner();
+		TargetAgentStartup.StallOwner();
 #endif
 	}
 

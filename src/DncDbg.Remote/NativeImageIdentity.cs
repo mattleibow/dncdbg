@@ -23,8 +23,9 @@ public sealed record NativeImageIdentity(string BuildId, string CodeHash)
             return platform switch
             {
                 "iOSSimulator" => MachO(image, 7),
+                "iOSDevice" => MachO(image, 2),
                 "MacOSNativeHost" => MachO(image, 1),
-                "AndroidEmulator" or "LinuxNativeHost" => Elf(image),
+                "Android" or "LinuxNativeHost" => Elf(image),
                 _ => throw new InvalidDataException("Unsupported native image platform."),
             };
         }

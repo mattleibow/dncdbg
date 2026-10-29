@@ -4,12 +4,13 @@ using System.Text.Json;
 namespace DncDbg.Dap;
 
 /// <summary>Platform-independent ownership of acquisition, authentication, cancellation and cleanup.</summary>
-internal sealed class RemoteLifecycle(IRemoteTargetProvider target, ITunnelProvider tunnel, int startupTimeoutSeconds)
+internal sealed class RemoteLifecycle(IRemoteTargetProvider target, ITunnelProvider tunnel, int startupTimeoutSeconds, string outputRoot)
 {
     private readonly object gate = new();
     private readonly CancellationTokenSource acquisitionCancellation = new();
     private Task? acquisition, closing;
     private bool disposed;
+    private TargetOwnershipJournal? journal;
     public string SessionId { get; } = Guid.NewGuid().ToString("N");
     public string Name => target.Name;
     public string? ArtifactsPath => target.ArtifactsPath;
@@ -34,6 +35,8 @@ internal sealed class RemoteLifecycle(IRemoteTargetProvider target, ITunnelProvi
         using var startup = CancellationTokenSource.CreateLinkedTokenSource(token, acquisitionCancellation.Token);
         startup.CancelAfter(TimeSpan.FromSeconds(startupTimeoutSeconds));
         token = startup.Token;
+        journal = new TargetOwnershipJournal(Path.Combine(Path.GetFullPath(outputRoot), SessionId, "lifecycle"), SessionId);
+        journal.Record("acquire-intent", null, null);
         await target.AcquireAsync(SessionId, token);
         RemoteEndpoint? endpoint = null;
         while (endpoint == null)
@@ -42,8 +45,17 @@ internal sealed class RemoteLifecycle(IRemoteTargetProvider target, ITunnelProvi
             string? descriptor = await target.ReadDescriptorAsync(token);
             try
             {
-                var candidate = string.IsNullOrEmpty(descriptor) ? null :
-                    JsonSerializer.Deserialize(descriptor, RemoteJson.Default.RemoteEndpoint);
+                RemoteEndpoint? candidate = null;
+                if (!string.IsNullOrEmpty(descriptor))
+                {
+                    if (target.Profile is { } profile)
+                    {
+                        TargetManifest manifest = TargetManifestPolicy.Read(descriptor);
+                        TargetManifestPolicy.Validate(manifest, profile, SessionId, tunnel.Trust);
+                        candidate = manifest.Endpoint;
+                    }
+                    else throw new InvalidDataException("A provider must supply a qualified target profile before descriptor admission.");
+                }
                 if (candidate is { Port: > 0 and <= 65535, Token.Length: 64, ProcessId: > 0 } &&
                     candidate.SessionId == SessionId)
                     endpoint = candidate;
@@ -52,6 +64,7 @@ internal sealed class RemoteLifecycle(IRemoteTargetProvider target, ITunnelProvi
             if (endpoint == null) await Task.Delay(20, token);
         }
         ProcessId = endpoint.ProcessId;
+        journal.Record("target-acquired", null, ProcessId);
         token.ThrowIfCancellationRequested();
         RemoteEndpoint ownedRoute = await tunnel.OpenAsync(endpoint, token);
         if (ownedRoute.Port is < 1 or > 65535 || ownedRoute.Token != endpoint.Token ||
@@ -59,20 +72,23 @@ internal sealed class RemoteLifecycle(IRemoteTargetProvider target, ITunnelProvi
             throw new InvalidDataException("A tunnel cannot replace the target credential or endpoint generation.");
         Route = new { provider = tunnel.GetType().Name, hostPort = ownedRoute.Port,
             targetPort = endpoint.Port, generation = SessionId };
+        journal.Record("route-acquired", null, ProcessId);
         token.ThrowIfCancellationRequested();
         RemoteDebugClient client = await RemoteDebugClient.ConnectAsync(ownedRoute, token);
         try
         {
             RemoteCapabilities capabilities = client.Capabilities;
             if (!capabilities.ManagedDebugging || capabilities.ModelVersion != RemoteContract.ModelVersion ||
-                capabilities.Provider != "private-coreclr" || capabilities.Bootstrap != PrivateBootstrapPolicy.Bootstrap ||
+                capabilities.Provider != "coreclr" || capabilities.Bootstrap != PrivateBootstrapPolicy.Bootstrap ||
                 capabilities.SupportedBuild is not { } identity || identity.Platform != target.ExpectedPlatform ||
                 identity.Architecture != target.ExpectedArchitecture ||
+                target.Profile is { } expected && identity != expected.Runtime ||
                 PrivateBootstrapPolicy.Validate(identity, ["DllMain", "CoreCLRCreateCordbObject3"]) is { })
                 throw new PlatformNotSupportedException(capabilities.Blocker ??
                     "The target does not provide the exact pinned private CoreCLR runtime/DBI/DAC and typed debugger model.");
             token.ThrowIfCancellationRequested();
             Client = client;
+            journal.Record("authenticated", null, ProcessId);
         }
         catch
         {
@@ -128,6 +144,7 @@ internal sealed class RemoteLifecycle(IRemoteTargetProvider target, ITunnelProvi
             catch (Exception error) { failures.Add(error); }
         }
         acquisitionCancellation.Dispose();
+        journal?.Record(failures.Count == 0 ? "closed" : "cleanup-failed", null, ProcessId > 0 ? ProcessId : null);
         if (failures.Count > 0) throw new AggregateException("Remote cleanup failed.", failures);
     }
 }

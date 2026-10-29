@@ -7,6 +7,33 @@ using System.Runtime.InteropServices;
 using ClrDebug;
 using DncDbg.Remote;
 
+if (args is ["--command-helper", .. var literalArguments])
+{
+    Console.WriteLine(JsonSerializer.Serialize(new { Arguments = literalArguments, Value = Environment.GetEnvironmentVariable("DNCDBG_COMMAND_VALUE") })); // TARGET_MAP_BREAKPOINT
+    return;
+}
+if (args is ["--command-wait"])
+{
+    await Task.Delay(Timeout.Infinite);
+    return;
+}
+if (args is ["--command-flood"])
+{
+    await Console.Out.WriteAsync(new string('x', 4 * 1024 * 1024 + 4096));
+    await Console.Out.FlushAsync();
+    await Task.Delay(Timeout.Infinite);
+    return;
+}
+if (args is ["--command-relay"])
+{
+    await Console.OpenStandardInput().CopyToAsync(Console.OpenStandardOutput());
+    return;
+}
+if (args is ["--command-eof"])
+{
+    return;
+}
+
 if (args is [DncDbg.Engine.Launch.ConsoleCodePage.HelperOption, var consoleOwner] && int.TryParse(consoleOwner, out int consolePid))
 {
     Environment.ExitCode = DncDbg.Engine.Launch.ConsoleCodePage.RunHelper(consolePid);
@@ -16,6 +43,12 @@ if (args is [DncDbg.Engine.Launch.ConsoleCodePage.HelperOption, var consoleOwner
 using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(60));
 CancellationToken token = deadline.Token;
 int passed = 0;
+if (args is ["--target-contracts"])
+{
+    await TargetContractChecks.RunAsync(Check, token);
+    Console.WriteLine($"Passed {passed} target manifest/structured-command contracts.");
+    return;
+}
 if (args is ["--tunnel-contracts"])
 {
     await TunnelChecks.RunAsync(Check, token);
@@ -113,7 +146,7 @@ if (args is ["--desktop", var fixture, var source, var results])
 }
 else if (args.Length != 0)
     throw new ArgumentException("Use no arguments, --mobile descriptor.json, --attach-probe pid, --load-probe library, --startup-probe pid runtime report [--libraries directory], or --desktop fixture.dll source.cs result-directory.");
-Console.WriteLine($"Passed {passed} experimental remote checks.");
+Console.WriteLine($"Passed {passed} remote debugger checks.");
 
 void Check(bool condition, string name)
 {
@@ -231,8 +264,7 @@ void TestMachOUuid()
 
 async Task TestAgentAsync()
 {
-    Throws<InvalidOperationException>(() => _ = new RemoteAgent(enableExperimental: false), "experiment opt-in required");
-    await using var agent = new RemoteAgent(enableExperimental: true);
+    await using var agent = new RemoteAgent();
     await RejectAsync(async () => { await using var _ = await RemoteDebugClient.ConnectAsync(agent.Endpoint with { Token = new string('0', 64) }, token); }, "AuthenticationFailed");
     using (var socket = new TcpClient())
     {
@@ -257,7 +289,7 @@ async Task TestCancellationAsync()
 {
     int created = 0;
     ContractBackend? backend = null;
-    await using var agent = new RemoteAgent(true, () => { created++; return backend = new ContractBackend(); });
+    await using var agent = new RemoteAgent(() => { created++; return backend = new ContractBackend(); });
     await RejectAsync(async () => { await using var _ = await RemoteDebugClient.ConnectAsync(agent.Endpoint with { Token = new string('0', 64) }, token); }, "AuthenticationFailed");
     Check(created == 0, "authentication failure never creates a runtime backend");
     await using RemoteDebugClient client = await RemoteDebugClient.ConnectAsync(agent.Endpoint, token);
@@ -301,8 +333,8 @@ async Task TestCorrelationAsync()
 
 async Task TestStaleSessionAsync()
 {
-    await using var oldAgent = new RemoteAgent(true);
-    await using var agent = new RemoteAgent(true);
+    await using var oldAgent = new RemoteAgent();
+    await using var agent = new RemoteAgent();
     await RejectAsync(async () =>
     {
         await using var _ = await RemoteDebugClient.ConnectAsync(agent.Endpoint with { Token = oldAgent.Endpoint.Token }, token);
@@ -329,7 +361,7 @@ async Task TestDesktopAsync(string fixture, string source, string results)
         string resultPath = Path.Combine(results, dropWhileStopped ? "disconnect.txt" : "continue.txt");
         File.Delete(resultPath);
         EngineBackend? backend = null;
-        await using var agent = new RemoteAgent(true, () => backend = new EngineBackend(fixture, resultPath));
+        await using var agent = new RemoteAgent(() => backend = new EngineBackend(fixture, resultPath));
         try
         {
             await using (RemoteDebugClient client = await RemoteDebugClient.ConnectAsync(agent.Endpoint, token))
@@ -407,7 +439,7 @@ async Task TestDesktopDeathAsync(string fixture, string source, string results)
     int line = File.ReadAllLines(source).Select((text, index) => (text, index))
         .Single(x => x.text.Contains("// REMOTE_BREAKPOINT", StringComparison.Ordinal)).index + 1;
     EngineBackend? backend = null;
-    await using var agent = new RemoteAgent(true, () => backend = new EngineBackend(fixture, Path.Combine(results, "crash.txt")));
+    await using var agent = new RemoteAgent(() => backend = new EngineBackend(fixture, Path.Combine(results, "crash.txt")));
     await using RemoteDebugClient client = await RemoteDebugClient.ConnectAsync(agent.Endpoint, token);
     await client.SetBreakpointsAsync(source, [line], token);
     await client.StartAsync(token);

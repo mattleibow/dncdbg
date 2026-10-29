@@ -64,7 +64,7 @@ internal sealed class RemoteSession : IDisposable
         lifecycle = createLifecycle();
         try
         {
-            symbols = new RemoteSymbols(options.AssetsPath);
+            symbols = new RemoteSymbols(options.AssetsPath, options.SourceFileMap);
             Wait(lifecycle.ConnectAsync(Token));
             foreach (RemoteConfiguration chunk in symbols.ConfigurationChunks())
                 Wait(Client.RequestConfigureAsync(chunk, Token));

@@ -101,7 +101,7 @@ requested RID's architecture against the actual target capability.
 
 1. Validate exact prerequisites, create/boot a uniquely named dedicated
    simulator/AVD (never borrow a supplied or shared device).
-2. Build **Release with all experimental/fault opt-ins supplied**, inspect its
+2. Build **ordinary Release**, reject a Release test-fault request, inspect its
    evaluated items/constants and actual bundle/APK, and require native helper,
    imports, remote/DevFlow references to be absent.
 3. Build the ordinary Debug native helper and fixture, run the **full real DAP +
@@ -197,8 +197,8 @@ mandatory. This PR remains draft/unmerged.
 
 ## Why native code exists
 
-Normal DNCDbg is C# 14/.NET 10. Only the opted-in **Debug mobile/native-host
-experimental fixtures** compile/link `src/DncDbg.Remote.Target`. Low-level
+The host DNCDbg adapter is C# 14/.NET 10. Explicit **RID-specific target
+deployment packages** and Debug mobile fixtures compile/link `src/DncDbg.Remote.Target`. Low-level
 pre-managed startup hooks and private DBI/`ICorDebug` initialization require
 target-native ABI access independent of managed execution. This fixture requests
 activation through a P/Invoke (it does not claim a native pre-main constructor);

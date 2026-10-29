@@ -1,4 +1,4 @@
-"""Reject the experimental target-native implementation in ordinary desktop/Release output."""
+"""Keep target-native deployment assets and test hooks out of ordinary host artifacts."""
 from pathlib import Path
 import sys
 import zipfile
@@ -10,9 +10,9 @@ MARKERS = (b"dncdbg_prepare", b"dncdbg_complete", b"dncdbg_test_stall_owner", b"
 def inspect(name, data):
     lowered = name.lower()
     if any(part in lowered for part in ("dncdbg_target", "bootstrap.cpp", "nativecontracts", "devflow.agent")):
-        raise AssertionError(f"Experimental native/Debug-only asset in ordinary artifacts: {name}")
+        raise AssertionError(f"Target-native/test-only asset in ordinary host artifacts: {name}")
     if any(marker in data for marker in MARKERS):
-        raise AssertionError(f"Experimental native code/import in ordinary artifacts: {name}")
+        raise AssertionError(f"Target-native import/test hook in ordinary host artifacts: {name}")
 
 
 def verify(path):
@@ -35,7 +35,7 @@ def verify(path):
             count += 1
     if count == 0:
         raise AssertionError(f"Empty artifact: {path}")
-    print(f"PASS: {count} ordinary artifact entries exclude experimental native/Debug-only code")
+    print(f"PASS: {count} ordinary host artifact entries exclude target-native/test-only code")
     return count
 
 

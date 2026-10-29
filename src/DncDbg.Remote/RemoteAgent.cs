@@ -4,7 +4,7 @@ using System.Security.Cryptography;
 
 namespace DncDbg.Remote;
 
-/// <summary>Opt-in loopback-only experiment. Never loads DBI, changes runtime state or opens a physical-device listener.</summary>
+/// <summary>Loopback RPC service for an explicitly supplied execution backend.</summary>
 public sealed class RemoteAgent : IAsyncDisposable
 {
     private readonly TcpListener listener;
@@ -15,10 +15,8 @@ public sealed class RemoteAgent : IAsyncDisposable
     public RemoteEndpoint Endpoint { get; }
     public string? LastConnectionError { get; private set; }
 
-    public RemoteAgent(bool enableExperimental, Func<IRemoteDebugBackend>? createBackend = null)
+    public RemoteAgent(Func<IRemoteDebugBackend>? createBackend = null)
     {
-        if (!enableExperimental)
-            throw new InvalidOperationException("Remote debugging must be explicitly enabled as experimental.");
         this.createBackend = createBackend ?? (() => RemoteRuntimeCapability.CreateUnavailableBackend());
         listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start(1);

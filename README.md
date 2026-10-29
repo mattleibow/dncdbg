@@ -17,9 +17,10 @@ The engine uses ClrDebug and the public CLR debugging APIs directly. It does not
 wrap another debugger executable. Native CLR debugging libraries and the Windows
 PDB reader remain runtime dependencies supplied through NuGet and the target
 runtime; no C++ compiler, CMake build, or vendored native source is required.
-The separate, opt-in **Debug mobile/native-host fixtures** are the exception: their private
-target provider uses native startup/ICorDebug code, never shipped in ordinary
-desktop adapter artifacts. Normal DNCDbg remains C#.
+Remote targets use an explicit RID-specific native agent and public
+nethost/hostfxr embedding host. These deployment assets are packaged separately;
+the normal adapter contains supported C# host-side providers, never target-native
+binaries or fault injection. There is no remote feature opt-in switch.
 
 ## Build and publish
 
@@ -40,7 +41,9 @@ deployment, specify a matching RID, for example:
 dotnet publish src/DncDbg.Dap -c Release -r linux-x64 --self-contained true -o bin/linux-x64
 ```
 
-Debugger and target process architectures must match. See platform-specific notes:
+For the local engine, debugger and target process architectures must match.
+For remote debugging, the target agent RID matches the device; the host adapter
+communicates through the architecture-neutral model. See platform-specific notes:
 
 - [Windows](docs/build_windows.md)
 - [Linux](docs/build_linux.md)
@@ -99,20 +102,28 @@ Linux CI and the existing Docker gate run the same suite. See the
 [test guide](tests/DncDbg.NativeHostTests/README.md) and
 [provider architecture/reference comparison](docs/remote-architecture.md).
 
-### Experimental mobile DAP preview
+### Remote targets: local, Docker, SSH and devices
 
-The opt-in [`mobile` launch configuration](docs/mobile-preview.md) adds
-adapter-owned deployment, scoped transport, a generated typed debugger model
-and a private CoreCLR provider for **exactly pinned .NET 11 RC1 arm64 iOS
-simulator and arm64/x64 Android emulator** builds. It is not general supported mobile
-debugging and makes no physical-device claim. The separately built
-[MAUI fixture](tests/DncDbg.MauiTestApp/README.md) remains on a local .NET 11
-SDK pin; the debugger and ordinary desktop launch remain on .NET 10.
+The typed [`remote` launch configuration](docs/remote-devices.md) composes a target
+provider with a tunnel: local native host, structured external/Docker commands,
+SSH, Android ADB, Apple simulator or an externally managed encrypted device route.
+All use the same session, lifecycle, versioned target manifest and debugger model.
+An IoT vendor does not implement Android paths or a separate execution engine.
+
+Remote execution admits only the **exact runtime/DBI/DAC identities and code
+hashes** in the runtime policy, including the currently pinned .NET 11 RC1 target
+images. Stable configuration is not a promise that upstream private runtime APIs
+are stable, nor permission to roll forward. Physical Android/Apple transports and
+RID build assets are available; physical hardware has **not** been executed.
+See the [support and migration matrix](docs/remote-devices.md#support-matrix).
+The separately built [MAUI fixture](tests/DncDbg.MauiTestApp/README.md) retains its
+honestly named upstream SDK/package pins; the host debugger remains .NET 10.
 Use the [single mobile test entrypoint](tests/DncDbg.MobileTests/README.md):
 
 ```sh
 dotnet run --project tests/DncDbg.MobileTests -c Release -- --platform contracts
 # Real iOS/Android runs use the same command with --platform ios/android; see prerequisites.
+dotnet run --project tests/DncDbg.DeviceTests -c Release -- --require-docker
 ```
 
 Portable remote/contract projects belong in `tests/` and `DncDbg.slnx`, like
@@ -120,12 +131,12 @@ SmokeTests and DockerTests. Mobile orchestration is not an upstream native
 parity project and is deliberately outside `test-suite/Test*` auto-discovery.
 Common debugger correctness is established by the native-host gate first;
 mobile providers add exact deployment/path/routing and device/UI proof.
-The separate `Mobile proof` PR workflow requires actual pinned runtime suites;
+The separate mobile and remote PR workflows require actual pinned runtime suites;
 generic desktop CI and fake contracts do not prove mobile debugging.
 Runtime capabilities explicitly exclude func-eval and other unsupported
-operations. See the [preview guide](docs/mobile-preview.md) for configuration,
-limitations and current merge gates, and the [historical proof](docs/experimental-mobile-debugging.md)
-for earlier direct-client evidence. DevFlow UI automation is a separate proof.
+operations. See the [remote target guide](docs/remote-devices.md) for configuration,
+limitations, hardware qualification and required gates.
+DevFlow UI automation is a separate proof.
 
 ## Usage
 

@@ -12,7 +12,7 @@ import time
 
 from mobile_tools import adb_path, tool_environment
 from run_device import Ui, verify_ui, ios_ui_port, copy_debug_assets
-from test_dap import Dap, ROOT
+from test_dap import Dap, ROOT, remote_launch
 
 APP = "com.dncdbg.mobiletests"
 
@@ -63,7 +63,8 @@ def main():
             command(xcrun, "simctl", "uninstall", args.device, APP, check=False)
 
     def launch(dap, uninstall=False, start=True):
-        pending = dap.send("launch", {"mobile": options | {"uninstallOnDisconnect": uninstall}})
+        pending = dap.send("launch", remote_launch(options | {"uninstallOnDisconnect": uninstall,
+                                                            "outputPath": str(args.output / "targets")}))
         if start:
             dap.request("setExceptionBreakpoints", {"filters": []})
             dap.request("configurationDone")
@@ -174,7 +175,7 @@ def main():
                     verify(not device("shell", "pidof", APP, check=False).stdout.strip(), "owned app process is gone")
                     descriptor = device("shell", "run-as", APP, "sh", "-c",
                                         "'test ! -e files/dncdbg-remote.json'", check=False)
-                    text = device("exec-out", "run-as", APP, "cat", "files/dncdbg-private-startup.jsonl", check=False).stdout
+                    text = device("exec-out", "run-as", APP, "cat", "files/dncdbg-startup.jsonl", check=False).stdout
                     verify(descriptor.returncode == 0, "owned endpoint token/descriptor removed")
                 else:
                     try:
@@ -184,7 +185,7 @@ def main():
                     else:
                         raise AssertionError("Owned simulator process remains alive.")
                     verify(not (container() / "Library/dncdbg-remote.json").exists(), "owned endpoint token/descriptor removed")
-                    text = (container() / "Library/dncdbg-private-startup.jsonl").read_text()
+                    text = (container() / "Library/dncdbg-startup.jsonl").read_text()
                 (output / "native-report.jsonl").write_text(text)
                 if scenario == "watchdog":
                     phases = [json.loads(row)["Phase"] for row in text.splitlines()]

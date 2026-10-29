@@ -82,6 +82,7 @@ class MobileRunnerTests(unittest.TestCase):
         source.mkdir()
         names = {f"{name}.{extension}" for name in ("DncDbg.MauiTestApp", "DncDbg.ReloadFixture")
                  for extension in ("dll", "pdb")}
+        names.add("dncdbg-agent.json")
         for name in names | {"DncDbg.Remote.dll", "DncDbg.Remote.pdb"}:
             (source / name).write_bytes(name.encode())
         destination = copy_debug_assets(source, self.output / "catalog")
@@ -156,7 +157,7 @@ class MobileRunnerTests(unittest.TestCase):
 
     def test_rejects_renamed_native_code(self):
         (self.output / "ordinary-binary").write_bytes(b"Mach-O\0_dncdbg_prepare\0")
-        with self.assertRaisesRegex(AssertionError, "native code"):
+        with self.assertRaisesRegex(AssertionError, "Target-native import/test hook"):
             verify(self.output)
 
     def test_rejects_native_and_debug_assets_inside_packages(self):
@@ -164,14 +165,14 @@ class MobileRunnerTests(unittest.TestCase):
             package = self.output / "ordinary.nupkg"
             with zipfile.ZipFile(package, "w") as archive:
                 archive.writestr(name, b"asset")
-            with self.assertRaisesRegex(AssertionError, "Debug-only asset"):
+            with self.assertRaisesRegex(AssertionError, "Target-native/test-only asset"):
                 verify(package)
 
     def test_native_release_build_refused_before_compilation(self):
         result = subprocess.run([sys.executable, str(ROOT / "src/DncDbg.Remote.Target/build.py"),
-                                 "android-arm64", "--configuration", "Release"], capture_output=True, text=True)
+                                 "android-arm64", "--configuration", "Release", "--test-faults"], capture_output=True, text=True)
         self.assertEqual(result.returncode, 2)
-        self.assertIn("Debug-fixture-only", result.stderr)
+        self.assertIn("test-only", result.stderr)
 
     def test_cleanup_refuses_reused_emulator_serial(self):
         commands = []

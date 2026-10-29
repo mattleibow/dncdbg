@@ -13,8 +13,7 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "DncDbg.MauiTestApp"))
-import validate
+import process_tools as validate
 
 
 def alive(pid):
@@ -92,7 +91,7 @@ class ProcessOwnershipTests(unittest.TestCase):
         pids = []
         try:
             with self.assertRaises(subprocess.TimeoutExpired):
-                validate.run(sys.executable, __file__, "--waiting-parent", str(record), timeout=1)
+                validate.run_owned(sys.executable, __file__, "--waiting-parent", str(record), timeout=1)
             self.assertTrue(record.exists(), "Helper must spawn its waiting child before timing out")
             owned = json.loads(record.read_text())
             pids = [owned["parent"], owned["child"]]

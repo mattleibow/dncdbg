@@ -7,7 +7,7 @@ using DncDbg.Remote;
 namespace DncDbg.Dap;
 
 /// <summary>Starts a native host and discovers its descriptor. No debugger/tunnel/model ownership.</summary>
-internal sealed class NativeHostProvider(NativeHostLaunchArguments options) : IRemoteTargetProvider
+internal sealed class NativeHostProvider(TargetStartInfo options, string outputRoot) : IRemoteTargetProvider
 {
     private Process? process;
     private Task<string>? output, errors;
@@ -17,27 +17,34 @@ internal sealed class NativeHostProvider(NativeHostLaunchArguments options) : IR
     public string ExpectedPlatform => OperatingSystem.IsMacOS() ? "MacOSNativeHost" : "LinuxNativeHost";
     public string ExpectedArchitecture => System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture.ToString();
     public string? ArtifactsPath { get; private set; }
+    public TargetProfile? Profile { get; private set; }
 
     public async Task AcquireAsync(string sessionId, CancellationToken token)
     {
         this.sessionId = sessionId;
         if (!(OperatingSystem.IsMacOS() || OperatingSystem.IsLinux()) ||
             !File.Exists(options.HostPath) || !File.Exists(options.AgentPath) || !File.Exists(options.AssemblyPath) ||
-            !Directory.Exists(options.RuntimeDirectory) || !Directory.Exists(options.AssetsPath) ||
-            string.IsNullOrWhiteSpace(options.OutputPath))
+            !Directory.Exists(options.RuntimeDirectory) || string.IsNullOrWhiteSpace(outputRoot))
             throw new ArgumentException("Native-host remote launch requires explicit host/agent/payload/runtime/assets and output paths.");
-        RemoteCapabilities capabilities = PrivateBootstrapPolicy.NativeHostCapabilities(Path.GetFullPath(options.RuntimeDirectory));
-        ArtifactsPath = Path.Combine(Path.GetFullPath(options.OutputPath), sessionId);
+        Profile = TargetHostConfiguration.Profile(Path.GetFullPath(options.RuntimeDirectory),
+            Path.Combine(Path.GetDirectoryName(Path.GetFullPath(options.AgentPath))!, "dncdbg-agent.json"));
+        ArtifactsPath = Path.Combine(Path.GetFullPath(outputRoot), sessionId);
         Directory.CreateDirectory(ArtifactsPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
-        string configuration = Path.Combine(ArtifactsPath, "capabilities.json");
-        await File.WriteAllTextAsync(configuration, JsonSerializer.Serialize(capabilities, RemoteJson.Default.RemoteCapabilities), token);
+        string configuration = TargetHostConfiguration.Write(ArtifactsPath, Profile, new()
+        {
+            HostPath = Path.GetFullPath(options.HostPath), AgentPath = Path.GetFullPath(options.AgentPath),
+            AssemblyPath = Path.GetFullPath(options.AssemblyPath), RuntimeDirectory = Path.GetFullPath(options.RuntimeDirectory),
+            RuntimeConfigPath = options.RuntimeConfigPath,
+            Mode = options.Mode,
+            EntryPointType = options.EntryPointType, EntryPointMethod = options.EntryPointMethod, Arguments = options.Arguments,
+        });
         var start = new ProcessStartInfo(Path.GetFullPath(options.HostPath))
         {
             UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true,
             WorkingDirectory = ArtifactsPath
         };
         foreach (string value in new[] { options.RuntimeDirectory, options.AgentPath, options.AssemblyPath,
-                     configuration, ArtifactsPath, Path.ChangeExtension(options.AssemblyPath, ".runtimeconfig.json") })
+                     configuration, ArtifactsPath, options.RuntimeConfigPath })
             start.ArgumentList.Add(Path.GetFullPath(value));
         start.Environment["DNCDBG_NATIVE_TOKEN"] = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
         start.Environment["DNCDBG_SESSION_ID"] = sessionId;
@@ -112,9 +119,8 @@ internal sealed class NativeHostProvider(NativeHostLaunchArguments options) : IR
                 string descriptor = Path.Combine(ArtifactsPath!, "endpoint.json");
                 if (File.Exists(descriptor))
                 {
-                    RemoteEndpoint? endpoint = JsonSerializer.Deserialize(await File.ReadAllTextAsync(descriptor, token),
-                        RemoteJson.Default.RemoteEndpoint);
-                    if (endpoint?.SessionId == sessionId) File.Delete(descriptor);
+                    TargetManifest endpoint = TargetManifestPolicy.Read(await File.ReadAllTextAsync(descriptor, token));
+                    if (endpoint.SessionId == sessionId) File.Delete(descriptor);
                 }
                 if (process.HasExited && ArtifactsPath != null)
                 {

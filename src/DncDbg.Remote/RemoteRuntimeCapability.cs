@@ -11,7 +11,7 @@ public static class RemoteRuntimeCapability
         string platform = OperatingSystem.IsIOS() ? "iOS" : OperatingSystem.IsAndroid() ? "Android" : "Desktop";
         string blocker = runtime == RemoteRuntimeKind.Mono
             ? "Mono uses the soft-debugger protocol, not ICorDebug. No public ICorDebug device backend is installed."
-            : "No validated in-process ICorDebug execution backend is installed. Private DBI startup requires a separate explicit experimental opt-in and exact build validation.";
+            : "No qualified target agent is installed. Deploy the RID-specific agent package and its exact runtime/DBI/DAC manifest.";
         return new($"{RuntimeInformation.FrameworkDescription} ({runtime})", platform, false, blocker);
     }
 

@@ -6,6 +6,7 @@ public interface IRemoteTargetProvider
     string ExpectedPlatform { get; }
     string ExpectedArchitecture { get; }
     string? ArtifactsPath { get; }
+    TargetProfile? Profile => null;
     Task AcquireAsync(string sessionId, CancellationToken cancellationToken);
     Task<string?> ReadDescriptorAsync(CancellationToken cancellationToken);
     Task CloseAsync(bool terminate, CancellationToken cancellationToken);
@@ -14,6 +15,7 @@ public interface IRemoteTargetProvider
 
 public interface ITunnelProvider : IAsyncDisposable
 {
+    TransportTrust Trust => TransportTrust.LoopbackOnly;
     Task<RemoteEndpoint> OpenAsync(RemoteEndpoint target, CancellationToken cancellationToken);
 }
 

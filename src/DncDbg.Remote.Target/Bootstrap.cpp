@@ -1,4 +1,4 @@
-// Experimental private DBI startup. MIT adaptation attribution: THIRD-PARTY-NOTICES.md.
+// Exact-profile CoreCLR target agent. MIT adaptation attribution: THIRD-PARTY-NOTICES.md.
 #include "CorDebugAbi.h"
 #include "Wire.h"
 #include "RemoteContract.g.h"
@@ -106,14 +106,10 @@ void Report(const char* phase, HResult result = 0) {
 }
 
 bool PlatformAllowed() {
-#if defined(__aarch64__) && defined(__APPLE__) && TARGET_OS_SIMULATOR && TARGET_OS_IOS
+#if defined(__aarch64__) && defined(__APPLE__) && TARGET_OS_IOS
     return true;
 #elif (defined(__aarch64__) || defined(__x86_64__)) && defined(__ANDROID__)
-    char value[PROP_VALUE_MAX]{};
-    __system_property_get("ro.kernel.qemu", value);
-    if (std::strcmp(value, "1") == 0) return true;
-    __system_property_get("ro.boot.qemu", value);
-    return std::strcmp(value, "1") == 0;
+    return true;
 #elif defined(DNCDBG_NATIVE_HOST) && defined(__APPLE__) && !TARGET_OS_IPHONE && defined(__aarch64__)
     return true;
 #elif defined(DNCDBG_NATIVE_HOST) && defined(__linux__) && !defined(__ANDROID__) && (defined(__aarch64__) || defined(__x86_64__))
@@ -658,6 +654,14 @@ EXPORT void dncdbg_test_stall_owner() { testStallOwner.store(true); }
 #endif
 
 EXPORT int dncdbg_contract_version() { return ModelVersion; }
+#ifndef DNCDBG_AGENT_BUILD_ID
+#define DNCDBG_AGENT_BUILD_ID "unversioned"
+#endif
+EXPORT const char* dncdbg_agent_build_id() { return DNCDBG_AGENT_BUILD_ID; }
+EXPORT const char* dncdbg_agent_path() {
+    Dl_info image{};
+    return dladdr(reinterpret_cast<void*>(&dncdbg_agent_build_id), &image) ? image.dli_fname : nullptr;
+}
 
 EXPORT const char* dncdbg_runtime_path() {
     if (!PlatformAllowed()) return nullptr;

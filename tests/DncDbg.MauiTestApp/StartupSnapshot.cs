@@ -1,4 +1,4 @@
-#if DEBUG && DNCDBG_EXPERIMENTAL_REMOTE
+#if DEBUG
 using System.Runtime.InteropServices;
 using System.Text.Json.Serialization;
 

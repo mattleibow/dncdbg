@@ -271,8 +271,8 @@ class Suite:
             if faults:
                 command.append("--test-faults")
             self.run(*command)
-        properties = [f"-p:DncDbgMobileTestPlatform={self.args.platform}", f"-p:RuntimeIdentifier={rid}", "-p:EnableExperimentalRemoteDebugging=true",
-                      "-p:EnableExperimentalPrivateBootstrap=true", f"-p:EnableExperimentalTestFaults={str(faults).lower()}",
+        properties = [f"-p:DncDbgMobileTestPlatform={self.args.platform}", f"-p:RuntimeIdentifier={rid}",
+                      f"-p:DncDbgTestFaults={str(faults).lower()}",
                       "-p:EmbedAssembliesIntoApk=true", "-p:UseMonoRuntime=false"]
         properties += [f"-p:MauiDevFlowPort={self.state['uiPort']}", f"-p:MauiDevFlowSessionId={self.state['name']}"]
         result = self.json("dotnet", "msbuild", ".", f"-p:TargetFramework={tfm}", f"-p:Configuration={configuration}",
@@ -281,10 +281,10 @@ class Suite:
         require(result["Properties"]["MauiVersion"] == PIN["maui"], "MAUI package differs from the pinned workload.")
         if configuration == "Release":
             require(not result["Items"]["NativeReference"] and not result["Items"]["AndroidNativeLibrary"] and
-                    "DNCDBG_PRIVATE_BOOTSTRAP" not in result["Properties"]["DefineConstants"] and
+                    "DNCDBG_TEST_FAULTS" not in result["Properties"]["DefineConstants"] and
                     not any("DevFlow" in i["Identity"] for i in result["Items"]["PackageReference"]) and
                     not any("DncDbg.Remote" in i["Identity"] for i in result["Items"]["ProjectReference"]),
-                    "Experimental code must remain absent even with every opt-in supplied to Release.")
+                    "Target-native/fault assets must remain absent from an application Release without its explicit target package.")
         binlog = self.output / f"{self.number + 1:03d}-{configuration}-{faults}.binlog"
         self.run("dotnet", "build", ".", "-t:Rebuild", "-c", configuration, "-f", tfm, *properties,
                  "--nologo", "-v:minimal", f"-bl:{binlog};ProjectImports=None", cwd=FIXTURE,
@@ -325,16 +325,12 @@ class Suite:
             app, assets = self.build()
         self.proof("run_device.py", app, assets, "restored-dap")
         for disconnect in (False, True):
-            command = [sys.executable, str(FIXTURE / "validate.py"), "--platform", self.args.platform,
-                       "--device", self.state["device"], "--private-bootstrap", "--output",
+            command = [sys.executable, str(Path(__file__).with_name("run_direct.py")), "--platform", self.args.platform,
+                       "--device", self.state["device"], "--app", str(app), "--assets", str(assets), "--output",
                        str(self.output / ("direct-disconnect" if disconnect else "direct-continue")),
-                       "--agent-port", str(self.state["uiPort"]), "--ui-session", self.state["name"]]
-            if self.args.platform == "android":
-                command += ["--allow-fallback", "--runtime-identifier", self.android["rid"]]
-            else:
-                command += ["--build-developer-dir", str(self.args.xcode_dir.resolve())]
+                       "--ui-session", self.state["name"], "--ui-port", str(self.state["uiPort"])]
             if disconnect:
-                command.append("--private-disconnect")
+                command.append("--disconnect-stopped")
             self.run(*command, timeout=600)
 
     def cleanup(self):
@@ -396,7 +392,7 @@ class Suite:
                     clean(adb_path(), "-s", device, "emu", "kill")
             if self.emulator:
                 try:
-                    stop_owned(self.emulator)
+                    stop_owned(self.emulator, grace_period=25, settle_timeout=5)
                 except Exception as error:
                     errors.append(str(error))
             elif self.state.get("emulatorPid"):

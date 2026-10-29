@@ -21,9 +21,7 @@ public static class MauiProgram
 #if DEBUG
 		builder.Logging.AddDebug();
 		builder.AddMauiDevFlowAgent();
-#if DNCDBG_EXPERIMENTAL_REMOTE
-		ExperimentalStartup.Start();
-#endif
+		TargetAgentStartup.Start();
 #endif
 
 		return builder.Build();

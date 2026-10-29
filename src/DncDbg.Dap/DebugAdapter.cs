@@ -296,10 +296,10 @@ internal sealed class DebugAdapter : IDisposable
             case "launch":
             {
                 _launchArguments = request.GetArguments<LaunchArguments>() ?? throw new DebuggerException("Missing launch arguments.");
-                if (_launchArguments.Mobile != null || _launchArguments.Remote != null)
+                if (_launchArguments.Mobile != null)
+                    throw new DebuggerException("Legacy mobile launch was removed. Use remote.target.provider=android/appleSimulator or a generic command/SSH target.");
+                if (_launchArguments.Remote != null)
                 {
-                    if (_launchArguments.Mobile != null && _launchArguments.Remote != null)
-                        throw new DebuggerException("Select exactly one remote target provider.");
                     if (_launchArguments.NoDebug || _launchArguments.Program != null || _launchArguments.Project != null ||
                         _launchArguments.StopAtEntry || _launchArguments.Console is not (null or "internalConsole") ||
                         _launchArguments.Args is { Length: > 0 } || _launchArguments.Env is { Count: > 0 } || _launchArguments.Cwd != null ||
@@ -310,9 +310,8 @@ internal sealed class DebugAdapter : IDisposable
                         _launchArguments.SourceFileMap is { Count: > 0 } || _launchArguments.SymbolOptions != null ||
                         _launchArguments.SuppressJitOptimizations != null)
                         throw new DebuggerException("Remote launch requires built target assets and cannot apply desktop launch, build, environment, source-map, evaluation or JIT options.");
-                    RemoteLaunchArguments options = (RemoteLaunchArguments?)_launchArguments.Mobile ?? _launchArguments.Remote!;
-                    Func<RemoteLifecycle> create = _launchArguments.Mobile is { } mobile
-                        ? RemoteProviderFactory.Mobile(mobile) : RemoteProviderFactory.NativeHost(_launchArguments.Remote!);
+                    RemoteLaunchArguments options = _launchArguments.Remote;
+                    Func<RemoteLifecycle> create = RemoteProviderFactory.Create(options);
                     _remote = new RemoteSession(options, create, _connection, _log, LineToClient, LineFromClient);
                     try { _remote.Launch(); }
                     catch { _remote.Dispose(); _remote = null; throw; }

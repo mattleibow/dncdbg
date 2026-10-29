@@ -61,18 +61,21 @@ jobs:
       - name: Publish adapter
         run: dotnet publish src/DncDbg.Dap --configuration Release --no-build --output bin --nologo
 
-      - name: Assert desktop artifacts exclude the experimental native target
+      - name: Assert desktop artifacts exclude target-native assets and test hooks
         shell: pwsh
         run: |
           $python = if ($IsWindows) { "python" } else { "python3" }
           & $python tests/DncDbg.RemoteTests/assert_artifacts.py bin src/DncDbg.Dap/bin/Release
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Check experimental remote transport and desktop breakpoint proof
+      - name: Check remote transport and desktop breakpoint proof
         shell: pwsh
         run: |
           dotnet run --project tests/DncDbg.RemoteTests --configuration Release --no-build -- --desktop tests/RemoteBreakpointApp/bin/Release/net10.0/RemoteBreakpointApp.dll tests/RemoteBreakpointApp/Program.cs build/validation/remote
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Check neutral manifest, structured command and SSH contracts
+        run: dotnet run --project tests/DncDbg.RemoteTests --configuration Release --no-build -- --target-contracts
 
       - name: Check native target ownership contracts (no mobile runtime)
         if: runner.os != 'Windows'

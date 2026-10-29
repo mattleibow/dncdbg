@@ -15,9 +15,6 @@
     <Nullable>enable</Nullable>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
   </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)' == 'Debug' And '$(EnableExperimentalRemoteTestHooks)' == 'true'">
-    <DefineConstants>$(DefineConstants);DNCDBG_REMOTE_TEST_HOOKS</DefineConstants>
-  </PropertyGroup>
 
   <PropertyGroup>
     <Title>DNCDbg DAP</Title>

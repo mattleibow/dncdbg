@@ -42,6 +42,7 @@ class FakeAdbDaemon:
 
 def daemon(state, mode):
     endpoint = json.loads((state / "endpoint.json").read_text())
+    endpoint = endpoint["Endpoint"]
     # Even same-device/same-target and other-device mappings are not ours.
     mappings = [["emulator-5556", "tcp:1", f"tcp:{endpoint['Port']}"],
                 ["emulator-9998", "tcp:2", f"tcp:{endpoint['Port']}"]]

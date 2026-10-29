@@ -13,12 +13,41 @@ public sealed class RemoteSymbols
     private static readonly Guid Sha256 = new("8829d00f-11b8-4213-878b-770e8597ac16");
     private static readonly Guid Sha1 = new("ff1816ec-aa5e-4d10-87f7-6f4963833460");
     public RemoteModuleSymbols[] Modules { get; }
-    public RemoteSymbols(string assetsPath)
+    public RemoteSymbols(string assetsPath, IReadOnlyDictionary<string, string>? sourceFileMap = null)
     {
+        if (sourceFileMap?.Count > 64) throw new ArgumentException("Remote source maps are limited to 64 prefixes.");
+        var mappings = (sourceFileMap ?? new Dictionary<string, string>()).Select(pair =>
+        {
+            string prefix = pair.Key.Replace('\\', '/').TrimEnd('/');
+            if (string.IsNullOrWhiteSpace(prefix) || prefix.Split('/').Contains("..") ||
+                !(prefix.StartsWith('/') || prefix.Length > 2 && char.IsAsciiLetter(prefix[0]) && prefix[1] == ':' && prefix[2] == '/') ||
+                !Path.IsPathRooted(pair.Value))
+                throw new ArgumentException("Source maps require absolute build prefixes and local source directories.");
+            return (Prefix: prefix, Local: Path.GetFullPath(pair.Value));
+        }).OrderByDescending(pair => pair.Prefix.Length).ToArray();
         Modules = Directory.EnumerateFiles(assetsPath, "*.dll").Order(StringComparer.Ordinal)
-            .Where(path => File.Exists(Path.ChangeExtension(path, ".pdb"))).Take(257).Select(Read).ToArray();
+            .Where(path => File.Exists(Path.ChangeExtension(path, ".pdb"))).Take(257).Select(Read)
+            .Select(module => module with { Methods = module.Methods.Select(method => method with
+                { Points = method.Points.Select(point => point with { Source = Map(point.Source) }).ToArray() }).ToArray() }).ToArray();
         if (Modules.Length is 0 or > 256)
-            throw new InvalidDataException("mobile.assetsPath must contain 1–256 matching PE/portable-PDB pairs.");
+            throw new InvalidDataException("remote.assetsPath must contain 1–256 matching PE/portable-PDB pairs.");
+
+        string Map(string source)
+        {
+            string normalized = source.Replace('\\', '/');
+            foreach (var (prefix, local) in mappings)
+            {
+                StringComparison comparison = prefix.Length > 1 && prefix[1] == ':' ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+                if (!normalized.Equals(prefix, comparison) && !normalized.StartsWith(prefix + "/", comparison)) continue;
+                string path = Path.GetFullPath(Path.Combine(local,
+                    normalized[prefix.Length..].TrimStart('/').Replace('/', Path.DirectorySeparatorChar)));
+                if (path != local && !path.StartsWith(Path.TrimEndingDirectorySeparator(local) + Path.DirectorySeparatorChar,
+                    OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+                    throw new InvalidDataException("Mapped PDB source escapes its configured local prefix.");
+                return path;
+            }
+            return source;
+        }
     }
 
     public RemoteBreakpoints Bind(string source, int[] lines)

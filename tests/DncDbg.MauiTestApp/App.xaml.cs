@@ -12,8 +12,8 @@ public partial class App : Application
 	protected override Window CreateWindow(IActivationState? activationState)
 	{
 		var window = new Window(new AppShell());
-#if DEBUG && DNCDBG_EXPERIMENTAL_REMOTE
-		window.Destroying += async (_, _) => await ExperimentalStartup.StopAsync();
+#if DEBUG
+		window.Destroying += (_, _) => TargetAgentStartup.Stop();
 #endif
 		return window;
 	}

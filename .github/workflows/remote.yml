@@ -15,6 +15,36 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  device:
+    name: Remote external Linux device (x64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - name: Prove generic deployment, SSH forwarding and debugging on a real Linux device
+        run: >-
+          dotnet run --project tests/DncDbg.DeviceTests -c Release --
+          --require-docker --output build/validation/device-ci
+      - name: Recover only this run's verified Docker resources
+        if: always()
+        timeout-minutes: 3
+        run: >-
+          dotnet run --project tests/DncDbg.DeviceTests -c Release --no-build --
+          --output build/validation/device-ci --cleanup
+      - name: Upload bounded external-device evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: remote-external-device-x64-${{ github.run_attempt }}
+          path: build/validation/device-ci/evidence/
+          retention-days: 7
+          if-no-files-found: error
   native:
     name: Remote native host (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -23,6 +53,11 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-26]
+        include:
+          - os: ubuntu-24.04
+            rid: linux-x64
+          - os: macos-26
+            rid: osx-arm64
     steps:
       - uses: actions/checkout@v4
         with:
@@ -43,6 +78,18 @@ jobs:
           --output build/validation/native-host-ci --cleanup
       - name: Assert ordinary Release adapter has no target agent or test hooks
         run: python3 tests/DncDbg.RemoteTests/assert_artifacts.py src/DncDbg.Dap/bin/Release
+      - name: Publish explicit qualified RID deployment assets
+        run: >-
+          python3 src/DncDbg.Remote.Target/publish.py --rid ${{ matrix.rid }}
+          --include-runtime --payload tests/DncDbg.NativeHostTests/Payload/bin/Debug/net10.0/Payload.dll
+          --output build/target-package-${{ matrix.rid }}
+      - name: Upload explicit target deployment package
+        uses: actions/upload-artifact@v4
+        with:
+          name: dncdbg-target-${{ matrix.rid }}
+          path: build/target-package-${{ matrix.rid }}/
+          retention-days: 7
+          if-no-files-found: error
       - name: Upload bounded native-host architecture evidence
         if: always()
         uses: actions/upload-artifact@v4

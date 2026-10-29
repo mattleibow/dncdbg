@@ -62,6 +62,26 @@ class MobileRunnerTests(unittest.TestCase):
                 self.suite.build("Release")
         self.assertIn("-p:DncDbgMobileTestPlatform=android", evaluate.call_args.args)
 
+    def test_android_sealing_uses_the_provisioned_exact_build_tools_not_the_sdk_default(self):
+        project = ET.parse(ROOT / "tests/DncDbg.MauiTestApp/DncDbg.MauiTestApp.csproj").getroot()
+        versions = [item.text for item in project.iter("AndroidSdkBuildToolsVersion")]
+        self.assertEqual(versions, ["37.0.0"])
+        for key in ("android", "androidX64"):
+            self.assertEqual(PIN[key]["buildTools"], versions[0])
+        self.suite.state |= {"uiPort": 9223, "name": "ownedrun"}
+        evaluated = {"Properties": {"MauiVersion": PIN["maui"], "DefineConstants": "",
+                                   "AndroidSdkBuildToolsVersion": versions[0]},
+                     "Items": {key: [] for key in ("NativeReference", "AndroidNativeLibrary", "PackageReference", "ProjectReference")}}
+        with patch.object(self.suite, "json", return_value=evaluated) as evaluate, \
+                patch.object(self.suite, "run") as run, patch("run_suite.Path.exists", return_value=True):
+            self.suite.build("Release")
+        build = next(call for call in run.call_args_list if call.args[:2] == ("dotnet", "build"))
+        self.assertIn("-p:AndroidSdkBuildToolsVersion=37.0.0", build.args)
+        self.assertTrue(any("AndroidSdkBuildToolsVersion" in str(arg) and str(arg).startswith("-getProperty:")
+                            for arg in evaluate.call_args.args))
+        workflow = (ROOT / ".github/workflows/mobile.yml").read_text()
+        self.assertIn('"build-tools;37.0.0"', workflow)
+
     def test_mobile_sdk_uses_explicit_in_process_msbuild_not_noisy_server_fallback(self):
         self.assertEqual(self.suite.env.get("DOTNET_CLI_USE_MSBUILD_SERVER"), "false")
         self.assertEqual(self.suite.env.get("MSBUILDUSESERVER"), "0")
@@ -91,7 +111,8 @@ class MobileRunnerTests(unittest.TestCase):
 
     def test_release_build_has_its_own_budget_and_useful_diagnostics(self):
         self.suite.state |= {"uiPort": 9223, "name": "ownedrun"}
-        evaluated = {"Properties": {"MauiVersion": PIN["maui"], "DefineConstants": ""},
+        evaluated = {"Properties": {"MauiVersion": PIN["maui"], "DefineConstants": "",
+                                   "AndroidSdkBuildToolsVersion": PIN["android"]["buildTools"]},
                      "Items": {key: [] for key in ("NativeReference", "AndroidNativeLibrary", "PackageReference", "ProjectReference")}}
         with patch.object(self.suite, "json", return_value=evaluated), patch.object(self.suite, "run") as run, \
                 patch("run_suite.Path.exists", return_value=True):

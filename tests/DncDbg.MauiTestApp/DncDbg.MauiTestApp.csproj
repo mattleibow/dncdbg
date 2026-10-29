@@ -71,6 +71,9 @@
 	<PropertyGroup Condition="'$(Configuration)' == 'Debug' And $([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'android'">
 		<EmbedAssembliesIntoApk>true</EmbedAssembliesIntoApk>
 	</PropertyGroup>
+	<PropertyGroup Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'android'">
+		<AndroidSdkBuildToolsVersion>37.0.0</AndroidSdkBuildToolsVersion>
+	</PropertyGroup>
 	<ItemGroup Condition="'$(Configuration)' == 'Debug'">
 		<Compile Include="../FixtureControl.cs" Link="FixtureControl.cs" />
 		<ProjectReference Include="../../src/DncDbg.Remote/DncDbg.Remote.csproj" />

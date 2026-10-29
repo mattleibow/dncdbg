@@ -236,7 +236,7 @@ For vendor builds, run the product tool explicitly after final linking/signing:
 ```bash
 dotnet run --project src/DncDbg.TargetControl -c Release -- \
   seal-mobile android-arm64 /absolute/Sensor-Signed.apk \
-  /trusted/native-build/dncdbg-agent.json /trusted/final-assets 36.0.0
+  /trusted/native-build/dncdbg-agent.json /trusted/final-assets 37.0.0
 dotnet run --project src/DncDbg.TargetControl -c Release -- \
   seal-mobile ios-arm64 /absolute/Sensor.app \
   /trusted/native-build/dncdbg-agent.json /trusted/final-assets ""
@@ -276,6 +276,11 @@ independently required. Generic physical-device command providers must run this
 same verification before deployment, verify the installed image through their
 trusted device route, and supply the resulting profile; a command tunnel does
 not waive package verification or hardware qualification.
+
+The qualified fixture explicitly selects Android build-tools **37.0.0**, matching
+the hosted SDK provisioning and both emulator tuples. Preflight requires its
+official `aapt2` and `apksigner.jar` before boot/build. It does not silently use the
+SDK's different default version or discover the newest installed tools.
 
 ## Apple simulator and physical device
 

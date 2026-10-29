@@ -181,6 +181,10 @@ class Suite:
                     f"Required Android emulator {self.android['emulatorVersion']} unavailable.")
             require(properties(sdk / f"ndk/{self.android['ndk']}/source.properties").get("Pkg.Revision") == self.android["ndk"],
                     "Pinned Android NDK unavailable.")
+            tools = sdk / "build-tools" / self.android["buildTools"]
+            require(properties(tools / "source.properties").get("Pkg.Revision") == self.android["buildTools"] and
+                    (tools / "aapt2").is_file() and (tools / "lib/apksigner.jar").is_file(),
+                    "Pinned official Android package identity/signature tools are unavailable.")
             if system == "Linux":
                 require(os.access("/dev/kvm", os.R_OK | os.W_OK), "Hosted Android requires accessible /dev/kvm; no software fallback.")
             self.run(sdk / "emulator/emulator", "-accel-check")
@@ -278,10 +282,15 @@ class Suite:
                       f"-p:DncDbgTestFaults={str(faults).lower()}",
                       "-p:EmbedAssembliesIntoApk=true", "-p:UseMonoRuntime=false"]
         properties += [f"-p:MauiDevFlowPort={self.state['uiPort']}", f"-p:MauiDevFlowSessionId={self.state['name']}"]
+        if self.args.platform == "android":
+            properties.append(f"-p:AndroidSdkBuildToolsVersion={self.android['buildTools']}")
         result = self.json("dotnet", "msbuild", ".", f"-p:TargetFramework={tfm}", f"-p:Configuration={configuration}",
-                           *properties, "-getProperty:MauiVersion,DefineConstants",
+                           *properties, "-getProperty:MauiVersion,DefineConstants,AndroidSdkBuildToolsVersion",
                            "-getItem:NativeReference,AndroidNativeLibrary,PackageReference,ProjectReference", cwd=FIXTURE)
         require(result["Properties"]["MauiVersion"] == PIN["maui"], "MAUI package differs from the pinned workload.")
+        if self.args.platform == "android":
+            require(result["Properties"].get("AndroidSdkBuildToolsVersion") == self.android["buildTools"],
+                    "SDK build/sealing tools differ from the provisioned exact Android tuple.")
         if configuration == "Release":
             require(not result["Items"]["NativeReference"] and not result["Items"]["AndroidNativeLibrary"] and
                     "DNCDBG_TEST_FAULTS" not in result["Properties"]["DefineConstants"] and

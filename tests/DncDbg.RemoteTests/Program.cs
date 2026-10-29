@@ -426,6 +426,8 @@ async Task TestDesktopAsync(string fixture, string source, string results)
             Check(actual == "42",
                 (dropWhileStopped ? "disconnect relinquishes callback stop" : "continue executes debuggee to completion") +
                 $" (result={JsonSerializer.Serialize(actual)})");
+            Check(File.ReadAllText(resultPath + ".retained") == "before\nafter\n" && !File.Exists(resultPath + ".pending"),
+                "target retains its own pre-detach file handle and atomically commits new post-detach I/O");
         }
         finally
         {

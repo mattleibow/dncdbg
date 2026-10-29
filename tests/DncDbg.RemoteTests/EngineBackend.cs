@@ -17,6 +17,7 @@ internal sealed class EngineBackend(string program, string resultPath, string[]?
     private static long nextStop;
     private RemoteStop? currentStop;
     private Process? target;
+    private DetachIoFence? ioFence;
     private volatile bool targetExited;
     public int ProcessId { get; private set; }
     public Exception? CleanupError { get; private set; }
@@ -40,12 +41,16 @@ internal sealed class EngineBackend(string program, string resultPath, string[]?
         engine.Stopped += OnStopped;
         engine.Exited += OnExited;
         subscribed = true;
-        try { engine.Launch(new LaunchOptions { Program = program, Args = [resultPath, .. fixtureArguments ?? []] }); }
+        if (fixtureArguments == null && afterRelinquished == null) ioFence = new(resultPath);
+        try { engine.Launch(new LaunchOptions { Program = program, Args = [resultPath, .. fixtureArguments ?? ioFence?.Arguments ?? []] }); }
         finally
         {
             ProcessId = engine.ProcessId;
             if (ProcessId > 0)
+            {
                 target = Process.GetProcessById(ProcessId);
+                _ = target.SafeHandle;
+            }
         }
         engine.ConfigurationDone();
         return ValueTask.CompletedTask;
@@ -72,6 +77,7 @@ internal sealed class EngineBackend(string program, string resultPath, string[]?
         try { stop = await stops.Reader.ReadAsync(cancellationToken); }
         catch (ChannelClosedException) { throw new InvalidOperationException("The target exited without another stop."); }
         RequireTarget();
+        if (ioFence != null) await ioFence.ReadyAsync(ProcessId, cancellationToken);
         currentStop = new(Interlocked.Increment(ref nextStop), stop.Reason, stop.ThreadId);
         return currentStop;
     }
@@ -146,14 +152,14 @@ internal sealed class EngineBackend(string program, string resultPath, string[]?
         try
         {
             engine.Detach();
+            engine.Dispose();
+            engineDisposed = true;
+            if (ioFence != null && target is { HasExited: false })
+                await ioFence.ReleaseAsync(target);
             if (afterRelinquished != null)
             {
-                engine.Dispose();
-                engineDisposed = true;
                 await afterRelinquished();
             }
-            // Keep the Windows native-debug pipeline and redirected handles alive
-            // until the detached fixture has committed its result and exited.
             if (target != null)
             {
                 await target.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
@@ -171,6 +177,7 @@ internal sealed class EngineBackend(string program, string resultPath, string[]?
         finally
         {
             if (!engineDisposed) engine.Dispose();
+            ioFence?.Dispose();
             target?.Dispose();
         }
     }

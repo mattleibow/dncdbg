@@ -51,7 +51,9 @@ internal static class DetachIoProof
                     check(identity.RootElement.GetProperty("ProcessId").GetInt32() == backend!.ProcessId &&
                         identity.RootElement.GetProperty("RetainedLength").GetInt64() > 0,
                         "the actual target owns an open, flushed file and control socket before the callback stop");
+                    File.WriteAllText(result + ".ownership.json", identity.RootElement.GetRawText());
                     process = Process.GetProcessById(backend.ProcessId);
+                    _ = process.SafeHandle;
                     RemoteFrame frame = (await client.StackAsync(stop.Id, token))[0];
                     check((await client.EvaluateAsync(frame.Handle, "answer", token)).Value == "42",
                         "minimal detach regression owns the real stopped managed frame");

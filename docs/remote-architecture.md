@@ -113,6 +113,52 @@ requires explicit paired TLS, not `adb tcpip`.
 
 ## Validation and packaging
 
+### Desktop transport detach and file-handle ownership
+
+The desktop transport fixture must prove normal application I/O **after**
+debugger ownership has been relinquished, not race I/O against the call that
+resumes the callback. Its old shape returned from the source breakpoint, opened
+the result file immediately and slept 150 ms while native detach unwound.
+Windows reproduced `IOException: The handle is invalid` during flush/disposal.
+Waiting for target exit before reading the result did not order file creation
+against debugger teardown.
+
+The fixture now uses a deterministic loopback ownership fence established
+**before** the source breakpoint. It opens, writes and flushes its own retained
+file before the callback stop. After transport EOF, the backend calls production
+`Detach` and completes `DebugEngine.Dispose`, then acknowledges the fence. Until
+that acknowledgement the target must remain alive and neither its result nor
+staging file may exist. The target then:
+
+1. Writes/flushes the retained pre-detach file handle again.
+2. Opens a new correctly owned file, writes `42`, flushes to disk and disposes it.
+3. Atomically renames that closed staging file to the result and exits normally.
+
+The original exact `disconnect relinquishes callback stop (result="42")`
+assertion remains, strengthened with retained-handle contents, normal Windows
+exit code, no pending file and exact process/socket cleanup. There are no timing
+sleeps, retries, ignored I/O exceptions or reduced assertions. The focused
+`--detach-io` probe runs three independent fail-fast cases; the Windows workflow
+also executes the full desktop transport proof.
+
+Inspection of production launch ownership found only parent-side process/thread
+handles and local pipe-client copies being closed; inherited child references
+are separate. The process watcher already retains its own OS handle. The test
+backend and probe now also open their observation handles while the target is
+alive, rather than asking for an exit code from an ID-only `Process` object after
+the process has vanished. No production handle-inheritance workaround is used.
+The first Windows probe preserved the target's retained handle and produced both
+correct files with OS exit code zero; it separately exposed that lazy observer
+handle bug, which is covered by retained observation handles.
+
+The native Windows runtime debugging channel itself owns remote-process handles
+during teardown (see the pinned runtime's
+[`LocalEventChannel::Delete`](https://github.com/dotnet/runtime/blob/v10.0.12/src/coreclr/debug/di/localeventchannel.cpp)).
+The proof now establishes a causal ownership boundary instead of assuming that
+callback resumption means all native debugger cleanup has already finished.
+The retained/pre-existing and new/post-teardown handle checks distinguish this
+fixture ordering defect from production closing unrelated application handles.
+
 The normal solution requires no mobile workload. Normal CI runs neutral contracts,
 the existing desktop proof/smoke/acceptance suite, and artifact-isolation checks.
 The remote workflow requires the same real native host on Linux/macOS and a real

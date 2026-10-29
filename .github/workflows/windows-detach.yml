@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: windows-detach-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   ownership:
     runs-on: windows-latest
@@ -26,6 +30,11 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force build/validation/windows-detach | Out-Null
           dotnet run --project tests/DncDbg.RemoteTests -c Release --no-build -- --detach-io tests/RemoteBreakpointApp/bin/Release/net10.0/RemoteBreakpointApp.dll tests/RemoteBreakpointApp/Program.cs build/validation/windows-detach 2>&1 | Tee-Object build/validation/windows-detach/proof.log
+          exit $LASTEXITCODE
+      - name: Verify the full unchanged transport inspection and disconnect assertions
+        shell: pwsh
+        run: |
+          dotnet run --project tests/DncDbg.RemoteTests -c Release --no-build -- --desktop tests/RemoteBreakpointApp/bin/Release/net10.0/RemoteBreakpointApp.dll tests/RemoteBreakpointApp/Program.cs build/validation/windows-detach/desktop 2>&1 | Tee-Object build/validation/windows-detach/desktop.log
           exit $LASTEXITCODE
       - uses: actions/upload-artifact@v4
         if: always()

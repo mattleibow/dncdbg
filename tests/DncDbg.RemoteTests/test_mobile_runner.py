@@ -56,6 +56,19 @@ class MobileRunnerTests(unittest.TestCase):
         self.assertEqual(self.suite.env.get("DOTNET_CLI_USE_MSBUILD_SERVER"), "false")
         self.assertEqual(self.suite.env.get("MSBUILDUSESERVER"), "0")
 
+    def test_preflight_preserves_sdk_isolation_after_platform_environment_refresh(self):
+        def sdk(*args, **kwargs):
+            self.assertEqual(self.suite.env["DOTNET_CLI_USE_MSBUILD_SERVER"], "false")
+            self.assertEqual(self.suite.env["MSBUILDUSESERVER"], "0")
+            raise RuntimeError("verified SDK environment")
+        with patch("run_suite.platform.system", return_value=self.suite.android["hostSystem"]), \
+                patch("run_suite.platform.machine", return_value=self.suite.android["hostArchitecture"]), \
+                patch("run_suite.tool_environment", return_value=dict(os.environ) |
+                      {"DOTNET_CLI_USE_MSBUILD_SERVER": "true", "MSBUILDUSESERVER": "1"}), \
+                patch.object(self.suite, "run", side_effect=sdk):
+            with self.assertRaisesRegex(RuntimeError, "verified SDK environment"):
+                self.suite.preflight()
+
     def test_simulator_signing_does_not_require_a_developer_identity_or_device_profile(self):
         project = ET.parse(ROOT / "tests/DncDbg.MauiTestApp/DncDbg.MauiTestApp.csproj").getroot()
         groups = [group for group in project.findall("PropertyGroup")

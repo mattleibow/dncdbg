@@ -32,6 +32,9 @@ def build_environment(environment):
     return {key: value for key, value in environment.items()
             if not any(part in key.upper() for part in sensitive)}
 
+def sdk_environment(environment):
+    return dict(environment) | {"DOTNET_CLI_USE_MSBUILD_SERVER": "false", "MSBUILDUSESERVER": "0"}
+
 
 def require(condition, message):
     if not condition:
@@ -49,9 +52,7 @@ class Suite:
         self.output = args.output.resolve()
         require(self.output.is_relative_to((ROOT / "build").resolve()), "Evidence must be under this checkout's build/.")
         self.state_path = self.output / "state.json"
-        self.env = dict(os.environ)
-        self.env["DOTNET_CLI_USE_MSBUILD_SERVER"] = "false"
-        self.env["MSBUILDUSESERVER"] = "0"
+        self.env = sdk_environment(os.environ)
         self.state = {}
         self.number = max((int(p.name.split("-", 1)[0]) for p in self.output.glob("*.log")
                            if p.name.split("-", 1)[0].isdigit()), default=0)
@@ -145,7 +146,7 @@ class Suite:
                                 (self.android["hostSystem"], self.android["hostArchitecture"]))
         require(platform.system() == system and platform.machine() == architecture,
                 f"The selected pinned tuple requires {system}/{architecture}; never substitute another ABI.")
-        self.env = tool_environment(self.args.platform)
+        self.env = sdk_environment(tool_environment(self.args.platform))
         scratch = self.output / "work/scratch"
         scratch.mkdir(parents=True)
         self.env["TMPDIR"] = str(scratch) + "/"

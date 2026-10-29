@@ -6,6 +6,10 @@ RUN rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/sourc
     && dpkg-query -W > /opt/dncdbg-os-packages.txt \
     && rm -rf /var/lib/apt/lists/* /etc/ssh/ssh_host_* \
     && mkdir -p /run/sshd /root/.ssh /device-sessions
+ARG DEVICE_UID=1001
+RUN useradd --create-home --user-group --uid "$DEVICE_UID" --password '*' --shell /bin/sh debugger \
+    && mkdir -p /home/debugger/.ssh && chmod 700 /home/debugger/.ssh \
+    && chown debugger:debugger /home/debugger/.ssh
 WORKDIR /workspace
 COPY . .
 RUN dotnet build tests/DncDbg.NativeHostTests/Payload/Payload.csproj -c Debug --nologo -v:q \

@@ -50,7 +50,8 @@ class DeviceProof(Proof):
         shutil.copytree(ROOT / "tests/RemoteBreakpointApp", context / "tests/RemoteBreakpointApp",
                         ignore=shutil.ignore_patterns("bin", "obj"))
         shutil.copy2(Path(__file__).with_name("Dockerfile"), context / "Dockerfile")
-        self.run("docker", "build", "--label", self.label, "-t", self.image, context, timeout=900)
+        self.run("docker", "build", "--build-arg", f"DEVICE_UID={os.getuid()}",
+                 "--label", self.label, "-t", self.image, context, timeout=900)
         self.run("docker", "run", "-d", "--name", self.container, "--label", self.label,
                  "--cap-add", "SYS_PTRACE", "--security-opt", "seccomp=unconfined",
                  "--publish", "127.0.0.1::22", "--mount", f"type=bind,src={self.shared},dst=/device-sessions", self.image)
@@ -69,9 +70,9 @@ class DeviceProof(Proof):
         self.run("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", self.key)
         self.run("docker", "exec", self.container, "ssh-keygen", "-q", "-t", "ed25519", "-N", "",
                  "-f", "/etc/ssh/ssh_host_ed25519_key")
-        self.run("docker", "cp", str(self.key) + ".pub", self.container + ":/root/.ssh/authorized_keys")
-        self.run("docker", "exec", self.container, "chown", "root:root", "/root/.ssh/authorized_keys")
-        self.run("docker", "exec", self.container, "chmod", "600", "/root/.ssh/authorized_keys")
+        self.run("docker", "cp", str(self.key) + ".pub", self.container + ":/home/debugger/.ssh/authorized_keys")
+        self.run("docker", "exec", self.container, "chown", "debugger:debugger", "/home/debugger/.ssh/authorized_keys")
+        self.run("docker", "exec", self.container, "chmod", "600", "/home/debugger/.ssh/authorized_keys")
         host_key = self.run("docker", "exec", self.container, "cat", "/etc/ssh/ssh_host_ed25519_key.pub").strip()
         self.ssh_port = int(self.run("docker", "port", self.container, "22/tcp").strip().rsplit(":", 1)[1])
         self.known.write_text(f"[127.0.0.1]:{self.ssh_port} {' '.join(host_key.split()[:2])}\n")
@@ -81,7 +82,7 @@ class DeviceProof(Proof):
                                 "-o", "UsePAM=no"], cwd=ROOT, env=self.env, stdout=self.ssh_log, stderr=subprocess.STDOUT)
         probe = ["ssh", "-F", "none", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
                  "-o", "ConnectTimeout=2", "-o", "UserKnownHostsFile=" + str(self.known),
-                 "-i", str(self.key), "-p", str(self.ssh_port), "root@127.0.0.1", "/bin/true"]
+                 "-i", str(self.key), "-p", str(self.ssh_port), "debugger@127.0.0.1", "/bin/true"]
         def ssh_ready():
             if self.sshd.poll() is not None:
                 raise RuntimeError("Owned SSH server exited: " + (self.output / "sshd.log").read_text())
@@ -117,7 +118,7 @@ class DeviceProof(Proof):
         return json.dumps(value) + "\n"
 
     def control(self, operation, **kwargs):
-        return {"executable": "docker", "arguments": ["exec", "-i", self.container, "dotnet",
+        return {"executable": "docker", "arguments": ["exec", "--user", "debugger", "-i", self.container, "dotnet",
                 "/opt/control/dncdbg-target-control.dll"], "input": self.request(operation, **kwargs), "timeoutSeconds": 60}
 
     def options(self, directory, provider, gate=None, listen=0):
@@ -125,7 +126,7 @@ class DeviceProof(Proof):
         common["sourceFileMap"] = {"/workspace": str(ROOT)}
         if provider == "localTcpProxy":
             common["target"] = {"provider": "ssh", "ssh": {
-                "host": "127.0.0.1", "port": self.ssh_port, "user": "root",
+                "host": "127.0.0.1", "port": self.ssh_port, "user": "debugger",
                 "identityFile": str(self.key), "knownHostsFile": str(self.known),
                 "controllerPath": "/opt/control/dncdbg-target-control", "workspaceRoot": "/device-sessions",
                 "bundlePath": str(self.bundle), "profilePath": str(self.profile), "start": self.start_info()}}
@@ -134,7 +135,7 @@ class DeviceProof(Proof):
             common["target"] = {"provider": "commands", "commands": {
                 "profilePath": str(self.profile), "bundlePath": str(self.bundle), "targetDirectory": "/device-sessions/{sessionId}",
                 "deploy": [self.control("prepare"), {"executable": "docker", "arguments": [
-                    "cp", str(self.bundle) + "/.", self.container + ":/device-sessions/{sessionId}/bundle"], "timeoutSeconds": 60}],
+                    "cp", "-a", str(self.bundle) + "/.", self.container + ":/device-sessions/{sessionId}/bundle"], "timeoutSeconds": 60}],
                 "start": self.control("start", profile=True, start=True), "readManifest": self.control("manifest"),
                 "stop": self.control("stop"), "detach": self.control("detach"),
                 "cleanup": self.control("cleanup"), "observe": self.control("observe")}}

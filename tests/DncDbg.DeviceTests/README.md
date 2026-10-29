@@ -25,6 +25,8 @@ and validates its trusted inventory before starting. Logs record build/package
 provenance; a changed required private ABI image fails closed.
 
 Each run owns a uniquely labelled image/container and independent workspace.
+The controller/SSH account is unprivileged and maps to the host runner UID, so
+owner-only diagnostic directories remain readable without relaxing permissions.
 Guest PIDs are never signalled on the host. Cleanup verifies Docker labels and
 adapter command identity before acting; unrelated resources are preserved.
 The product target worker removes credentials and deployments on actual target

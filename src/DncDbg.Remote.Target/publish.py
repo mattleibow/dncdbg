@@ -17,6 +17,13 @@ def run(*arguments):
     subprocess.run([str(x) for x in arguments], cwd=ROOT, check=True)
 
 
+def copy_notices(output):
+    shutil.copy2(ROOT / "LICENSE", output / "LICENSE")
+    shutil.copytree(ROOT / "src/licenses", output / "licenses")
+    (output / "THIRD-PARTY-NOTICES.md").write_text(
+        (ROOT / "THIRD-PARTY-NOTICES.md").read_text().replace("(src/licenses/", "(licenses/"))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rid", required=True, choices=["linux-x64", "linux-arm64", "osx-arm64", "android-arm64", "android-x64", "iossimulator-arm64", "ios-arm64"])
@@ -32,8 +39,7 @@ def main():
     if not output.is_relative_to((ROOT / "build").resolve()) or output.exists():
         raise RuntimeError("Choose a fresh explicit target deployment directory below build/.")
     output.mkdir(parents=True)
-    for name in ("LICENSE", "THIRD-PARTY-NOTICES.md"):
-        shutil.copy2(ROOT / name, output / name)
+    copy_notices(output)
     run(sys.executable, ROOT / "src/DncDbg.Remote.Target/build.py", args.rid, "--configuration", "Release")
     source = ROOT / "build/native-private" / args.rid
     for path in source.iterdir():

@@ -127,7 +127,8 @@ internal static class TargetContractChecks
                   encrypted.Arguments.Contains("IdentitiesOnly=yes") && encrypted.Arguments.Contains("-W") &&
                   encrypted.Arguments.Contains("127.0.0.1:23456") && encrypted.Arguments.Take(2).SequenceEqual(["-F", "none"]),
                 "built-in SSH forwarding disables ambient configuration and requires pinned-host noninteractive authentication");
-            check(encrypted.Arguments.Contains("UserKnownHostsFile=\"" + known + "\""),
+            check(encrypted.Arguments.Contains("UserKnownHostsFile=\"" +
+                  known.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("\"", "\\\"", StringComparison.Ordinal) + "\""),
                 "known-host file paths are safely quoted in SSH option grammar");
             bool unsafeHost = false;
             try { SshCommands.Validate(ssh with { Host = "-oProxyCommand=anything" }); }

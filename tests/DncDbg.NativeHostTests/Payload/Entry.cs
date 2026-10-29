@@ -38,7 +38,9 @@ public static class Entry
             {
                 result = "handled";
             }
-            File.WriteAllText(Path.Combine(directory, $"result-{sequence}"), result);
+            string staging = Path.Combine(directory, $"result-{sequence}.pending");
+            File.WriteAllText(staging, result);
+            File.Move(staging, Path.Combine(directory, $"result-{sequence}"));
         }
         return 2;
     }

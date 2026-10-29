@@ -1,6 +1,7 @@
 """Portable regression gates for mobile orchestration, isolation and evidence (no device required)."""
 import json
 import os
+import runpy
 from pathlib import Path
 import shutil
 import signal
@@ -154,6 +155,15 @@ class MobileRunnerTests(unittest.TestCase):
     def test_allows_existing_stock_native_dependencies(self):
         (self.output / "libdbgshim.dylib").write_bytes(b"stock CLR dependency")
         self.assertEqual(verify(self.output), 1)
+
+    def test_target_deployment_contains_linked_redistribution_notices(self):
+        publisher = runpy.run_path(str(ROOT / "src/DncDbg.Remote.Target/publish.py"))
+        publisher["copy_notices"](self.output)
+        notices = (self.output / "THIRD-PARTY-NOTICES.md").read_text()
+        self.assertNotIn("(src/licenses/", notices)
+        for name in ("nlohmann-json.LICENSE", "Microsoft.MIT.LICENSE", "JaneySprings-clrdbg.LICENSE"):
+            self.assertIn("(licenses/" + name + ")", notices)
+            self.assertEqual((self.output / "licenses" / name).read_bytes(), (ROOT / "src/licenses" / name).read_bytes())
 
     def test_rejects_renamed_native_code(self):
         (self.output / "ordinary-binary").write_bytes(b"Mach-O\0_dncdbg_prepare\0")

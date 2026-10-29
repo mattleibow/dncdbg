@@ -52,11 +52,11 @@ copyright notices and Apache-2.0 license. A complete copy is included in the
 fixture's [`Resources/Raw/OpenSans-LICENSE.txt`](tests/DncDbg.MauiTestApp/Resources/Raw/OpenSans-LICENSE.txt)
 and packaged as a MAUI asset.
 
-The mobile experiment was informed by an audit of JaneySprings/clrdbg
+The target-native bootstrap was informed by an audit of JaneySprings/clrdbg
 `DotNet.Debugging.Remote` at `bb5e52b7d0fdef874288a46a4a2aa0f1643e37d7`
 (MIT, Copyright (c) 2026 Nikita Romanov), itself attributing SharpDbg by
 MattParkerDev at `e3f2298746c619b16a7d683d39f1fe01aa5ef8b8`
-(MIT, Copyright (c) 2026 Matthew Parker). The experimental native startup topology
+(MIT, Copyright (c) 2026 Matthew Parker). The native startup topology
 in `src/DncDbg.Remote.Target/Bootstrap.cpp` now adapts its runtime discovery,
 target-side `DllMain` / `CoreCLRCreateCordbObject3` startup and native-owner
 approach. Both MIT notices are retained in

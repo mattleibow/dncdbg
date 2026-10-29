@@ -55,12 +55,19 @@ internal static class LifecycleChecks
             check(target.Stops == 1 && tunnel.Disposals == 1,
                 "natural-exit observation failure upgrades the earlier nonterminating close");
         });
-        await Case("incorrect exit notification fails closed", async (owner, target, tunnel) =>
+        await Case("notification code is only a fallback without OS observation", async (owner, target, tunnel) =>
+        {
+            target.Observe = _ => Task.FromResult<int?>(null);
+            int? code = await owner.CompleteExitAsync(7, token);
+            check(code == 7 && target.Detaches == 1 && target.Stops == 0 && tunnel.Disposals == 1,
+                "a declared exit code remains available when the provider cannot observe OS exit");
+        });
+        await Case("owned process observation is authoritative over an exit notification", async (owner, target, tunnel) =>
         {
             target.Observe = _ => Task.FromResult<int?>(7);
-            await Reject(owner.CompleteExitAsync(0, token), typeof(InvalidDataException));
-            check(target.Stops == 1 && tunnel.Disposals == 1,
-                "reported and observed exit-code disagreement cannot publish a successful exit");
+            int? code = await owner.CompleteExitAsync(0, token);
+            check(code == 7 && target.Detaches == 1 && target.Stops == 0 && tunnel.Disposals == 1,
+                "actual owned OS exit code wins over an earlier notification without fabricating a transport failure");
         });
         await Case("early exit with hung observer and cancellation", async (owner, target, tunnel) =>
         {

@@ -146,6 +146,8 @@ int main(int argc, char** argv) {
         }
         Phase("managed-entry-returned-to-native-host");
         int exitCode = static_cast<unsigned char>(result);
+        std::printf("NATIVE_HOST_EXIT_CODE %d\n", exitCode);
+        std::fflush(stdout);
         Check(complete(exitCode) == 1 ? 0 : -1, "native completion acknowledgment");
         fs::remove(descriptorFile);
         return exitCode;

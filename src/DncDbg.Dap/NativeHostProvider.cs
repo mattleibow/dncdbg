@@ -69,8 +69,15 @@ internal sealed class NativeHostProvider(TargetStartInfo options, string outputR
         return File.Exists(descriptor) ? await File.ReadAllTextAsync(descriptor, token) : null;
     }
 
-    public async Task<int?> WaitForExitAsync(CancellationToken token) =>
-        exitCode == null ? null : await exitCode.WaitAsync(token);
+    public async Task<int?> WaitForExitAsync(CancellationToken token)
+    {
+        if (exitCode == null) return null;
+        int observed = await exitCode.WaitAsync(token);
+        if (ArtifactsPath != null)
+            await File.WriteAllTextAsync(Path.Combine(ArtifactsPath, "process-exit.json"),
+                JsonSerializer.Serialize(new { SessionId = sessionId, ExitCode = observed }), token);
+        return observed;
+    }
 
     private static async Task<int> ObserveExitAsync(Process target)
     {

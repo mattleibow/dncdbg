@@ -68,8 +68,8 @@ Close intent is monotonic. A natural-exit settlement or explicit detach releases
 the debugger/route once but does not cache away ownership of later termination.
 Terminate cancels concurrent exit observation, serializes with any in-flight
 provider detach, and upgrades to owned stop/deployment cleanup exactly once.
-Observer failure/cancellation, early exit notification and conflicting actual
-exit codes force that stronger cleanup with an independent budget. Already
+Observer failure/cancellation and an early exit notification whose actual process
+never settles force that stronger cleanup with an independent budget. Already
 settled deployment cleanup is not repeated and a completed transport is never
 disposed twice. Once upgraded, subsequent weaker close requests join the same
 terminating settlement; they cannot return an earlier detach's stale success
@@ -96,6 +96,11 @@ is alive. The owner publishes the typed exit event and settles DBI cleanup.
 The lifecycle disposes the route and observes the provider's actual OS exit code,
 then DAP emits `exited`, followed by `terminated`, exactly once. Abrupt target EOF
 does not manufacture exit code zero; unknown mobile exit codes remain unknown.
+Actual owned process observation is authoritative over a notification's exit
+code; a notification can precede final process settlement and is not a second OS
+exit observation. The notification is a fallback only for providers without exit
+observation. Native-host diagnostics retain both its managed return code and its
+actual observed process exit.
 
 Debuggee detach releases the callback stop and debugger owner, leaving the
 application usable. The provider does not kill a detached application or remove a

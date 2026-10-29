@@ -135,8 +135,6 @@ internal sealed class RemoteLifecycle(IRemoteTargetProvider target, ITunnelProvi
             await CloseAsync(terminate: false);
             int? observed = await target.WaitForExitAsync(settlement.Token);
             settlement.Token.ThrowIfCancellationRequested();
-            if (observed != null && reportedExitCode != null && observed != reportedExitCode)
-                throw new InvalidDataException("Remote exit notification differs from the owned process exit code.");
             return observed ?? reportedExitCode;
         }
         catch (Exception observation)

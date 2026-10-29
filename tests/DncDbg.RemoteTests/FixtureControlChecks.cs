@@ -68,6 +68,16 @@ internal static class FixtureControlChecks
         try { await pending; throw new InvalidOperationException("Canceled fixture operation succeeded."); }
         catch (IOException) { check(true, "teardown interrupts an in-flight fixture command without waiting for UI dispatch"); }
         check(!File.Exists(descriptor), "UI-thread teardown settles listener and credential without synchronization-context deadlock");
+        for (int attempt = 0; attempt < 50; attempt++)
+        {
+            var racing = new FixtureControlServer(descriptor, new string('c', 32),
+                (_, _) => Task.FromResult(new FixtureState(0, "", "")));
+            using var peer = new TcpClient();
+            await peer.ConnectAsync(IPAddress.Loopback, racing.Endpoint.Port, token);
+            await racing.DisposeAsync();
+            await racing.DisposeAsync();
+        }
+        check(!File.Exists(descriptor), "50 accept/stop races settle without late listener publication or canceled not-listening errors");
         Directory.Delete(directory, recursive: true);
     }
 

@@ -86,7 +86,7 @@ public sealed class FixtureControlServer : IAsyncDisposable
     {
         try
         {
-            while (true)
+            while (!lifetime.IsCancellationRequested)
             {
                 TcpClient peer = await listener.AcceptTcpClientAsync(lifetime.Token).ConfigureAwait(false);
                 peers.TryAdd(peer, 0);
@@ -97,7 +97,7 @@ public sealed class FixtureControlServer : IAsyncDisposable
             }
         }
         catch (Exception error) when (lifetime.IsCancellationRequested &&
-            error is OperationCanceledException or SocketException or ObjectDisposedException) { }
+            error is OperationCanceledException or SocketException or ObjectDisposedException or InvalidOperationException) { }
     }
 
     private async Task HandleAsync(TcpClient peer)
@@ -123,6 +123,7 @@ public sealed class FixtureControlServer : IAsyncDisposable
                 await FixtureFrames.WriteAsync(stream, JsonSerializer.SerializeToUtf8Bytes(response, FixtureJson.Default.FixtureResponse), lifetime.Token).ConfigureAwait(false);
             }
             catch (Exception error) when (error is IOException or SocketException or OperationCanceledException or ObjectDisposedException or JsonException) { }
+            catch (InvalidOperationException) when (lifetime.IsCancellationRequested) { }
             finally { peers.TryRemove(peer, out _); }
         }
     }

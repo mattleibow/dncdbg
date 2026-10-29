@@ -105,6 +105,8 @@ def tool():
             print("CDHash=" + "f" * 40, file=sys.stderr)
         return
     if "forward" in args and (state / "daemon-ready.json").exists():
+        if "tcp:0" in args:
+            (state / "forward-cli-started").touch()
         import runpy
         runpy.run_path(str(Path(__file__).with_name("fake_adb.py")), run_name="__client__")
         return

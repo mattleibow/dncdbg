@@ -27,6 +27,11 @@ class FakeAdbDaemon:
         return json.loads((self.state / "daemon-mappings.json").read_text())
 
     def committed(self):
+        startup_deadline = time.monotonic() + 30
+        while not (self.state / "forward-cli-started").exists():
+            if time.monotonic() > startup_deadline:
+                raise TimeoutError("Package admission did not reach the forward CLI.")
+            time.sleep(0.01)
         deadline = time.monotonic() + 5
         while not (self.state / "daemon-committed.json").exists():
             if time.monotonic() > deadline:

@@ -23,6 +23,7 @@ from run_suite import PIN, Suite
 from run_device import verify_ui, Ui
 from run_direct import unavailable_broker_environment, FixtureApp
 from assert_artifacts import verify
+from fake_adb import FakeAdbDaemon
 
 
 class MobileRunnerTests(unittest.TestCase):
@@ -81,6 +82,22 @@ class MobileRunnerTests(unittest.TestCase):
                             for arg in evaluate.call_args.args))
         workflow = (ROOT / ".github/workflows/mobile.yml").read_text()
         self.assertIn('"build-tools;37.0.0"', workflow)
+
+    def test_forward_commit_deadline_starts_after_package_admission_not_before_it(self):
+        daemon = FakeAdbDaemon.__new__(FakeAdbDaemon)
+        daemon.state = self.output
+        clock, ticks = [0.0], [0]
+        def advance(_):
+            ticks[0] += 1
+            if ticks[0] == 1:
+                clock[0] = 10.0
+                (self.output / "forward-cli-started").touch()
+            else:
+                clock[0] = 11.0
+                (self.output / "daemon-committed.json").write_text('{"pid":123,"child":124}')
+        with patch("fake_adb.time.monotonic", side_effect=lambda: clock[0]), patch("fake_adb.time.sleep", side_effect=advance):
+            self.assertEqual(daemon.committed(), {"pid": 123, "child": 124})
+        self.assertEqual(ticks[0], 2)
 
     def test_mobile_sdk_uses_explicit_in_process_msbuild_not_noisy_server_fallback(self):
         self.assertEqual(self.suite.env.get("DOTNET_CLI_USE_MSBUILD_SERVER"), "false")

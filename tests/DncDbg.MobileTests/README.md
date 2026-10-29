@@ -57,6 +57,10 @@ their own target frameworks.
 - **iOS:** Apple Silicon, Xcode **26.6 / 17F113**, simulator runtime
   **iOS 26.5 / 23F77**, device type **iPhone 17 Pro**. `DEVELOPER_DIR` is scoped;
   no global `xcode-select` change, runtime download or nearest-device fallback.
+  Simulator artifacts are signed ad hoc (`CodesignKey=-`) with the Debug
+  entitlements and no provisioning profile; a hosted runner needs no Apple
+  developer certificate. Code signing/verification is not disabled. Physical
+  device builds do not inherit this override and still require real signing.
 - **Local Android arm64:** Apple Silicon/Hypervisor.framework, emulator **37.1.11**, image
   **`system-images;android-37.1;google_apis_ps16k;arm64-v8a` revision 8**, device
   definition `pixel_6`, NDK **29.0.14206865**, Java and SDK CLI tools.

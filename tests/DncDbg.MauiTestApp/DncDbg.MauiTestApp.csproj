@@ -118,6 +118,11 @@
 	<PropertyGroup Condition="'$(Configuration)' == 'Debug' And $([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'ios'">
 		<CodesignEntitlements>Platforms/iOS/Entitlements.Debug.plist</CodesignEntitlements>
 	</PropertyGroup>
+	<PropertyGroup Condition="'$(RuntimeIdentifier)' == 'iossimulator-arm64'">
+		<EnableCodeSigning>true</EnableCodeSigning>
+		<CodesignKey>-</CodesignKey>
+		<CodesignRequireProvisioningProfile>false</CodesignRequireProvisioningProfile>
+	</PropertyGroup>
 	<Target Name="DeclareRemoteRuntime" BeforeTargets="PrepareForBuild">
 		<PropertyGroup Condition="'$(UseMonoRuntime)' == 'true'">
 			<DefineConstants>$(DefineConstants);DNCDBG_MONO_RUNTIME</DefineConstants>

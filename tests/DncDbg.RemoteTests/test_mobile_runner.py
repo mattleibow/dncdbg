@@ -8,6 +8,7 @@ import signal
 import subprocess
 import sys
 import unittest
+import xml.etree.ElementTree as ET
 from unittest.mock import patch
 import uuid
 import zipfile
@@ -48,6 +49,16 @@ class MobileRunnerTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "evaluation only"):
                 self.suite.build("Release")
         self.assertIn("-p:DncDbgMobileTestPlatform=android", evaluate.call_args.args)
+
+    def test_simulator_signing_does_not_require_a_developer_identity_or_device_profile(self):
+        project = ET.parse(ROOT / "tests/DncDbg.MauiTestApp/DncDbg.MauiTestApp.csproj").getroot()
+        groups = [group for group in project.findall("PropertyGroup")
+                  if group.attrib.get("Condition") == "'$(RuntimeIdentifier)' == 'iossimulator-arm64'"]
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0].findtext("CodesignKey"), "-")
+        self.assertEqual(groups[0].findtext("CodesignRequireProvisioningProfile"), "false")
+        self.assertNotEqual(groups[0].findtext("EnableCodeSigning"), "false")
+        self.assertIsNone(groups[0].find("DisableCodesignVerification"))
 
     def test_release_build_has_its_own_budget_and_useful_diagnostics(self):
         self.suite.state |= {"uiPort": 9223, "name": "ownedrun"}

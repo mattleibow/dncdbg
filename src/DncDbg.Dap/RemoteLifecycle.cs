@@ -118,7 +118,7 @@ internal sealed class RemoteLifecycle(IRemoteTargetProvider target, ITunnelProvi
                 acquisitionCancellation.Cancel();
             }
             closing ??= CloseCoreAsync();
-            return terminate ? terminating ??= TerminateCoreAsync(closing) : closing;
+            return terminationRequested ? terminating ??= TerminateCoreAsync(closing) : closing;
         }
     }
 

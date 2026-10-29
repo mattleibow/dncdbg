@@ -20,6 +20,23 @@ internal static class LifecycleChecks
             check(target.Detaches == 0 && target.Stops == 1 && tunnel.Disposals == 1,
                 "terminating close is monotonic and exact-once");
         });
+        await Case("later detach joins an in-flight stronger close", async (owner, target, tunnel) =>
+        {
+            await owner.CloseAsync(false);
+            target.StopGate = new();
+            Task stopping = owner.CloseAsync(true);
+            await target.StopStarted.Task.WaitAsync(token);
+            Task subsequentDetach = owner.CloseAsync(false);
+            try
+            {
+                check(ReferenceEquals(stopping, subsequentDetach) && !subsequentDetach.IsCompleted,
+                    "a weaker later close joins terminating settlement instead of returning stale detach success");
+            }
+            finally { target.StopGate.SetResult(); }
+            await Task.WhenAll(stopping, subsequentDetach);
+            check(target.Stops == 1 && tunnel.Disposals == 1,
+                "joining stronger settlement does not repeat stop or transport disposal");
+        });
         await Case("terminate racing detach settlement", async (owner, target, tunnel) =>
         {
             target.DetachGate = new();
@@ -129,7 +146,9 @@ internal static class LifecycleChecks
         public TaskCompletionSource AcquisitionStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource ObservationStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource DetachStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource StopStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource? DetachGate { get; set; }
+        public TaskCompletionSource? StopGate { get; set; }
         public Func<CancellationToken, Task<int?>> Observe { get; set; } = _ => Task.FromResult<int?>(0);
         public async Task AcquireAsync(string session, CancellationToken token)
         {
@@ -139,7 +158,13 @@ internal static class LifecycleChecks
         public Task<string?> ReadDescriptorAsync(CancellationToken token) => Task.FromResult<string?>(null);
         public async Task CloseAsync(bool terminate, CancellationToken token)
         {
-            if (terminate) { Interlocked.Increment(ref Stops); return; }
+            if (terminate)
+            {
+                Interlocked.Increment(ref Stops);
+                StopStarted.TrySetResult();
+                if (StopGate != null) await StopGate.Task.WaitAsync(token);
+                return;
+            }
             Interlocked.Increment(ref Detaches);
             DetachStarted.TrySetResult();
             if (DetachGate != null) await DetachGate.Task.WaitAsync(token);

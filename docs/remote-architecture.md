@@ -71,7 +71,9 @@ provider detach, and upgrades to owned stop/deployment cleanup exactly once.
 Observer failure/cancellation, early exit notification and conflicting actual
 exit codes force that stronger cleanup with an independent budget. Already
 settled deployment cleanup is not repeated and a completed transport is never
-disposed twice.
+disposed twice. Once upgraded, subsequent weaker close requests join the same
+terminating settlement; they cannot return an earlier detach's stale success
+while owned termination is still in flight.
 
 `dncdbg-target-control` owns a detached device worker and the actual `Process`
 object, not a guessed guest PID. It validates the deployed inventory, records the

@@ -150,16 +150,15 @@ public sealed partial class DebugEngine : IEvalHost
                     process.SetEnableCustomNotification(notificationClass.Raw, true);
                     break;
                 }
-            // Only the evaluating thread runs, so the evaluation cannot be blocked on (or disturb) other threads' progress.
+            // Freeze peers during normal evaluation; abort recovery must let dependencies make progress.
             process.SetAllThreadsDebugState(CorDebugThreadState.THREAD_SUSPEND, thread.Raw);
             _stopped = false;
             process.Continue(false);
 
             if (!WaitForEval(pending, isImplicit ? ImplicitEvalTimeout : EvalTimeout))
             {
-                // Timed out or cancelled. Aborting only works once the thread is back in managed code: an evaluation
-                // stuck in a wait cannot be stopped at all. It is then left behind; it completes (unnoticed) whenever
-                // the debuggee gets to run long enough.
+                // Aborting requires the thread to return to managed code. Release peer threads during recovery,
+                // as native does, so a dependency can unblock it before we decide the evaluation is abandoned.
                 string reason = pending.Cancelled ? "Evaluation cancelled." : "Evaluation timed out.";
                 Log?.Invoke(reason + " Aborting.");
                 if (isImplicit && !pending.Cancelled && !_implicitEvalTimedOut)
@@ -172,7 +171,10 @@ public sealed partial class DebugEngine : IEvalHost
                 {
                     if (!_stopped)
                         Synchronize(process);
-                    eval.Abort();
+                    process.SetAllThreadsDebugState(CorDebugThreadState.THREAD_RUN, null!);
+                    Log?.Invoke("Evaluation abort recovery temporarily allows all managed threads to run.");
+                    if ((int)eval.TryAbort() < 0)
+                        eval.RudeAbort();
                     _stopped = false;
                     process.Continue(false);
                 }

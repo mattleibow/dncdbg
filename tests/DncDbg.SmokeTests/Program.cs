@@ -27,9 +27,9 @@ if (args is ["--safety", var debugger])
     Console.WriteLine($"Passed {await SafetyChecks.Run(Path.GetFullPath(debugger), typeof(Program).Assembly.Location)} safety checks.");
     return;
 }
-if (args is ["--evaluation"])
+if (args is ["--evaluation", .. var scenarios])
 {
-    Console.WriteLine($"Passed {EvaluationChecks.Run()} evaluation lifecycle checks.");
+    Console.WriteLine($"Passed {EvaluationChecks.Run(scenarios)} evaluation lifecycle checks.");
     return;
 }
 

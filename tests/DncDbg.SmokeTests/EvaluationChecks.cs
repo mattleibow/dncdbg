@@ -4,10 +4,12 @@ using DncDbg.Engine;
 
 internal static class EvaluationChecks
 {
-    public static int Run()
+    public static int Run(params string[] scenarios)
     {
         int checks = 0;
-        foreach (string scenario in new[] { "abort", "fallback", "queued-completion", "late-notification", "other-thread" })
+        if (scenarios.Length == 0)
+            scenarios = ["abort", "fallback", "queued-completion", "late-notification", "other-thread"];
+        foreach (string scenario in scenarios)
         {
             var calls = new List<string>();
             using var engine = new DebugEngine();

@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.Threading;
 using DbgTest;
 using DbgTest.DAP;
 using DbgTest.Script;
@@ -32,6 +33,9 @@ public struct TestStruct5
 
 class Program
 {
+    public static readonly ManualResetEventSlim Entered = new ManualResetEventSlim();
+    public static readonly ManualResetEventSlim Released = new ManualResetEventSlim();
+
     static void Main(string[] args)
     {
         Label.Checkpoint("init", "inspect",
@@ -48,7 +52,17 @@ class Program
                 Context.Continue(@"__FILE__:__LINE__");
             });
 
+        using var ready = new ManualResetEventSlim();
+        var worker = new System.Threading.Thread(() =>
+        {
+            ready.Set();
+            Entered.Wait();
+            Released.Set();
+        });
+        worker.Start();
+        ready.Wait();
         TestStruct5 value = new TestStruct5();
+        WorkerDependency blocked = new WorkerDependency();
         Debugger.NotifyOfCrossThreadDependency();
         GC.KeepAlive(value);                                           Label.Breakpoint("inspect");
 
@@ -57,10 +71,13 @@ class Program
             {
                 Context Context = (Context)context;
                 Context.CheckCrossThreadEvaluation(@"__FILE__:__LINE__", "inspect");
+                Context.CheckWorkerDependency(@"__FILE__:__LINE__");
                 Context.Continue(@"__FILE__:__LINE__");
             });
 
         GC.KeepAlive(value);                                           Label.Breakpoint("after");
+        GC.KeepAlive(blocked);
+        worker.Join();
 
         Label.Checkpoint("after", "finish",
             (Object context) =>
@@ -79,12 +96,40 @@ class Program
             });
     }
 }
+
+public struct WorkerDependency
+{
+    public int val1 { get { return 111; } }
+    public int val2
+    {
+        get
+        {
+            Program.Entered.Set();
+            Program.Released.Wait();
+            return 222;
+        }
+    }
+    public string val3 { get { return "text_333"; } }
+    public float val5 { get { return 555.5f; } }
+}
 }
 
 namespace DbgTest.Script
 {
 partial class Context
 {
+    public void CheckWorkerDependency(string trace)
+    {
+        Int64 frameId = DetectFrameId(trace, "inspect");
+        int locals = GetVariablesReference(trace, frameId, "Locals");
+        int reference = GetChildVariablesReference(trace, locals, "blocked");
+        EvalVariable(trace, reference, "", "val2", "<error>");
+        GetAndCheckValue(trace, frameId, "111", "int", "blocked.val1");
+        GetAndCheckValue(trace, frameId, "\"text_333\"", "string", "blocked.val3");
+        GetAndCheckValue(trace, frameId, "555.5", "float", "blocked.val5");
+        EvalVariable(trace, reference, "int", "val2", "222");
+    }
+
     public void CheckCrossThreadEvaluation(string trace, string breakpoint)
     {
         WasBreakpointHit(trace, breakpoint);

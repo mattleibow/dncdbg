@@ -1,0 +1,99 @@
+name: Evaluator lifecycle parity
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - src/DncDbg.Engine/**
+      - tests/DncDbg.SmokeTests/**
+      - test-suite/TestCrossThreadEvaluation/**
+      - .github/workflows/evaluation.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: evaluation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-native-first:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Materialize immutable native references and pre-fix managed baseline
+        run: |
+          set -euo pipefail
+          root=build/validation/evaluation
+          mkdir -p "$root/context"/{historical,current,baseline} "$root/evidence"
+          git fetch --no-tags https://github.com/viewizard/dncdbg.git 9e970bf0275c2046184b35e3dc7783d1eefb80b3
+          git archive fc643dfcdf8feec45d2700ce6466774323b3032b | tar -x -C "$root/context/historical"
+          git archive 9e970bf0275c2046184b35e3dc7783d1eefb80b3 | tar -x -C "$root/context/current"
+          git archive a94f4f80ad3d99f93dedf239a2769d1bc59c15e1 | tar -x -C "$root/context/baseline"
+          git rev-parse HEAD > "$root/evidence/head.txt"
+          printf '%s\n' fc643dfcdf8feec45d2700ce6466774323b3032b 9e970bf0275c2046184b35e3dc7783d1eefb80b3 a94f4f80ad3d99f93dedf239a2769d1bc59c15e1 > "$root/evidence/references.txt"
+          docker build -f tests/DncDbg.SmokeTests/Evaluation.Dockerfile \
+            -t dncdbg-evaluation:${{ github.run_id }} "$root/context" 2>&1 | tee "$root/evidence/build.log"
+      - name: Native first, deterministic managed red, repeated green and full suites
+        run: |
+          set -euo pipefail
+          docker run --rm --cpus 2 --cap-add SYS_PTRACE --security-opt seccomp=unconfined \
+            --mount "type=bind,src=$PWD,dst=/workspace/source" \
+            dncdbg-evaluation:${{ github.run_id }} bash -euo pipefail -c '
+              evidence=/workspace/source/build/validation/evaluation/evidence
+              git config --global --add safe.directory /workspace/source
+              dotnet --info > "$evidence/runtime.txt"
+              sha256sum /usr/share/dotnet/shared/Microsoft.NETCore.App/10.0.14/lib{coreclr,mscordbi,mscordaccore}.so /opt/native-{historical,current}/* > "$evidence/runtime-native.sha256"
+              cp /opt/evaluation-packages.txt "$evidence/packages.txt"
+              export TMPDIR=$(mktemp -d /tmp/er.XXXXXX)
+              DNCDBG=/opt/native-historical/dncdbg pwsh ./test-suite/run_tests.ps1 TestCrossThreadEvaluation TestVariables > "$evidence/native-first.log" 2>&1
+              echo "Historical native first: PASS"
+              export TMPDIR=$(mktemp -d /tmp/er.XXXXXX)
+              if DNCDBG=/opt/managed-baseline/dncdbg-dap pwsh ./test-suite/run_tests.ps1 TestCrossThreadEvaluation > "$evidence/managed-red.log" 2>&1; then
+                echo "Pre-fix managed baseline unexpectedly passed"; exit 1
+              fi
+              grep -q "earlier evaluation could not be interrupted" "$evidence/managed-red.log"
+              echo "Deterministic pre-fix managed red: CONFIRMED"
+              dotnet publish src/DncDbg.Dap -c Release -o /opt/managed-current --nologo -v:q > "$evidence/managed-build.log" 2>&1
+              dotnet build tests/DncDbg.SmokeTests -c Release --nologo -v:q >> "$evidence/managed-build.log" 2>&1
+              dotnet run --project tests/DncDbg.SmokeTests -c Release --no-build -- --evaluation > "$evidence/callback-green.log" 2>&1
+              yes > /dev/null & load1=$!
+              yes > /dev/null & load2=$!
+              trap "kill $load1 $load2; wait $load1 $load2 || true" EXIT
+              for provider in native managed; do
+                adapter=/opt/native-historical/dncdbg
+                if [ "$provider" = managed ]; then adapter=/opt/managed-current/dncdbg-dap; fi
+                for round in 1 2 3 4 5; do
+                  export TMPDIR=$(mktemp -d /tmp/er.XXXXXX)
+                  export DNCDBG_LOG_DIR="$evidence/$provider-$round-traces"
+                  DNCDBG="$adapter" pwsh ./test-suite/run_tests.ps1 TestCrossThreadEvaluation TestVariables > "$evidence/$provider-$round.log" 2>&1
+                  echo "$provider focused/unchanged round $round: PASS"
+                done
+              done
+              kill "$load1" "$load2"; wait "$load1" "$load2" || true
+              trap - EXIT
+              unset DNCDBG_LOG_DIR
+              for provider in native managed; do
+                adapter=/opt/native-current/dncdbg
+                if [ "$provider" = managed ]; then adapter=/opt/managed-current/dncdbg-dap; fi
+                export TMPDIR=$(mktemp -d /tmp/er.XXXXXX)
+                DNCDBG="$adapter" pwsh ./test-suite/run_tests.ps1 > "$evidence/$provider-full.log" 2>&1
+                tail -1 "$evidence/$provider-full.log"
+              done
+              export TMPDIR=$(mktemp -d /tmp/er.XXXXXX)
+              dotnet run --project tests/DncDbg.SmokeTests -c Release --no-build -- /opt/managed-current/dncdbg-dap > "$evidence/smoke.log" 2>&1
+              tail -1 "$evidence/smoke.log"
+            '
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evaluator-linux-${{ github.event.pull_request.head.sha || github.sha }}-${{ github.run_attempt }}
+          path: build/validation/evaluation/evidence/
+          if-no-files-found: error
+          retention-days: 14

@@ -97,11 +97,13 @@ partial class Context
             ("4294967296", 32, false),
             (" 2", 32, false),
             ("+2", 32, false),
-            ("2suffix", 2, false),
-            ("2 ", 2, false),
+            ("2suffix", 32, false),
+            ("2 ", 32, false),
             (null, 32, false),
             ("0", 0, true),
             ("2", 2, true),
+            ("2suffix", 32, true),
+            ("2 ", 32, true),
         };
         foreach (var scenario in cases)
         {

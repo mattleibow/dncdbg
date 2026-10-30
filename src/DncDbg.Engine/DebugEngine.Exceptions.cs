@@ -20,17 +20,20 @@ public sealed partial class DebugEngine
     }
 
     private uint ParseInnerExceptionWalkLimit(string? value)
+        => ParseEnvironmentNumber(value, InnerExceptionWalkLimitVariable, DefaultInnerExceptionWalkLimit);
+
+    private uint ParseEnvironmentNumber(string? value, string variable, uint defaultValue,
+        uint minimum = 0, uint maximum = uint.MaxValue)
     {
         if (value == null)
-            return DefaultInnerExceptionWalkLimit;
-        int digits = 0;
-        while (digits < value.Length && value[digits] is >= '0' and <= '9')
-            digits++;
-        if (digits > 0 && uint.TryParse(value.AsSpan(0, digits), System.Globalization.NumberStyles.None,
-            System.Globalization.CultureInfo.InvariantCulture, out uint limit))
-            return limit;
-        Log?.Invoke($"Failed to parse {InnerExceptionWalkLimitVariable} as a number, using the default value {DefaultInnerExceptionWalkLimit}.");
-        return DefaultInnerExceptionWalkLimit;
+            return defaultValue;
+        if (value.Length > 0 && value.All(static c => c is >= '0' and <= '9') &&
+            uint.TryParse(value, System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out uint number) &&
+            number >= minimum && number <= maximum)
+            return number;
+        Log?.Invoke($"Invalid {variable} value '{value}'; expected an unsigned decimal number in range {minimum}-{maximum}, using the default value {defaultValue}.");
+        return defaultValue;
     }
 
     public const string FilterAll = "all";

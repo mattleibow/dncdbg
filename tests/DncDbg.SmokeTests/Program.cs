@@ -2,6 +2,17 @@ using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 
+if (args is ["--fixture", "project-profile"])
+{
+    Console.WriteLine(JsonSerializer.Serialize(new
+    {
+        directory = Directory.GetCurrentDirectory(),
+        value = Environment.GetEnvironmentVariable("DNCDBG_PROJECT_PROFILE"),
+        urls = Environment.GetEnvironmentVariable("ASPNETCORE_URLS"),
+    }));
+    return;
+}
+
 if (args is ["--fixture", "sleep"])
 {
     Thread.Sleep(TimeSpan.FromSeconds(60));
@@ -32,13 +43,18 @@ if (args is ["--evaluation", .. var scenarios])
     Console.WriteLine($"Passed {EvaluationChecks.Run(scenarios)} evaluation lifecycle checks.");
     return;
 }
+if (args is ["--launch-arguments"])
+{
+    Console.WriteLine($"Passed {LaunchArgumentChecks.Run()} launch argument checks.");
+    return;
+}
 
 if (args.Length != 1)
     throw new ArgumentException("Supply the path to the dncdbg-dap apphost.");
 string executable = Path.GetFullPath(args[0]);
 string logDirectory = Path.GetFullPath("build/validation/cli-smoke");
 Directory.CreateDirectory(logDirectory);
-int passed = EvaluationChecks.Run();
+int passed = EvaluationChecks.Run() + LaunchArgumentChecks.Run();
 
 foreach (string option in new[] { "--help", "-h", "--version", "--buildinfo" })
 {

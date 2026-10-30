@@ -208,13 +208,16 @@ continued event.
 🧩  env?: { [key: string]: string; };
 🧩  sourceFileMap?: { [key: string]: string; };
 🧩  program?: string;
-🧩  args?: string;
+🧩  args?: string | string[];
 🧩  stopAtEntry?: boolean;
 🧩  justMyCode?: boolean;
 🧩  enableStepFiltering?: boolean;
 🧩  expressionEvaluationOptions?: ExpressionEvaluationOptions;
 🧩  console?: 'internalConsole' | 'remoteConsole' | 'externalTerminal';
 🧩  suppressJITOptimizations?: boolean;
+🧩  launchSettingsProfile?: string | null;
+🧩  launchSettingsFilePath?: string | null;
+        ℹ️  note: see docs/launch_settings.md for profile selection, precedence and restart behavior
 ```
 #### LaunchResponse
 ```text

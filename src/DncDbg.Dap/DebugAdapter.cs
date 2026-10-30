@@ -16,6 +16,7 @@ internal sealed class DebugAdapter : IDisposable
 
     // what a restart has to bring back
     private LaunchArguments? _launchArguments;
+    private ResolvedLaunch? _resolvedLaunch;
     private AttachArguments? _attachArguments;
     private bool _initialized;
     private bool _configurationDone;
@@ -238,6 +239,7 @@ internal sealed class DebugAdapter : IDisposable
                     old.Dispose();
                     _terminatedSent = 0;
                     _launchArguments = null;
+                    _resolvedLaunch = null;
                     _attachArguments = null;
                     _breakpointRequests.Clear();
                     _functionBreakpointRequests = [];
@@ -295,7 +297,8 @@ internal sealed class DebugAdapter : IDisposable
 
             case "launch":
             {
-                _launchArguments = request.GetArguments<LaunchArguments>() ?? throw new DebuggerException("Missing launch arguments.");
+                _resolvedLaunch = null;
+                _launchArguments = ParseLaunchArguments(request.Arguments);
                 if (_launchArguments.Mobile != null)
                     throw new DebuggerException("Legacy mobile launch was removed. Use remote.target.provider=android/appleSimulator or a generic command/SSH target.");
                 if (_launchArguments.Remote != null)
@@ -325,13 +328,17 @@ internal sealed class DebugAdapter : IDisposable
             {
                 if (_launchArguments == null && _attachArguments == null)
                     throw new DebuggerException("No session to restart.");
+                bool updatedLaunch = false;
                 // the client may send an updated configuration
                 if (request.GetArguments<RestartArguments>()?.Arguments is { ValueKind: System.Text.Json.JsonValueKind.Object } updated)
                 {
                     if (_isAttach)
                         _attachArguments = System.Text.Json.JsonSerializer.Deserialize<AttachArguments>(updated, DapJson.Options) ?? _attachArguments;
                     else
-                        _launchArguments = System.Text.Json.JsonSerializer.Deserialize<LaunchArguments>(updated, DapJson.Options) ?? _launchArguments;
+                    {
+                        _launchArguments = ParseLaunchArguments(updated);
+                        updatedLaunch = true;
+                    }
                 }
 
                 DebugEngine old = _engine;
@@ -356,7 +363,7 @@ internal sealed class DebugAdapter : IDisposable
                     Attach(_attachArguments);
                 }
                 else
-                    Launch(_launchArguments!);
+                    Launch(_launchArguments!, reuseResolved: !updatedLaunch);
                 _engine.ConfigurationDone();
                 return null;
 
@@ -745,10 +752,34 @@ internal sealed class DebugAdapter : IDisposable
     private static bool SingleThread(DapMessage request) => request.Arguments is { } arguments
         && arguments.TryGetProperty("singleThread", out var value) && value.ValueKind == System.Text.Json.JsonValueKind.True;
 
-    private void Launch(LaunchArguments args)
+    private static LaunchArguments ParseLaunchArguments(System.Text.Json.JsonElement? value)
+    {
+        if (value is not { ValueKind: System.Text.Json.JsonValueKind.Object } arguments)
+            throw new DebuggerException("Missing launch arguments.");
+        foreach (string name in new[] { "program", "cwd", "launchSettingsProfile" })
+            if (arguments.TryGetProperty(name, out var field) &&
+                field.ValueKind is not (System.Text.Json.JsonValueKind.Null or System.Text.Json.JsonValueKind.String))
+                throw new DebuggerException(name == "launchSettingsProfile"
+                    ? $"The '{name}' option must be a string or null." : $"The '{name}' option must be a string.");
+        bool disabled = arguments.TryGetProperty("launchSettingsProfile", out var profile) &&
+            (profile.ValueKind == System.Text.Json.JsonValueKind.Null || profile.GetString() == "");
+        if (disabled)
+        {
+            var node = System.Text.Json.Nodes.JsonNode.Parse(arguments.GetRawText())!.AsObject();
+            node.Remove("launchSettingsFilePath");
+            arguments = System.Text.Json.JsonSerializer.SerializeToElement(node);
+        }
+        else if (arguments.TryGetProperty("launchSettingsFilePath", out var path) &&
+            path.ValueKind is not (System.Text.Json.JsonValueKind.Null or System.Text.Json.JsonValueKind.String))
+            throw new DebuggerException("The 'launchSettingsFilePath' option must be a string or null.");
+        return System.Text.Json.JsonSerializer.Deserialize<LaunchArguments>(arguments, DapJson.Options)!;
+    }
+
+    private void Launch(LaunchArguments args, bool reuseResolved = false)
     {
         void Note(string text) => _connection.SendEvent("output", new OutputEventBody { Category = "console", Output = text });
-        ResolvedLaunch launch = LaunchResolver.Resolve(args, Note);
+        ResolvedLaunch launch = reuseResolved && _resolvedLaunch != null ? _resolvedLaunch : LaunchResolver.Resolve(args, Note);
+        _resolvedLaunch = launch;
         launch = launch with { Program = DncDbg.Engine.Launch.MacCodeSigning.ResolveDebuggableProgram(launch.Program, Note) };
         launch = launch with
         {
@@ -784,6 +815,7 @@ internal sealed class DebugAdapter : IDisposable
             Args = launch.Args,
             WorkingDirectory = launch.WorkingDirectory,
             Environment = launch.Environment,
+            DebuggerEnvironment = args.Env ?? new Dictionary<string, string?>(),
             StopAtEntry = args.StopAtEntry,
             NoDebug = args.NoDebug,
             JustMyCode = args.JustMyCode ?? true,

@@ -18,6 +18,59 @@ internal static class SafetyChecks
             checks++;
         }
 
+        string profileRoot = Path.GetFullPath("build/validation/project-profile-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(profileRoot);
+        try
+        {
+            string path = Path.Combine(profileRoot, "launchSettings.json");
+            File.WriteAllText(path, JsonSerializer.Serialize(new
+            {
+                profiles = new
+                {
+                    Project = new
+                    {
+                        commandName = "Project",
+                        commandLineArgs = "--fixture project-profile",
+                        workingDirectory = profileRoot,
+                        applicationUrl = "http://localhost:5042",
+                        environmentVariables = new { DNCDBG_PROJECT_PROFILE = "profile" },
+                    },
+                },
+            }));
+            using var session = new Session(executable);
+            await session.Initialize();
+            await session.Request("configurationDone", new { });
+            await session.Request("launch", new
+            {
+                project = Path.GetFullPath("tests/DncDbg.SmokeTests/DncDbg.SmokeTests.csproj"),
+                configuration = "Release",
+                launchSettingsFilePath = path,
+                noDebug = true,
+                env = new { DNCDBG_PROJECT_PROFILE = "request" },
+            });
+            string output = "";
+            await session.Event("output", message =>
+            {
+                var body = message.GetProperty("body");
+                if (body.GetProperty("category").GetString() != "stdout")
+                    return false;
+                output += body.GetProperty("output").GetString();
+                return output.Contains('\n');
+            });
+            using JsonDocument result = JsonDocument.Parse(output);
+            Check(result.RootElement.GetProperty("directory").GetString() == profileRoot, "project profile working directory preserved");
+            Check(result.RootElement.GetProperty("value").GetString() == "request", "project profile request environment precedence preserved");
+            Check(result.RootElement.GetProperty("urls").GetString() == "http://localhost:5042", "managed project applicationUrl extension preserved");
+            await session.Event("exited", message => message.GetProperty("body").GetProperty("exitCode").GetInt32() == 0);
+            await session.Request("disconnect", new { });
+            await session.Exited();
+            Check(true, "project MSBuild target discovery and profile arguments preserved");
+        }
+        finally
+        {
+            Directory.Delete(profileRoot, recursive: true);
+        }
+
         if (!OperatingSystem.IsWindows())
         {
             DbgShim shim = DebugEngine.LoadDbgShim();

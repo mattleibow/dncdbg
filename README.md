@@ -183,6 +183,7 @@ releasing the process.
 
 - [Configuration environment variables](docs/config_env.md) - configure the debugger process or a session.
 - [Persistent debug server](docs/debug_server.md) - run sequential sessions on one connection.
+- [Launch settings profiles](docs/launch_settings.md) - share target paths, arguments, working directories and environment with other .NET tools.
 
 ### Debugging features
 

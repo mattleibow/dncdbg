@@ -70,6 +70,7 @@ public sealed class LaunchArguments
     public System.Text.Json.JsonElement? Mobile { get; set; }
     public RemoteLaunchArguments? Remote { get; set; }
     public string? Program { get; set; }
+    [System.Text.Json.Serialization.JsonConverter(typeof(LaunchArgumentListConverter))]
     public string[]? Args { get; set; }
     public string? Cwd { get; set; }
     public Dictionary<string, string?>? Env { get; set; }
@@ -85,8 +86,15 @@ public sealed class LaunchArguments
     /// <summary>Target framework of a project with several ("net48"). Default: the first one this machine can run.</summary>
     public string? Framework { get; set; }
 
-    /// <summary>null: default profile of the project; empty: do not use launchSettings.json.</summary>
-    public string? LaunchSettingsProfile { get; set; }
+    private string? _launchSettingsProfile;
+    /// <summary>Omitted: first Project profile. Explicit null or empty: do not use launchSettings.json.</summary>
+    public string? LaunchSettingsProfile
+    {
+        get => _launchSettingsProfile;
+        set { _launchSettingsProfile = value; LaunchSettingsProfileSpecified = true; }
+    }
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool LaunchSettingsProfileSpecified { get; private set; }
     public string? LaunchSettingsFilePath { get; set; }
 
     /// <summary>"internalConsole" (default), "integratedTerminal" or "externalTerminal".</summary>

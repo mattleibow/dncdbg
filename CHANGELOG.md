@@ -2,6 +2,8 @@
 Upcoming changes compared to the previous version.
 
 #### DAP
+- Matched upstream `launchSettings.json` profile selection, explicit null/empty disabling, settings-relative paths, request precedence, diagnostics and saved/updated restart behavior. Profile environment affects the target only. Existing managed project/build/ReadyToRun extensions remain available.
+- Accept string or string-array launch `args`; use the shared native-compatible splitter and let an empty parsed request list fall back to profile arguments, including whitespace-only strings.
 - Renamed the console-relay setting to `DNCDBG_REMOTECONSOLE_PORT`, with default 22534 and range 1-65535. Invalid values log and fall back to the default; the former spelling is no longer interpreted. Apply launch/restart overrides before opening the relay and allow retry after a bind failure.
 - Matched upstream complete unsigned-decimal configuration parsing: inner-exception limits with trailing characters now log and use the default 32 rather than accepting a numeric prefix.
 - Report the actual `allThreadsContinued` outcome in continue responses and continued events, including successful steps. Redundant already-running continues return `true` without an extra event; failed state inspection logs and falls back to the requested mode.

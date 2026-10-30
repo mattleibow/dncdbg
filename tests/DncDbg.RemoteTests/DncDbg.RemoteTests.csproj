@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../FixtureControl.cs" Link="FixtureControl.cs" />
+    <Compile Include="../../src/DncDbg.Dap/RemoteLifecycle.cs" Link="RemoteLifecycle.cs" />
+    <ProjectReference Include="../../src/DncDbg.Remote/DncDbg.Remote.csproj" />
+    <ProjectReference Include="../../src/DncDbg.Engine/DncDbg.Engine.csproj" />
+    <ProjectReference Include="../RemoteBreakpointApp/RemoteBreakpointApp.csproj" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+</Project>

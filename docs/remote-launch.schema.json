@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DNCDbg launch.remote",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["assetsPath", "outputPath", "target"],
+  "properties": {
+    "assetsPath": { "type": "string", "minLength": 1 },
+    "outputPath": { "type": "string", "minLength": 1 },
+    "sourceFileMap": { "type": "object", "maxProperties": 64, "additionalProperties": { "type": "string" } },
+    "startupTimeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 300, "default": 60 },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider"],
+      "properties": {
+        "provider": { "enum": ["nativeHost", "commands", "ssh", "android", "appleSimulator", "appleDevice"] },
+        "nativeHost": { "$ref": "#/$defs/start" },
+        "commands": { "$ref": "#/$defs/commands" },
+        "ssh": { "$ref": "#/$defs/ssh" },
+        "android": { "$ref": "#/$defs/android" },
+        "apple": { "$ref": "#/$defs/apple" }
+      },
+      "oneOf": [
+        { "properties": { "provider": { "const": "nativeHost" } }, "required": ["nativeHost"], "not": { "anyOf": [{ "required": ["commands"] }, { "required": ["ssh"] }, { "required": ["android"] }, { "required": ["apple"] }] } },
+        { "properties": { "provider": { "enum": ["commands", "appleDevice"] } }, "required": ["commands"], "not": { "anyOf": [{ "required": ["nativeHost"] }, { "required": ["ssh"] }, { "required": ["android"] }, { "required": ["apple"] }] } },
+        { "properties": { "provider": { "const": "ssh" } }, "required": ["ssh"], "not": { "anyOf": [{ "required": ["nativeHost"] }, { "required": ["commands"] }, { "required": ["android"] }, { "required": ["apple"] }] } },
+        { "properties": { "provider": { "const": "android" } }, "required": ["android"], "not": { "anyOf": [{ "required": ["nativeHost"] }, { "required": ["commands"] }, { "required": ["ssh"] }, { "required": ["apple"] }] } },
+        { "properties": { "provider": { "const": "appleSimulator" } }, "required": ["apple"], "not": { "anyOf": [{ "required": ["nativeHost"] }, { "required": ["commands"] }, { "required": ["ssh"] }, { "required": ["android"] }] } }
+      ]
+    },
+    "tunnel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider"],
+      "properties": {
+        "provider": { "enum": ["loopback", "proxy", "stdio", "ssh", "adb", "managed"] },
+        "command": { "$ref": "#/$defs/command" },
+        "host": { "type": "string", "default": "127.0.0.1" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "security": { "enum": ["loopback", "local", "externallyManagedEncrypted"], "default": "loopback" },
+        "writeChunkBytes": { "type": "integer", "minimum": 1, "maximum": 65536 }
+      },
+      "allOf": [
+        { "if": { "properties": { "provider": { "const": "stdio" } } }, "then": { "required": ["command"] } },
+        { "if": { "properties": { "provider": { "const": "managed" } } }, "then": { "required": ["port"] } }
+      ]
+    }
+  },
+  "$defs": {
+    "environment": { "type": "object", "maxProperties": 256, "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" }, "additionalProperties": { "type": "string" } },
+    "start": {
+      "type": "object", "additionalProperties": false,
+      "required": ["runtimeDirectory", "hostPath", "agentPath", "assemblyPath", "runtimeConfigPath"],
+      "properties": {
+        "runtimeDirectory": { "type": "string" }, "hostPath": { "type": "string" },
+        "agentPath": { "type": "string" }, "assemblyPath": { "type": "string" },
+        "runtimeConfigPath": { "type": "string" },
+        "mode": { "enum": ["application", "component"], "default": "application" },
+        "entryPointType": { "type": ["string", "null"] },
+        "entryPointMethod": { "type": "string", "default": "Run" },
+        "arguments": { "type": "array", "items": { "type": "string" } },
+        "environment": { "$ref": "#/$defs/environment" }
+      },
+      "allOf": [{ "if": { "required": ["mode"], "properties": { "mode": { "const": "component" } } }, "then": { "required": ["entryPointType"], "properties": { "entryPointType": { "type": "string", "minLength": 1 } } } }]
+    },
+    "command": {
+      "type": "object", "additionalProperties": false, "required": ["executable"],
+      "properties": {
+        "executable": { "type": "string", "minLength": 1 },
+        "arguments": { "type": "array", "maxItems": 256, "items": { "type": "string" } },
+        "environment": { "$ref": "#/$defs/environment" },
+        "workingDirectory": { "type": ["string", "null"] },
+        "input": { "type": ["string", "null"], "maxLength": 4194304 },
+        "timeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 300, "default": 30 }
+      }
+    },
+    "commands": {
+      "type": "object", "additionalProperties": false, "required": ["profilePath", "readManifest"],
+      "properties": {
+        "profilePath": { "type": "string" }, "bundlePath": { "type": ["string", "null"] },
+        "targetDirectory": { "type": "string", "default": "{sessionId}" },
+        "deploy": { "type": "array", "items": { "$ref": "#/$defs/command" } },
+        "start": { "$ref": "#/$defs/command" }, "readManifest": { "$ref": "#/$defs/command" },
+        "stop": { "$ref": "#/$defs/command" }, "cleanup": { "$ref": "#/$defs/command" },
+        "detach": { "$ref": "#/$defs/command" },
+        "observe": { "$ref": "#/$defs/command" }
+      },
+      "dependentRequired": { "start": ["stop", "detach", "observe"] },
+      "allOf": [{ "if": { "required": ["deploy"], "properties": { "deploy": { "minItems": 1 } } }, "then": { "required": ["cleanup"] } }]
+    },
+    "ssh": {
+      "type": "object", "additionalProperties": false,
+      "required": ["host", "user", "identityFile", "knownHostsFile", "controllerPath", "workspaceRoot", "bundlePath", "profilePath", "start"],
+      "properties": {
+        "host": { "type": "string" }, "user": { "type": "string" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 22 },
+        "identityFile": { "type": "string" }, "knownHostsFile": { "type": "string" },
+        "controllerPath": { "type": "string" }, "workspaceRoot": { "type": "string" },
+        "bundlePath": { "type": "string" }, "profilePath": { "type": "string" },
+        "start": { "$ref": "#/$defs/start" }
+      }
+    },
+    "android": {
+      "type": "object", "additionalProperties": false, "required": ["applicationId", "deviceId", "appPath"],
+      "properties": {
+        "applicationId": { "type": "string" }, "deviceId": { "type": "string" }, "appPath": { "type": "string" },
+        "runtimeIdentifier": { "enum": ["android-arm64", "android-x64"], "default": "android-arm64" },
+        "connectionSecurity": { "enum": ["usb", "pairedTls"], "default": "usb" },
+        "replaceExisting": { "type": "boolean", "default": false },
+        "uninstallOnDisconnect": { "type": "boolean", "default": false }
+      }
+    },
+    "apple": {
+      "type": "object", "additionalProperties": false, "required": ["applicationId", "deviceId", "appPath"],
+      "properties": {
+        "applicationId": { "type": "string" }, "deviceId": { "type": "string" }, "appPath": { "type": "string" },
+        "runtimeIdentifier": { "const": "iossimulator-arm64", "default": "iossimulator-arm64" },
+        "replaceExisting": { "type": "boolean", "default": false },
+        "uninstallOnDisconnect": { "type": "boolean", "default": false }
+      }
+    }
+  }
+}

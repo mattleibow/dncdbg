@@ -1,0 +1,150 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<TargetFrameworks>net11.0-android;net11.0-ios</TargetFrameworks>
+		<TargetFrameworks Condition="'$(DncDbgMobileTestPlatform)' != ''">net11.0-$(DncDbgMobileTestPlatform)</TargetFrameworks>
+
+		<OutputType>Exe</OutputType>
+		<RootNamespace>DncDbg.MauiTestApp</RootNamespace>
+		<UseMaui>true</UseMaui>
+		<SingleProject>true</SingleProject>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+
+		<!-- Enable XAML source generation for faster build times and improved performance.
+		     This generates C# code from XAML at compile time instead of runtime inflation.
+		     To disable, remove this line.
+		     For individual files, you can override by setting Inflator metadata:
+		       <MauiXaml Update="MyPage.xaml" Inflator="Default" /> (reverts to defaults: Runtime for Debug, XamlC for Release)
+		       <MauiXaml Update="MyPage.xaml" Inflator="Runtime" /> (force runtime inflation) -->
+		<MauiXamlInflator>SourceGen</MauiXamlInflator>
+
+		<!-- Display name -->
+		<ApplicationTitle>DNCDbg mobile experiment</ApplicationTitle>
+
+		<!-- App Identifier -->
+		<ApplicationId>com.dncdbg.mobiletests</ApplicationId>
+
+		<!-- Versions -->
+		<ApplicationDisplayVersion>1.0</ApplicationDisplayVersion>
+		<ApplicationVersion>1</ApplicationVersion>
+
+		<!-- To develop, package, and publish an app to the Microsoft Store, see: https://aka.ms/MauiTemplateUnpackaged -->
+		<WindowsPackageType>None</WindowsPackageType>
+
+		<SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'ios'">15.0</SupportedOSPlatformVersion>
+		<SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'maccatalyst'">15.0</SupportedOSPlatformVersion>
+		<SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'android'">24.0</SupportedOSPlatformVersion>
+		<SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'windows'">10.0.17763.0</SupportedOSPlatformVersion>
+		<TargetPlatformMinVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'windows'">10.0.17763.0</TargetPlatformMinVersion>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<!-- App Icon -->
+		<MauiIcon Include="Resources\AppIcon\appicon.svg" ForegroundFile="Resources\AppIcon\appiconfg.svg" Color="#512BD4" />
+
+		<!-- Splash Screen -->
+		<MauiSplashScreen Include="Resources\Splash\splash.svg" Color="#512BD4" BaseSize="128,128" />
+
+		<!-- Images -->
+		<MauiImage Include="Resources\Images\*" />
+		<MauiImage Update="Resources\Images\dotnet_bot.png" Resize="True" BaseSize="300,185" />
+
+		<!-- Custom Fonts -->
+		<MauiFont Include="Resources\Fonts\*" />
+
+		<!-- Raw Assets (also remove the "Resources\Raw" prefix) -->
+		<MauiAsset Include="Resources\Raw\**" LogicalName="%(RecursiveDir)%(Filename)%(Extension)" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<PackageReference Include="Microsoft.Maui.Controls" Version="$(MauiVersion)" />
+		<PackageReference Include="Microsoft.Extensions.Logging.Debug" Version="10.0.0" />
+	</ItemGroup>
+
+	<ItemGroup Condition="'$(Configuration)' == 'Debug'">
+		<PackageReference Include="Microsoft.Maui.DevFlow.Agent" Version="0.1.0-preview.12.26421.1" />
+	</ItemGroup>
+	<ItemGroup Condition="'$(Configuration)' == 'Debug' And $([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'android' And '$(DiagnosticsEnvironmentFile)' != ''">
+		<AndroidEnvironment Include="$(DiagnosticsEnvironmentFile)" />
+	</ItemGroup>
+	<PropertyGroup Condition="'$(Configuration)' == 'Debug' And $([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'android'">
+		<EmbedAssembliesIntoApk>true</EmbedAssembliesIntoApk>
+	</PropertyGroup>
+	<PropertyGroup Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'android'">
+		<AndroidSdkBuildToolsVersion>37.0.0</AndroidSdkBuildToolsVersion>
+	</PropertyGroup>
+	<ItemGroup Condition="'$(Configuration)' == 'Debug'">
+		<Compile Include="../FixtureControl.cs" Link="FixtureControl.cs" />
+		<ProjectReference Include="../../src/DncDbg.Remote/DncDbg.Remote.csproj" />
+		<ProjectReference Include="../DncDbg.ReloadFixture/DncDbg.ReloadFixture.csproj" ReferenceOutputAssembly="false"
+		                  GlobalPropertiesToRemove="RuntimeIdentifier;RuntimeIdentifiers;TargetFrameworks" />
+		<EmbeddedResource Include="../DncDbg.ReloadFixture/bin/$(Configuration)/net10.0/DncDbg.ReloadFixture.dll" LogicalName="DncDbg.ReloadFixture.dll" />
+		<None Include="../DncDbg.ReloadFixture/bin/$(Configuration)/net10.0/DncDbg.ReloadFixture.dll" Link="DncDbg.ReloadFixture.dll" CopyToOutputDirectory="PreserveNewest" />
+		<None Include="../DncDbg.ReloadFixture/bin/$(Configuration)/net10.0/DncDbg.ReloadFixture.pdb" Link="DncDbg.ReloadFixture.pdb" CopyToOutputDirectory="PreserveNewest" />
+	</ItemGroup>
+	<ItemGroup Condition="'$(Configuration)' == 'Debug'">
+		<MauiAsset Include="../../src/licenses/JaneySprings-clrdbg.LICENSE" LogicalName="licenses/JaneySprings-clrdbg.LICENSE" />
+		<MauiAsset Include="../../src/licenses/nlohmann-json.LICENSE" LogicalName="licenses/nlohmann-json.LICENSE" />
+		<MauiAsset Include="../../src/licenses/Microsoft.MIT.LICENSE" LogicalName="licenses/Microsoft.MIT.LICENSE" />
+	</ItemGroup>
+	<ItemGroup Condition="'$(Configuration)' == 'Debug' And '$(RuntimeIdentifier)' != ''">
+		<MauiAsset Include="../../build/native-private/$(RuntimeIdentifier)/dncdbg-agent.json" LogicalName="dncdbg-agent.json" />
+		<None Include="../../build/native-private/$(RuntimeIdentifier)/dncdbg-agent.json" Link="dncdbg-agent.json" CopyToOutputDirectory="Always" />
+	</ItemGroup>
+	<PropertyGroup Condition="'$(Configuration)' == 'Debug' And '$(DncDbgTestFaults)' == 'true'">
+		<DefineConstants>$(DefineConstants);DNCDBG_TEST_FAULTS</DefineConstants>
+		<_DncDbgFaultArgument>--test-faults</_DncDbgFaultArgument>
+	</PropertyGroup>
+	<ItemGroup Condition="'$(Configuration)' == 'Debug' And '$(RuntimeIdentifier)' == 'iossimulator-arm64'">
+		<NativeReference Include="../../build/native-private/iossimulator-arm64/libdncdbg_target.a" Kind="Static" ForceLoad="true" IsCxx="true" SmartLink="false" />
+	</ItemGroup>
+	<ItemGroup Condition="'$(Configuration)' == 'Debug' And '$(RuntimeIdentifier)' == 'ios-arm64'">
+		<NativeReference Include="../../build/native-private/ios-arm64/libdncdbg_target.a" Kind="Static" ForceLoad="true" IsCxx="true" SmartLink="false" />
+	</ItemGroup>
+	<ItemGroup Condition="'$(Configuration)' == 'Debug' And '$(RuntimeIdentifier)' == 'android-arm64'">
+		<AndroidNativeLibrary Include="../../build/native-private/android-arm64/libdncdbg_target.so" Abi="arm64-v8a" />
+	</ItemGroup>
+	<ItemGroup Condition="'$(Configuration)' == 'Debug' And '$(RuntimeIdentifier)' == 'android-x64'">
+		<AndroidNativeLibrary Include="../../build/native-private/android-x64/libdncdbg_target.so" Abi="x86_64" />
+	</ItemGroup>
+	<Target Name="RejectLegacyRemoteFlags" BeforeTargets="PrepareForBuild">
+		<Error Condition="'$(EnableExperimentalRemoteDebugging)' != '' Or '$(EnableExperimentalPrivateBootstrap)' != '' Or '$(EnableExperimentalTestFaults)' != ''"
+		       Text="Legacy remote opt-in flags were removed. The Debug target agent is enabled by its RID package; DncDbgTestFaults is test-only." />
+	</Target>
+	<Target Name="BuildDebugTargetAgent" BeforeTargets="PrepareForBuild" Condition="'$(Configuration)' == 'Debug' And '$(TargetFramework)' != ''">
+		<Error Condition="'$(UseMonoRuntime)' == 'true' Or '$(PublishAot)' == 'true'"
+		       Text="This qualified target agent requires CoreCLR, not Mono/NativeAOT." />
+		<Error Condition="'$(RuntimeIdentifier)' != 'iossimulator-arm64' And '$(RuntimeIdentifier)' != 'ios-arm64' And '$(RuntimeIdentifier)' != 'android-arm64' And '$(RuntimeIdentifier)' != 'android-x64'"
+		       Text="This fixture has qualified iOS simulator/Android RID assets only. Physical Apple targets require an independently qualified runtime profile and external device route." />
+		<Exec Command="python3 &quot;$(MSBuildProjectDirectory)/../../src/DncDbg.Remote.Target/build.py&quot; $(RuntimeIdentifier) --configuration Debug $(_DncDbgFaultArgument)" />
+	</Target>
+	<Target Name="SealDebugMobilePackage" AfterTargets="Build" Condition="'$(Configuration)' == 'Debug' And '$(TargetFramework)' != ''">
+		<MSBuild Projects="$(MSBuildProjectDirectory)/../../src/DncDbg.TargetControl/DncDbg.TargetControl.csproj"
+		         Targets="Restore;Build" BuildInParallel="false"
+		         RemoveProperties="RuntimeIdentifier;RuntimeIdentifiers;TargetFrameworks;TargetFramework;SelfContained;PublishAot"
+		         Properties="Configuration=$(Configuration);TargetFramework=net10.0;SelfContained=false" />
+		<PropertyGroup>
+			<_DncDbgInstallable>$(OutputPath)$(AssemblyName).app</_DncDbgInstallable>
+			<_DncDbgInstallable Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'android'">$(OutputPath)$(ApplicationId)-Signed.apk</_DncDbgInstallable>
+		</PropertyGroup>
+		<Exec Command="dotnet &quot;$(MSBuildProjectDirectory)/../../src/DncDbg.TargetControl/bin/$(Configuration)/net10.0/dncdbg-target-control.dll&quot; seal-mobile $(RuntimeIdentifier) &quot;$(_DncDbgInstallable)&quot; &quot;$(MSBuildProjectDirectory)/../../build/native-private/$(RuntimeIdentifier)/dncdbg-agent.json&quot; &quot;$(OutputPath).&quot; &quot;$(AndroidSdkBuildToolsVersion)&quot;" />
+	</Target>
+	<PropertyGroup Condition="'$(Configuration)' == 'Debug' And $([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'ios'">
+		<CodesignEntitlements>Platforms/iOS/Entitlements.Debug.plist</CodesignEntitlements>
+	</PropertyGroup>
+	<PropertyGroup Condition="'$(RuntimeIdentifier)' == 'iossimulator-arm64'">
+		<EnableCodeSigning>true</EnableCodeSigning>
+		<CodesignKey>-</CodesignKey>
+		<CodesignRequireProvisioningProfile>false</CodesignRequireProvisioningProfile>
+	</PropertyGroup>
+	<Target Name="DeclareRemoteRuntime" BeforeTargets="PrepareForBuild">
+		<PropertyGroup Condition="'$(UseMonoRuntime)' == 'true'">
+			<DefineConstants>$(DefineConstants);DNCDBG_MONO_RUNTIME</DefineConstants>
+		</PropertyGroup>
+		<PropertyGroup Condition="'$(UseMonoRuntime)' != 'true' And '$(PublishAot)' != 'true'">
+			<DefineConstants>$(DefineConstants);DNCDBG_CORECLR_RUNTIME</DefineConstants>
+		</PropertyGroup>
+	</Target>
+
+</Project>

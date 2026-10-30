@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="DncDbg.MauiTestApp.MainPage"
+             Title="Remote debugging experiment">
+    <ScrollView AutomationId="fixture-scroll">
+        <VerticalStackLayout Padding="24" Spacing="18">
+            <Label Text="DNCDbg mobile experiment" FontSize="26" AutomationId="fixture-title" />
+            <Label Text="UI validation is not proof of managed debugging." AutomationId="experimental-warning" />
+            <Label x:Name="RuntimeStatus" AutomationId="runtime-status" />
+            <Label x:Name="CounterStatus" Text="Count: 0" AutomationId="counter-status" />
+            <Button Text="Run managed scenario" AutomationId="run-scenario" Clicked="OnCounterClicked" />
+            <Button Text="Reset" AutomationId="reset-scenario" Clicked="OnResetClicked" />
+            <Button Text="Throw and catch exception" AutomationId="throw-scenario" Clicked="OnExceptionClicked" />
+            <Button Text="Deep stack and array bounds" AutomationId="deep-scenario" Clicked="OnDeepClicked" />
+            <VerticalStackLayout x:Name="ReloadControls" IsVisible="False">
+                <Button Text="Load collectible context" AutomationId="reload-load" Clicked="OnReloadLoadClicked" />
+                <Button Text="Run loaded contexts" AutomationId="reload-run" Clicked="OnReloadRunClicked" />
+                <Button Text="Unload first context" AutomationId="reload-unload" Clicked="OnReloadUnloadClicked" />
+                <Label x:Name="ReloadStatus" Text="Contexts: 0" AutomationId="reload-status" />
+            </VerticalStackLayout>
+            <Button x:Name="WatchdogScenario" Text="Test native watchdog" AutomationId="watchdog-scenario"
+                    IsVisible="False" Clicked="OnWatchdogClicked" />
+            <Label x:Name="ResultStatus" Text="Result: not run" AutomationId="result-status" />
+        </VerticalStackLayout>
+    </ScrollView>
+</ContentPage>

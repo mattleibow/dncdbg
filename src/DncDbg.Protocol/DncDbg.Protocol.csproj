@@ -5,5 +5,10 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
   </PropertyGroup>
+    <ItemGroup>
+      <ProjectReference Include="../DncDbg.Remote/DncDbg.Remote.csproj" />
+      <ProjectReference Include="../DncDbg.Remote.Android/DncDbg.Remote.Android.csproj" />
+      <ProjectReference Include="../DncDbg.Remote.Apple/DncDbg.Remote.Apple.csproj" />
+    </ItemGroup>
 
 </Project>

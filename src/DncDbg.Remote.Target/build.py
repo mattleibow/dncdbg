@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+"""Build explicit RID-specific DNCDbg target agent assets."""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import platform
+import re
+import subprocess
+import urllib.request
+
+ROOT = Path(__file__).resolve().parents[2]
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("rid", nargs="?", choices=["iossimulator-arm64", "ios-arm64", "android-arm64", "android-x64", "osx-arm64", "linux-x64", "linux-arm64"])
+parser.add_argument("--test-host", action="store_true", help="Run native contract fakes without loading a runtime or DBI")
+parser.add_argument("--test-faults", action="store_true", help="Explicit fixture-only watchdog fault injection; excluded from normal helpers")
+parser.add_argument("--configuration", choices=["Debug", "Release"], default="Debug")
+args = parser.parse_args()
+if not args.rid and not args.test_host:
+    parser.error("Choose a target RID or --test-host")
+if args.test_faults and args.configuration != "Debug":
+    parser.error("Fault injection is test-only and cannot be built into normal Release target assets")
+out = ROOT / "build/native-private" / ("host-tests" if args.test_host else args.rid)
+out.mkdir(parents=True, exist_ok=True)
+deps = ROOT / "build/native-private/deps"
+deps.mkdir(parents=True, exist_ok=True)
+dependency = json.loads((Path(__file__).parent / "dependencies.json").read_text())["json"]
+header = deps / "json.hpp"
+if not header.exists():
+    with urllib.request.urlopen(dependency["url"], timeout=30) as response:
+        header.write_bytes(response.read())
+if hashlib.sha256(header.read_bytes()).hexdigest() != dependency["sha256"]:
+    raise SystemExit("Pinned JSON dependency hash mismatch; refusing to compile.")
+common = ["-std=c++17", "-O1", "-g", "-fPIC", "-fvisibility=hidden",
+          "-Wall", "-Wextra", "-Werror", "-I", str(deps), str(Path(__file__).parent / "Bootstrap.cpp")]
+identity = hashlib.sha256()
+for source in sorted(Path(__file__).parent.glob("*")):
+    if source.suffix in (".cpp", ".h", ".json"):
+        identity.update(source.name.encode())
+        identity.update(source.read_bytes())
+identity.update(f"{args.rid}:{args.configuration}:{args.test_faults}".encode())
+build_id = identity.hexdigest()
+common.insert(0, '-DDNCDBG_AGENT_BUILD_ID="' + build_id + '"')
+if args.test_faults:
+    common.insert(0, "-DDNCDBG_TEST_FAULTS")
+if args.test_host:
+    import sys
+    test = out / "native-contracts"
+    command = ["c++", *common[:-1], str(ROOT / "tests/DncDbg.RemoteTests/NativeContracts.cpp"),
+               "-pthread", "-o", str(test)]
+    if sys.platform != "darwin":
+        command.append("-ldl")
+    subprocess.run(command, cwd=ROOT, check=True)
+    subprocess.run([str(test)], cwd=ROOT, check=True, timeout=30)
+    raise SystemExit(0)
+if args.rid in ("osx-arm64", "linux-x64", "linux-arm64"):
+    expected = ("osx-" if platform.system() == "Darwin" else "linux-") + (
+        "arm64" if platform.machine() in ("arm64", "aarch64") else "x64")
+    if args.rid != expected:
+        raise SystemExit(f"Native host RID {args.rid} does not match this host ({expected}).")
+    library = out / ("libdncdbg_target.dylib" if platform.system() == "Darwin" else "libdncdbg_target.so")
+    command = ["c++", "-DDNCDBG_NATIVE_HOST", *common, "-pthread",
+               "-dynamiclib" if platform.system() == "Darwin" else "-shared", "-o", str(library)]
+    if platform.system() != "Darwin":
+        command.append("-ldl")
+elif args.rid in ("iossimulator-arm64", "ios-arm64"):
+    sdk = subprocess.check_output(["xcrun", "--sdk", "iphonesimulator" if args.rid == "iossimulator-arm64" else "iphoneos", "--show-sdk-path"], text=True).strip()
+    library = out / "libdncdbg_target.a"
+    obj = out / "Bootstrap.o"
+    command = ["xcrun", "clang++", *common, "-target",
+               "arm64-apple-ios15.0-simulator" if args.rid == "iossimulator-arm64" else "arm64-apple-ios15.0",
+               "-isysroot", sdk, "-c", "-o", str(obj)]
+else:
+    sdk = os.environ.get("ANDROID_HOME") or os.environ.get("ANDROID_SDK_ROOT")
+    if not sdk:
+        raise SystemExit("Set ANDROID_HOME to the installed Android SDK.")
+    ndk = Path(sdk) / "ndk/29.0.14206865"
+    host = {"Darwin": "darwin-x86_64", "Linux": "linux-x86_64"}.get(platform.system())
+    if host is None:
+        raise SystemExit("Native mobile helpers require macOS or Linux.")
+    target = "x86_64-linux-android" if args.rid == "android-x64" else "aarch64-linux-android"
+    compiler = ndk / f"toolchains/llvm/prebuilt/{host}/bin/{target}24-clang++"
+    library = out / "libdncdbg_target.so"
+    command = [str(compiler), *common, "-shared", "-static-libstdc++", "-ldl", "-o", str(library)]
+subprocess.run(command, cwd=ROOT, check=True)
+if args.rid in ("iossimulator-arm64", "ios-arm64"):
+    subprocess.run(["xcrun", "ar", "rcs", str(library), str(obj)], check=True)
+print(library.relative_to(ROOT))
+model = int(re.search(r"ModelVersion\s*=\s*(\d+)", (Path(__file__).parent / "RemoteContract.g.h").read_text()).group(1))
+(out / "dncdbg-agent.json").write_text(json.dumps({
+    "Name": "dncdbg-target", "Rid": args.rid, "ProtocolVersion": 1, "ModelVersion": model,
+    "BuildId": build_id, "Sha256": hashlib.sha256(library.read_bytes()).hexdigest(),
+}, indent=2))

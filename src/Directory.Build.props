@@ -14,4 +14,11 @@
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <IsPackable>false</IsPackable>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)' == 'Debug' And '$(DncDbgTestHooks)' == 'true'">
+    <DefineConstants>$(DefineConstants);DNCDBG_REMOTE_TEST_HOOKS</DefineConstants>
+  </PropertyGroup>
+  <Target Name="RejectLegacyRemoteGates" BeforeTargets="PrepareForBuild">
+    <Error Condition="'$(EnableExperimentalRemoteDebugging)' != '' Or '$(EnableExperimentalPrivateBootstrap)' != '' Or '$(EnableExperimentalTestFaults)' != '' Or '$(EnableExperimentalRemoteTestHooks)' != ''"
+           Text="Legacy remote opt-in properties were removed. Remote debugging is enabled by its target package/configuration. Test hooks are internal DncDbgTestHooks/DncDbgTestFaults only." />
+  </Target>
 </Project>

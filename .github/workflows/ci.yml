@@ -7,6 +7,7 @@ on:
   pull_request:
     branches:
       - main
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -44,6 +45,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
 
       - name: Install .NET SDK
         uses: actions/setup-dotnet@v4
@@ -58,6 +60,35 @@ jobs:
 
       - name: Publish adapter
         run: dotnet publish src/DncDbg.Dap --configuration Release --no-build --output bin --nologo
+
+      - name: Assert desktop artifacts exclude target-native assets and test hooks
+        shell: pwsh
+        run: |
+          $python = if ($IsWindows) { "python" } else { "python3" }
+          & $python tests/DncDbg.RemoteTests/assert_artifacts.py bin src/DncDbg.Dap/bin/Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Check remote transport and desktop breakpoint proof
+        shell: pwsh
+        run: |
+          dotnet run --project tests/DncDbg.RemoteTests --configuration Release --no-build -- --desktop tests/RemoteBreakpointApp/bin/Release/net10.0/RemoteBreakpointApp.dll tests/RemoteBreakpointApp/Program.cs build/validation/remote
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Check neutral manifest, structured command and SSH contracts
+        run: dotnet run --project tests/DncDbg.RemoteTests --configuration Release --no-build -- --target-contracts
+
+      - name: Check native target ownership contracts (no mobile runtime)
+        if: runner.os != 'Windows'
+        run: dotnet run --project tests/DncDbg.MobileTests --configuration Release --no-build -- --platform contracts --output build/validation/mobile-contracts
+
+      - name: Upload portable mobile contract evidence
+        if: always() && runner.os != 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobile-contracts-${{ matrix.rid }}
+          path: build/validation/mobile-contracts/evidence/
+          retention-days: 7
+          if-no-files-found: error
 
       - name: Run smoke and acceptance tests
         shell: pwsh
@@ -93,6 +124,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
 
       - name: Install .NET SDK
         uses: actions/setup-dotnet@v4
@@ -101,6 +133,15 @@ jobs:
 
       - name: Run Docker integration tests (Docker required)
         run: dotnet run --project tests/DncDbg.DockerTests --configuration Release -- --require-docker
+
+      - name: Upload native-host architecture proof from Docker
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: remote-native-host-docker
+          path: build/validation/native-host-docker/
+          retention-days: 7
+          if-no-files-found: error
 
       - name: Clean up this run's Docker resources
         if: always()
@@ -132,6 +173,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
 
       - name: Install .NET SDK
         uses: actions/setup-dotnet@v4
@@ -147,6 +189,9 @@ jobs:
 
       - name: Publish adapter
         run: dotnet publish src/DncDbg.Dap --configuration Release --output bin --nologo
+
+      - name: Assert desktop package isolation
+        run: python3 tests/DncDbg.RemoteTests/assert_artifacts.py bin
 
       - name: Install VS Code test dependencies
         run: npm ci --prefix tests/DncDbg.VsCodeTests

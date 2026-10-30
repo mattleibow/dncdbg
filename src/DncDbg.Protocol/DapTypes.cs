@@ -67,6 +67,8 @@ public sealed class InitializeArguments
 
 public sealed class LaunchArguments
 {
+    public System.Text.Json.JsonElement? Mobile { get; set; }
+    public RemoteLaunchArguments? Remote { get; set; }
     public string? Program { get; set; }
     public string[]? Args { get; set; }
     public string? Cwd { get; set; }

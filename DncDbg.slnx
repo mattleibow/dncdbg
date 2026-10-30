@@ -3,9 +3,18 @@
     <Project Path="src/DncDbg.Dap/DncDbg.Dap.csproj" />
     <Project Path="src/DncDbg.Engine/DncDbg.Engine.csproj" />
     <Project Path="src/DncDbg.Protocol/DncDbg.Protocol.csproj" />
+    <Project Path="src/DncDbg.Remote/DncDbg.Remote.csproj" />
+    <Project Path="src/DncDbg.Remote.Android/DncDbg.Remote.Android.csproj" />
+    <Project Path="src/DncDbg.Remote.Apple/DncDbg.Remote.Apple.csproj" />
+    <Project Path="src/DncDbg.TargetControl/DncDbg.TargetControl.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/DncDbg.DockerTests/DncDbg.DockerTests.csproj" />
+    <Project Path="tests/DncDbg.DeviceTests/DncDbg.DeviceTests.csproj" />
+    <Project Path="tests/DncDbg.MobileTests/DncDbg.MobileTests.csproj" />
+    <Project Path="tests/DncDbg.NativeHostTests/DncDbg.NativeHostTests.csproj" />
+    <Project Path="tests/DncDbg.RemoteTests/DncDbg.RemoteTests.csproj" />
     <Project Path="tests/DncDbg.SmokeTests/DncDbg.SmokeTests.csproj" />
+    <Project Path="tests/RemoteBreakpointApp/RemoteBreakpointApp.csproj" />
   </Folder>
 </Solution>

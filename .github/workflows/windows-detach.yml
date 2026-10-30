@@ -1,0 +1,55 @@
+name: Windows detach ownership
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-detach-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ownership:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Assert and record the exact reviewed source head
+        shell: pwsh
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          $actual = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $actual -ne $env:EXPECTED_HEAD) { throw "Checked-out source differs from the requested head." }
+          New-Item -ItemType Directory -Force build/validation/windows-detach | Out-Null
+          $actual | Set-Content -Encoding utf8 build/validation/windows-detach/source-head.txt
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - name: Build exact-source fixture and provider
+        run: dotnet build tests/DncDbg.RemoteTests -c Release --nologo
+      - name: Prove stopped detach and correctly owned pre/post-detach I/O
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force build/validation/windows-detach | Out-Null
+          dotnet run --project tests/DncDbg.RemoteTests -c Release --no-build -- --detach-io tests/RemoteBreakpointApp/bin/Release/net10.0/RemoteBreakpointApp.dll tests/RemoteBreakpointApp/Program.cs build/validation/windows-detach 2>&1 | Tee-Object build/validation/windows-detach/proof.log
+          exit $LASTEXITCODE
+      - name: Verify the full unchanged transport inspection and disconnect assertions
+        shell: pwsh
+        run: |
+          dotnet run --project tests/DncDbg.RemoteTests -c Release --no-build -- --desktop tests/RemoteBreakpointApp/bin/Release/net10.0/RemoteBreakpointApp.dll tests/RemoteBreakpointApp/Program.cs build/validation/windows-detach/desktop 2>&1 | Tee-Object build/validation/windows-detach/desktop.log
+          exit $LASTEXITCODE
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-detach-${{ github.event.pull_request.head.sha || github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/validation/windows-detach/
+          if-no-files-found: error
+          retention-days: 7

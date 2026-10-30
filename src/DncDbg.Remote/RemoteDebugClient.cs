@@ -54,13 +54,20 @@ public sealed partial class RemoteDebugClient : IAsyncDisposable
     private async Task<TResponse> CallAsync<TRequest, TResponse>(RemoteOperation operation, TRequest body, CancellationToken token)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
-        await gate.WaitAsync(token);
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+        deadline.CancelAfter(TimeSpan.FromSeconds(30));
+        CancellationToken operationToken = deadline.Token;
+        try { await gate.WaitAsync(operationToken); }
+        catch (OperationCanceledException error) when (!token.IsCancellationRequested)
+        {
+            throw new TimeoutException("Remote debugger RPC queue exceeded its 30-second deadline.", error);
+        }
         try
         {
             long id = ++sequence;
             NetworkStream stream = client.GetStream();
-            await RemoteProtocol.WriteAsync(stream, new(RemoteProtocol.Version, id, operation, RemoteProtocol.Pack(body)), token);
-            RemoteEnvelope response = await RemoteProtocol.ReadAsync(stream, token);
+            await RemoteProtocol.WriteAsync(stream, new(RemoteProtocol.Version, id, operation, RemoteProtocol.Pack(body)), operationToken);
+            RemoteEnvelope response = await RemoteProtocol.ReadAsync(stream, operationToken);
             if (response.Version != RemoteProtocol.Version || response.Sequence != id || response.Operation != operation)
                 throw new InvalidDataException("Uncorrelated remote response.");
             if (response.Error != null)
@@ -72,6 +79,8 @@ public sealed partial class RemoteDebugClient : IAsyncDisposable
             // A canceled partial request cannot safely reuse a sequential framed stream.
             client.Dispose();
             disposed = true;
+            if (e is OperationCanceledException && !token.IsCancellationRequested)
+                throw new TimeoutException("Remote debugger RPC exceeded its 30-second deadline; the connection was discarded.", e);
             throw;
         }
         finally { gate.Release(); }

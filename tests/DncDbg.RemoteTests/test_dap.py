@@ -140,7 +140,10 @@ def tool():
         endpoint["Endpoint"]["SessionId"] = endpoint["SessionId"]
         endpoint["Process"]["OwnershipId"] = endpoint["SessionId"]
         (state / "endpoint.json").write_text(json.dumps(endpoint))
-        (state / "Library/dncdbg-remote.json").write_text(json.dumps(endpoint))
+        if (state / "delay-descriptor").exists():
+            (state / "launch-awaiting-descriptor").touch()
+        else:
+            (state / "Library/dncdbg-remote.json").write_text(json.dumps(endpoint))
     if "forward" in args and "--remove" not in args:
         print(json.loads((state / "endpoint.json").read_text())["Endpoint"]["Port"])
     elif "cat" in args:
@@ -602,6 +605,40 @@ class MobileDapTests(unittest.TestCase):
         self.assertFalse(any(c[0] == "adb" or "uninstall" in c for c in commands))
         self.assertIn(9, self.remote.operations)
 
+    def test_ios_replacement_removes_stale_descriptor_before_delayed_publication(self):
+        self.remote = Remote(self.state, "iOS")
+        (self.state / "installed").touch()
+        (self.state / "delay-descriptor").touch()
+        descriptor = self.state / "Library/dncdbg-remote.json"
+        stale = json.loads(descriptor.read_text())
+        stale["SessionId"] = stale["Endpoint"]["SessionId"] = stale["Process"]["OwnershipId"] = "a" * 32
+        descriptor.write_text(json.dumps(stale))
+        launch = self.dap.send("launch", self.arguments(self.options("iosSimulator") | {"replaceExisting": True}))
+        deadline = time.monotonic() + 5
+        while not (self.state / "launch-awaiting-descriptor").exists():
+            self.assertLess(time.monotonic(), deadline, "The replacement app must actually launch.")
+            time.sleep(0.01)
+        self.assertFalse(descriptor.exists(), "A retained old generation must not be visible during replacement startup.")
+        descriptor.write_text((self.state / "endpoint.json").read_text())
+        self.dap.request("configurationDone")
+        self.dap.response(launch)
+        self.dap.event("stopped")
+        self.dap.request("disconnect", {"terminateDebuggee": True})
+        self.dap.event("terminated")
+
+    def test_startup_deadline_includes_silent_symbol_configuration(self):
+        self.remote = Remote(self.state, "Android")
+        self.remote.block_operation = 10
+        launch = self.dap.send("launch", self.arguments(self.options("android") | {"startupTimeoutSeconds": 5}))
+        self.assertTrue(self.remote.operation_blocked.wait(timeout=5), "Configuration must reach the authenticated peer.")
+        self.dap.timeout = 7
+        try:
+            self.dap.response(launch, success=False)
+        finally:
+            self.remote.release_operation.set()
+        commands = [json.loads(row) for row in (self.state / "commands.jsonl").read_text().splitlines()]
+        self.assertEqual(sum("uninstall" in row for row in commands), 1)
+        self.assertEqual(sum("--remove" in row for row in commands), 1)
     def test_deep_stack_pages_preserve_truthful_totals(self):
         self.launch("android")
         self.remote.stack_count = 151

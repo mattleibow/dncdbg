@@ -33,6 +33,20 @@ if (args is ["--command-eof"])
 {
     return;
 }
+if (args is ["--command-silent-rpc", var silentState])
+{
+    Stream input = Console.OpenStandardInput(), output = Console.OpenStandardOutput();
+    RemoteEnvelope hello = await RemoteProtocol.ReadAsync(input, CancellationToken.None);
+    await RemoteProtocol.WriteAsync(output, hello with
+    {
+        Body = RemoteProtocol.Pack(new RemoteCapabilities("contract", "test", false, "unavailable")),
+    }, CancellationToken.None);
+    _ = await RemoteProtocol.ReadAsync(input, CancellationToken.None);
+    File.WriteAllText(silentState, Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture));
+    if (await input.ReadAsync(new byte[1]) != 0)
+        throw new InvalidDataException("A stalled framed stream must not be reused.");
+    return;
+}
 if (args is ["--command-provider", var providerAction, var providerState])
 {
     if (providerAction is "manifest" or "observe")
@@ -84,6 +98,12 @@ if (args is ["--tunnel-contracts"])
 {
     await TunnelChecks.RunAsync(Check, token);
     Console.WriteLine($"Passed {passed} real TCP tunnel architecture contracts.");
+    return;
+}
+if (args is ["--rpc-deadline"])
+{
+    await TestRpcDeadlineAsync();
+    Console.WriteLine($"Passed {passed} authenticated stdio RPC deadline assertions.");
     return;
 }
 if (args is ["--native-host-capabilities", var nativeRuntime])
@@ -171,6 +191,7 @@ await TestAgentAsync();
 await TestCancellationAsync();
 await TestCorrelationAsync();
 await TestStaleSessionAsync();
+await TestRpcDeadlineAsync();
 if (args is ["--desktop", var fixture, var source, var results])
 {
     await TestDesktopAsync(Path.GetFullPath(fixture), Path.GetFullPath(source), Path.GetFullPath(results));
@@ -361,6 +382,45 @@ async Task TestCorrelationAsync()
         await reply;
     }
     finally { listener.Stop(); }
+}
+
+async Task TestRpcDeadlineAsync()
+{
+    string state = Path.GetFullPath(Path.Combine("build", "validation", "silent-rpc-" + Guid.NewGuid().ToString("N")));
+    Directory.CreateDirectory(Path.GetDirectoryName(state)!);
+    string executable = Environment.ProcessPath!;
+    string[] command = Path.GetFileNameWithoutExtension(executable).Equals("dotnet", StringComparison.OrdinalIgnoreCase)
+        ? [typeof(ContractBackend).Assembly.Location, "--command-silent-rpc", state]
+        : ["--command-silent-rpc", state];
+    var tunnel = new StdioCommandTunnel(_ => new CommandSpec { Executable = executable, Arguments = command },
+        TransportTrust.LocalProcess);
+    try
+    {
+        RemoteEndpoint route = await tunnel.OpenAsync(new(12345, "contract-test-token"), token);
+        await using RemoteDebugClient client = await RemoteDebugClient.ConnectAsync(route, token);
+        var elapsed = Stopwatch.StartNew();
+        await ThrowsAsync<TimeoutException>(() => client.RequestPollAsync(new(), CancellationToken.None)
+            .WaitAsync(TimeSpan.FromSeconds(35), token), "silent authenticated stdio RPC expires without caller cancellation");
+        Check(File.Exists(state) && elapsed.Elapsed >= TimeSpan.FromSeconds(29) && elapsed.Elapsed < TimeSpan.FromSeconds(35),
+            "the actual peer receives the request and the host enforces its 30-second RPC deadline");
+        await ThrowsAsync<ObjectDisposedException>(() => client.StartAsync(token), "timed-out framed stream cannot be reused");
+        int pid = int.Parse(File.ReadAllText(state), System.Globalization.CultureInfo.InvariantCulture);
+        await tunnel.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5), token);
+        try { using var process = Process.GetProcessById(pid); Check(process.HasExited, "timed-out stdio child is reaped"); }
+        catch (ArgumentException) { Check(true, "timed-out stdio child is reaped"); }
+        using var probe = new TcpClient();
+        try
+        {
+            await probe.ConnectAsync(IPAddress.Loopback, route.Port, token);
+            throw new InvalidOperationException("Timed-out stdio listener leaked.");
+        }
+        catch (SocketException) { Check(true, "timed-out stdio listener is removed"); }
+    }
+    finally
+    {
+        await tunnel.DisposeAsync();
+        File.Delete(state);
+    }
 }
 
 async Task TestStaleSessionAsync()

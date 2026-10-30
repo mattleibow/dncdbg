@@ -64,10 +64,12 @@ internal sealed class RemoteSession : IDisposable
         lifecycle = createLifecycle();
         try
         {
+            using var startup = CancellationTokenSource.CreateLinkedTokenSource(Token);
+            startup.CancelAfter(TimeSpan.FromSeconds(options.StartupTimeoutSeconds));
             symbols = new RemoteSymbols(options.AssetsPath, options.SourceFileMap);
-            Wait(lifecycle.ConnectAsync(Token));
+            Wait(lifecycle.ConnectAsync(startup.Token));
             foreach (RemoteConfiguration chunk in symbols.ConfigurationChunks())
-                Wait(Client.RequestConfigureAsync(chunk, Token));
+                Wait(Client.RequestConfigureAsync(chunk, startup.Token));
         }
         catch (Exception startup)
         {

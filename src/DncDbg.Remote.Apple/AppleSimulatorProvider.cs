@@ -70,6 +70,7 @@ public sealed class AppleSimulatorProvider : IRemoteTargetProvider
         data = await Sim(token, false, "get_app_container", options.DeviceId, options.ApplicationId, "data");
         await File.WriteAllTextAsync(Path.Combine(data, "Library/dncdbg-installation-id"), installation.Id, token);
         File.Delete(Path.Combine(data, "Library/dncdbg-startup-error.json"));
+        File.Delete(Path.Combine(data, "Library/dncdbg-remote.json"));
         started = true;
         await ApplicationProfiles.CommandAsync("xcrun", ["simctl", "launch", options.DeviceId, options.ApplicationId], token,
             environment: new Dictionary<string, string> { ["SIMCTL_CHILD_DNCDBG_SESSION_ID"] = session });

@@ -83,8 +83,11 @@ maps absolute build prefixes to absolute host source directories, for example
 boundaries are enforced. Both uploaded sequence points and returned stack sources
 use the mapped paths; exact PDB/source checksum validation is unchanged.
 
-Startup timeout is 1–300 seconds (default 60). RPC, watchdog and cleanup deadlines
-are separate. The mobile test facade allows a 20-minute Release build and a
+Startup timeout is 1–300 seconds (default 60), including target acquisition and
+symbol configuration. Each host RPC has a 30-second deadline, including its
+queue wait; a timed-out partial exchange discards the connection rather than
+reusing an uncorrelated stream. Watchdog and cleanup deadlines are separate.
+The mobile test facade allows a 20-minute Release build and a
 10-minute Debug build with minimal live logs, progress, status JSON and sanitized
 binlogs; that does not relax debugger operation/fault deadlines.
 

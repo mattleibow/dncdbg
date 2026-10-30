@@ -180,13 +180,13 @@ partial class Context
             missingFile["launchSettingsFilePath"] = absent;
             ProfileError(missingFile, "Can't open the launchSettings.json file '" + absent + "'.", callerTrace);
 
-            foreach (string content in new[] { "{broken", "{\"profiles\":{}}", "{\"profiles\":{\"Only\":{\"commandName\":\"Executable\"}}}", "{\"Profiles\":{\"First\":{\"commandName\":\"Project\"}}}" })
+            foreach (string content in new[] { "{broken", "{\"profiles\":{},}", "{\"profiles\":{}}", "{\"profiles\":{\"Only\":{\"commandName\":\"Executable\"}}}", "{\"Profiles\":{\"First\":{\"commandName\":\"Project\"}}}" })
             {
                 File.WriteAllText(file, content);
                 ProfileSuccess(basic, Array.Empty<string>(), root, null, null, callerTrace);
                 var options = (Newtonsoft.Json.Linq.JObject)basic.DeepClone();
                 options["launchSettingsFilePath"] = file;
-                string error = content == "{broken" ? "Can't parse the launchSettings.json file '" + file + "'." :
+                string error = content == "{broken" || content.EndsWith(",}") ? "Can't parse the launchSettings.json file '" + file + "'." :
                     content.Contains("\"Only\"") ? "Can't find a profile with \"commandName\": \"Project\" in the launchSettings.json file '" + file + "'." :
                     "Can't find profiles in the launchSettings.json file '" + file + "'.";
                 ProfileError(options, error, callerTrace);
@@ -202,6 +202,8 @@ partial class Context
 
             File.WriteAllText(file, new Newtonsoft.Json.Linq.JObject { ["profiles"] = profiles }.ToString());
             ProfileSuccess(basic, defaultArgs, root, "profile", "added", callerTrace);
+            profile["commandLineArgs"] = "changed-after-launch";
+            File.WriteAllText(file, new Newtonsoft.Json.Linq.JObject { ["profiles"] = profiles }.ToString());
             ProfileSuccess(basic, defaultArgs, root, "profile", "added", callerTrace, restart: true);
             var updated = (Newtonsoft.Json.Linq.JObject)basic.DeepClone();
             updated["launchSettingsProfile"] = "Second";

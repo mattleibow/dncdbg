@@ -4,6 +4,17 @@ using System.Net.Sockets;
 
 namespace DbgTest
 {
+public sealed class ConsolePortReservation : IDisposable
+{
+    readonly TcpListener listener = new(System.Net.IPAddress.Loopback, 0);
+
+    public ConsolePortReservation() => listener.Start();
+
+    public int Port => ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
+
+    public void Dispose() => listener.Stop();
+}
+
 public class RemoteConsole : IDisposable
 {
     public RemoteConsole(int port)

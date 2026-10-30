@@ -27,13 +27,18 @@ if (args is ["--safety", var debugger])
     Console.WriteLine($"Passed {await SafetyChecks.Run(Path.GetFullPath(debugger), typeof(Program).Assembly.Location)} safety checks.");
     return;
 }
+if (args is ["--evaluation", .. var scenarios])
+{
+    Console.WriteLine($"Passed {EvaluationChecks.Run(scenarios)} evaluation lifecycle checks.");
+    return;
+}
 
 if (args.Length != 1)
     throw new ArgumentException("Supply the path to the dncdbg-dap apphost.");
 string executable = Path.GetFullPath(args[0]);
 string logDirectory = Path.GetFullPath("build/validation/cli-smoke");
 Directory.CreateDirectory(logDirectory);
-int passed = 0;
+int passed = EvaluationChecks.Run();
 
 foreach (string option in new[] { "--help", "-h", "--version", "--buildinfo" })
 {

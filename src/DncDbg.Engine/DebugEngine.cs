@@ -112,6 +112,9 @@ public sealed partial class DebugEngine : IDisposable
     public bool NoDebug { get; private set; }
     public bool ShowRawValues { get; set; }
     private ConsoleRelay? _consoleRelay;
+    private const string RemoteConsolePortVariable = "DNCDBG_REMOTECONSOLE_PORT";
+    private const uint DefaultRemoteConsolePort = 22534;
+    private uint? _initialRemoteConsolePort;
     private readonly SessionLifetime _lifetime = new();
     private bool _relinquished;
 
@@ -127,6 +130,7 @@ public sealed partial class DebugEngine : IDisposable
     public void Launch(LaunchOptions options)
     {
         using var operation = _lifetime.Enter();
+        int? consolePort;
         lock (_lock)
         {
             ConfigureExceptionDetails(options.Environment);
@@ -137,6 +141,13 @@ public sealed partial class DebugEngine : IDisposable
                 throw new DebuggerException($"Program '{options.Program}' does not exist.");
             // An AnyCPU program runs as 32-bit when it prefers to (the default of old .NET Framework project templates).
             ProcessBitness.VerifyProgram(options.Program);
+            _initialRemoteConsolePort ??= ParseEnvironmentNumber(Environment.GetEnvironmentVariable(RemoteConsolePortVariable),
+                RemoteConsolePortVariable, DefaultRemoteConsolePort, 1, 65535);
+            uint port = options.Environment?.TryGetValue(RemoteConsolePortVariable, out string? value) == true
+                ? ParseEnvironmentNumber(value, RemoteConsolePortVariable, DefaultRemoteConsolePort, 1, 65535)
+                : _initialRemoteConsolePort.Value;
+            string? console = options.Environment?.GetValueOrDefault("DNCDBG_CONSOLE") ?? Environment.GetEnvironmentVariable("DNCDBG_CONSOLE");
+            consolePort = console == "remoteConsole" ? (int)port : null;
             _launching = true;
             _dbgShim ??= LoadDbgShim();
         }
@@ -147,6 +158,7 @@ public sealed partial class DebugEngine : IDisposable
         ExternalLaunch? external = null;
         CorDebug? framework = null;
         CorDebugProcess? hosted = null;
+        ConsoleRelay? consoleRelay = null;
         IReadOnlyDictionary<string, string?>? environment = options.Environment;
         try
         {
@@ -167,11 +179,14 @@ public sealed partial class DebugEngine : IDisposable
             {
                 launched = ProcessLauncher.Launch(_dbgShim, options.Program, options.Args,
                     options.WorkingDirectory ?? Path.GetDirectoryName(Path.GetFullPath(options.Program)), environment, framework, options.NoDebug);
+                if (consolePort.HasValue)
+                    consoleRelay = new ConsoleRelay(consolePort.Value, launched.StdIn, Log);
             }
             _lifetime.Token.ThrowIfCancellationRequested();
         }
         catch (Exception)
         {
+            consoleRelay?.Dispose();
             CleanupUnpublished(launched, external, hosted);
             try
             {
@@ -189,6 +204,7 @@ public sealed partial class DebugEngine : IDisposable
         {
             if (_shuttingDown)
             {
+                consoleRelay?.Dispose();
                 CleanupUnpublished(launched, external, hosted);
                 throw new OperationCanceledException(_lifetime.Token);
             }
@@ -204,12 +220,7 @@ public sealed partial class DebugEngine : IDisposable
 
             if (launched != null)
             {
-                string? console = options.Environment?.GetValueOrDefault("DNCDBG_CONSOLE") ?? Environment.GetEnvironmentVariable("DNCDBG_CONSOLE");
-                if (console == "remoteConsole")
-                {
-                    string? port = options.Environment?.GetValueOrDefault("DNCDBG_REMOTECONSOLEPORT") ?? Environment.GetEnvironmentVariable("DNCDBG_REMOTECONSOLEPORT");
-                    _consoleRelay = new ConsoleRelay(int.TryParse(port, out int number) ? number : 4711, launched.StdIn, Log);
-                }
+                _consoleRelay = consoleRelay;
                 StartOutputPump(launched.StdOut, "stdout");
                 StartOutputPump(launched.StdErr, "stderr");
             }
@@ -816,7 +827,6 @@ public sealed partial class DebugEngine : IDisposable
     private List<Action>? _synchronizedStopEvents;
     private CorDebugManagedCallbackKind _synchronizedStopKind;
     private bool _deferredInternalStop;
-    private PendingEval? _deferredEvalCompletion;
     private readonly ManualResetEventSlim _callbacksQuiet = new(true);
 
     private void OnManagedEvent(object? sender, CorDebugManagedCallbackEventArgs e)
@@ -839,25 +849,26 @@ public sealed partial class DebugEngine : IDisposable
                 _pendingEvents = null;
             }
 
+            if (action == EventAction.InternalStop &&
+                e.Kind is CorDebugManagedCallbackKind.EvalComplete or CorDebugManagedCallbackKind.EvalException)
+            {
+                // An owned completion is terminal. Continuing to drain ordinary callbacks can resume user code
+                // after the eval has ended and leave its waiter trying to abort an already completed eval.
+                _stopped = true;
+                Monitor.PulseAll(_lock);
+                return;
+            }
+
             bool queued = false;
             if (e.Kind == CorDebugManagedCallbackKind.ExitProcess)
             {
                 _synchronizedStopEvents = null;
                 _deferredInternalStop = false;
-                _deferredEvalCompletion = null;
             }
             if (e.Kind != CorDebugManagedCallbackKind.ExitProcess)
                 try { queued = e.Controller.HasQueuedCallbacks(null!); }
                 catch (Exception) { }
 
-            if (queued && action == EventAction.InternalStop
-                && e.Kind is CorDebugManagedCallbackKind.EvalComplete or CorDebugManagedCallbackKind.EvalException
-                && _pendingEval is { Completed: true } completed)
-            {
-                completed.Completed = false;
-                _deferredEvalCompletion = completed;
-                action = EventAction.Continue;
-            }
             if (action == EventAction.Stop)
             {
                 bool preferStep = e.Kind == CorDebugManagedCallbackKind.StepComplete
@@ -879,12 +890,6 @@ public sealed partial class DebugEngine : IDisposable
                 _callbacksQuiet.Reset();
             else
             {
-                if (_deferredEvalCompletion is { } completedEvaluation)
-                {
-                    completedEvaluation.Completed = true;
-                    _deferredEvalCompletion = null;
-                    action = EventAction.InternalStop;
-                }
                 if (_deferredInternalStop)
                 {
                     _deferredInternalStop = false;
@@ -992,10 +997,11 @@ public sealed partial class DebugEngine : IDisposable
                 return OnEvalFinished(eval.Eval, threwException: true) ? EventAction.InternalStop : EventAction.Continue;
 
             case CustomNotificationCorDebugManagedCallbackEventArgs notification:
-                if (_pendingEval is { } pending && pending.ThreadId == notification.Thread.Id)
+                if (_pendingEval is { Completed: false } pending && pending.ThreadId == notification.Thread.Id)
                 {
+                    if ((int)pending.Eval.TryAbort() < 0)
+                        pending.Eval.RudeAbort();
                     pending.CrossThreadDependency = true;
-                    pending.Eval.Abort();
                 }
                 return EventAction.Continue;
 

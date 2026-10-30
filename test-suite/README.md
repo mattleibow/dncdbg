@@ -74,6 +74,11 @@ Run these safety checks alone with:
 dotnet run --project tests/DncDbg.SmokeTests -- --safety bin/dncdbg-dap
 ```
 
+The smoke runner also checks evaluation callback ownership without launching a
+target: notification abort fallback, terminal completion with queued callbacks,
+and rejection of late or unrelated notifications. Run just these deterministic
+contracts with `dotnet run --project tests/DncDbg.SmokeTests -- --evaluation`.
+
 The self-hosted safety fixtures are separate from the unchanged acceptance
 suite. A surviving detached fixture is explicitly cleaned up by the smoke runner.
 
@@ -105,18 +110,42 @@ These tests preserve observable native behavior, not assumptions about DAP synta
 
 | Test | Exact contract |
 | --- | --- |
+| `TestCrossThreadEvaluation` | Forty complete variables responses across two stops must preserve the unchanged `TestStruct5` values (`111`, `<error>`, `"text_333"`, `<error>`, `555.5`), types and ordering, with a successful explicit getter after every response. A synchronized worker dependency halfway through the first stop proves timeout recovery releases suspended peers, reports the failed getter, and leaves the same evaluation thread usable for later getters and repeated variables requests. No sleeps, retries or changed deadlines are used. |
 | `TestHitConditionSyntax` | Across seven visits, `5` and `>=5` stop on visits 5, 6 and 7; `==5` and `%5` stop only on 5, with no removal diagnostics. All sequences are collected before comparison. Forty-four valid source/function requests and 56 invalid ones prove unsigned bounds, zero/modulo-zero, ASCII-space-only normalization, exact error messages, and rejection of expressions, signs, overflow, tabs/newlines, suffixes and NUL characters. |
 | `TestBreakpointHitCondition` | Exact upstream source/function fixture covers all seven forms (`N`, `<N`, `<=N`, `==N`, `>N`, `>=N`, `%N`) and every expected source/frame stop over seven visits. Repeat all sequences after exit and restart to prove counter reset, then verify the final process exit. |
 | `TestHitConditionLifecycle` | IDs and counts survive unchanged/equivalent/changed thresholds for source and function breakpoints; false expression conditions do not count; logpoint output is gated after counting. Invalid replacement requests preserve existing breakpoints; removal/re-addition resets the count. Repeat the complete sequence after post-exit replacement and restart. Exact stop sequences and expected output are required. |
 | `TestContinueResponse` | Continue responses and matching continued events contain a Boolean `allThreadsContinued`, with the requested thread ID. All-thread resumes report `true`, and the tested single-thread resume with suspended peers reports `false`. A redundant `singleThread:true` continue while the target waits on stdin reports the actual `true` result and emits no extra continued event; stdin releases the target without a timing sleep. This tests observable reporting, not a general scheduling guarantee. |
 | `TestSingleThreadExec` | Preserve all existing single-thread scheduling, source and stepping assertions; additionally require `allThreadsContinued:false` in each next/stepIn/stepOut event and the single-thread continue, then `true` after restoring all-thread execution. |
+| `TestRemoteConsoleConfiguration` | Sixteen real TCP ready/input/echo cases cover `DNCDBG_REMOTECONSOLE_PORT`: custom/default ports, leading zeroes, 65535, invalid-number/range fallback to 22534, and the ignored former spelling. Also prove a changed-port restart, an occupied-port launch failure and a successful retry after release. Running the identical fixture with a valid debugger-process port override proves session precedence, invalid-override fallback to 22534 and reset to the inherited baseline. |
 | `TestUnhandledExceptionCondition` | With `!System.InvalidOperationException` on `all` and `user-unhandled`, a caught exception does not stop execution. An uncaught exception of the same type still stops at the throw line, with `exceptionInfo.breakMode == "unhandled"`, `exceptionId == "CLR/System.InvalidOperationException"`, and the matching full type name. These two filters do not suppress the final unhandled stop. |
 | `TestExceptionConditionMatching` | Thirty-seven cases cover per-token negation, negative-only conditions, positive/negative order, exclusion priority, ignored lone `!`, empty conditions, additive unconditional entries, duplicate filter options, comma/ASCII-whitespace separators, and wildcard prefixes. Wildcard cases include `*`, `!*`, positive/negative prefix conflicts across entries, ordinal case sensitivity, duplicate prefixes, zero-length suffixes, and literal internal/repeated asterisks and `?`. Every stop and its exact exception details/source line is collected before comparing the complete matrix. |
 | `TestExceptionWildcardCondition` | The unchanged upstream fixture checks `*`, `System.*`, `!System.Null*, *`, broader negated prefixes overriding specific positive prefixes, and `!*` overriding a positive prefix. Exact exception source/type/break-mode assertions and both source-breakpoint checkpoints are preserved. |
 | `TestUnhandledExceptionFilter` | Eighteen sessions cover the default unhandled stop, nonmatching positive conditions, matching/nonmatching exact and prefix exclusions, conflicting conditions in both orders, unconditional entries, lone `!`, and `!*`. Upstream scenarios include an exact nonmatching `!System.Exception` (no base-type matching) and a thrown stop followed by a suppressed final stop. Observed unhandled stops are continued through actual process exit rather than terminated by the test. Suppressed final stops require a nonzero exit code and both exited/terminated events. |
-| `TestInnerExceptionLimit` | Preserve the upstream 65-node fixture's default first/last inner messages (`level 62`/`level 31`) and assert every node's type/message plus the exact 32-inner cutoff. Twenty additional launch/attach sessions prove zero, small and unsigned-maximum limits, invalid/overflow fallback, native numeric-prefix parsing, request overrides and reset to the default. These include the upstream 50-inner cutoff (`level 62`/`level 13`) and limit 100 exposing the complete finite chain (`level 62`/`innermost`). Fully populated terminal nodes are required without empty placeholders. |
+| `TestInnerExceptionLimit` | Preserve the upstream 65-node fixture's default first/last inner messages (`level 62`/`level 31`) and assert every node's type/message plus the exact 32-inner cutoff. Twenty-two additional launch/attach sessions prove zero, small and unsigned-maximum limits, invalid/overflow fallback, complete unsigned-decimal parsing, request overrides and reset to the default. Trailing characters (`2suffix`, `2 `) now require the default 32 in both launch and attach, intentionally replacing the former prefix contract. These include the upstream 50-inner cutoff (`level 62`/`level 13`) and limit 100 exposing the complete finite chain (`level 62`/`innermost`). Fully populated terminal nodes are required without empty placeholders. |
 
 These are bounded scenarios, not full coverage of hit conditions or exception handling.
+The evaluation recovery contract is proven against preserved native master
+`fc643dfc`. `.github/workflows/evaluation.yml` pins the same Linux .NET 10.0.14
+container/runtime for native and managed debugging, proves the immutable pre-fix
+managed baseline fails, and preserves runtime/DBI/DAC hashes, raw protocol and
+engine logs. It requires five native and managed focused/unchanged-suite runs
+under CPU load, followed by full current-native (`9e970bf0`), managed and smoke suites.
+Normal evaluations suspend peer threads. As in native, timeout recovery may
+temporarily run those peers so dependencies can complete before abort settlement;
+their original frozen state is restored afterwards. Cross-thread notification
+abort does not itself complete an evaluation: the real terminal callback must
+arrive before the next getter starts.
+
+The remote-console configuration and complete-number inner-limit contracts
+are proven against the exact upstream `9e970bf0` native reference. To exercise
+the inherited console-port baseline as well as request overrides:
+
+```powershell
+$env:DNCDBG_REMOTECONSOLE_PORT = "33218"
+pwsh ./test-suite/run_tests.ps1 TestRemoteConsoleConfiguration
+Remove-Item Env:DNCDBG_REMOTECONSOLE_PORT
+```
+
 The continue-response/event and single-thread stepping-event assertions are
 proven against the exact upstream `dc120e19` native reference, including the
 already-running request whose result differs from the requested mode.

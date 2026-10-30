@@ -48,7 +48,7 @@ a launch error for these conditions, missing names and unsupported command
 names. A missing target after profile resolution is an error. Bad request
 types, including non-string array elements in `args`, are rejected.
 
-A bare `restart` reuses the already resolved launch, even if the settings file
+A bare ordinary `program`-based `restart` reuses the already resolved launch, even if the settings file
 has since changed. `restart.arguments` containing an updated launch
 configuration resolves its selected profile again.
 
@@ -90,6 +90,9 @@ profile's `applicationUrl` to `ASPNETCORE_URLS`, below profile environment
 entries and request `env` in precedence. It is not part of upstream's ordinary
 `program` launch contract. Without any supplied working directory, the managed
 adapter retains its existing project/program-directory fallback.
+Project-based restart continues to resolve the project and profile again, and
+runs the build again when `build` is enabled. The native-style cached restart
+contract applies to ordinary `program` launches, not this managed extension.
 
 Remote launch retains its separate built-assets contract and rejects desktop
 profile, build and other incompatible launch options; profiles are not applied

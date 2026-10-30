@@ -62,6 +62,21 @@ internal static class SafetyChecks
             Check(result.RootElement.GetProperty("value").GetString() == "request", "project profile request environment precedence preserved");
             Check(result.RootElement.GetProperty("urls").GetString() == "http://localhost:5042", "managed project applicationUrl extension preserved");
             await session.Event("exited", message => message.GetProperty("body").GetProperty("exitCode").GetInt32() == 0);
+            File.WriteAllText(path, File.ReadAllText(path).Replace("http://localhost:5042", "http://localhost:5043", StringComparison.Ordinal));
+            await session.Request("restart", new { });
+            output = "";
+            await session.Event("output", message =>
+            {
+                var body = message.GetProperty("body");
+                if (body.GetProperty("category").GetString() != "stdout")
+                    return false;
+                output += body.GetProperty("output").GetString();
+                return output.Contains('\n');
+            });
+            using JsonDocument restarted = JsonDocument.Parse(output);
+            Check(restarted.RootElement.GetProperty("urls").GetString() == "http://localhost:5043",
+                "managed project restart still resolves project/build/profile inputs");
+            await session.Event("exited", message => message.GetProperty("body").GetProperty("exitCode").GetInt32() == 0);
             await session.Request("disconnect", new { });
             await session.Exited();
             Check(true, "project MSBuild target discovery and profile arguments preserved");

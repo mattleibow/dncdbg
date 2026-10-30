@@ -778,7 +778,8 @@ internal sealed class DebugAdapter : IDisposable
     private void Launch(LaunchArguments args, bool reuseResolved = false)
     {
         void Note(string text) => _connection.SendEvent("output", new OutputEventBody { Category = "console", Output = text });
-        ResolvedLaunch launch = reuseResolved && _resolvedLaunch != null ? _resolvedLaunch : LaunchResolver.Resolve(args, Note);
+        ResolvedLaunch launch = reuseResolved && args.Project == null && _resolvedLaunch != null
+            ? _resolvedLaunch : LaunchResolver.Resolve(args, Note);
         _resolvedLaunch = launch;
         launch = launch with { Program = DncDbg.Engine.Launch.MacCodeSigning.ResolveDebuggableProgram(launch.Program, Note) };
         launch = launch with

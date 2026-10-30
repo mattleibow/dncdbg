@@ -32,12 +32,12 @@ jobs:
           set -euo pipefail
           root=build/validation/evaluation
           mkdir -p "$root/context"/{historical,current,baseline} "$root/evidence"
-          git fetch --no-tags https://github.com/viewizard/dncdbg.git 9e970bf0275c2046184b35e3dc7783d1eefb80b3
+          git fetch --no-tags https://github.com/viewizard/dncdbg.git dbdb2fe4517c7cac7e96631685c41487c7919d94
           git archive fc643dfcdf8feec45d2700ce6466774323b3032b | tar -x -C "$root/context/historical"
-          git archive 9e970bf0275c2046184b35e3dc7783d1eefb80b3 | tar -x -C "$root/context/current"
+          git archive dbdb2fe4517c7cac7e96631685c41487c7919d94 | tar -x -C "$root/context/current"
           git archive 96b6d67f956d58d8104dae373dbcb446f97ec8df | tar -x -C "$root/context/baseline"
           git rev-parse HEAD > "$root/evidence/head.txt"
-          printf '%s\n' fc643dfcdf8feec45d2700ce6466774323b3032b 9e970bf0275c2046184b35e3dc7783d1eefb80b3 96b6d67f956d58d8104dae373dbcb446f97ec8df > "$root/evidence/references.txt"
+          printf '%s\n' fc643dfcdf8feec45d2700ce6466774323b3032b dbdb2fe4517c7cac7e96631685c41487c7919d94 96b6d67f956d58d8104dae373dbcb446f97ec8df > "$root/evidence/references.txt"
           docker build -f tests/DncDbg.SmokeTests/Evaluation.Dockerfile \
             -t dncdbg-evaluation:${{ github.run_id }} "$root/context" 2>&1 | tee "$root/evidence/build.log"
       - name: Native first, deterministic managed red, repeated green and full suites

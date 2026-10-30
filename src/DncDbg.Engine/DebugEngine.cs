@@ -133,7 +133,8 @@ public sealed partial class DebugEngine : IDisposable
         int? consolePort;
         lock (_lock)
         {
-            ConfigureExceptionDetails(options.Environment);
+            IReadOnlyDictionary<string, string?>? debuggerEnvironment = options.DebuggerEnvironment ?? options.Environment;
+            ConfigureExceptionDetails(debuggerEnvironment);
             NoDebug = options.NoDebug;
             if (_processId != 0 || _launching)
                 throw new DebuggerException("A debuggee is already running.");
@@ -143,10 +144,10 @@ public sealed partial class DebugEngine : IDisposable
             ProcessBitness.VerifyProgram(options.Program);
             _initialRemoteConsolePort ??= ParseEnvironmentNumber(Environment.GetEnvironmentVariable(RemoteConsolePortVariable),
                 RemoteConsolePortVariable, DefaultRemoteConsolePort, 1, 65535);
-            uint port = options.Environment?.TryGetValue(RemoteConsolePortVariable, out string? value) == true
+            uint port = debuggerEnvironment?.TryGetValue(RemoteConsolePortVariable, out string? value) == true
                 ? ParseEnvironmentNumber(value, RemoteConsolePortVariable, DefaultRemoteConsolePort, 1, 65535)
                 : _initialRemoteConsolePort.Value;
-            string? console = options.Environment?.GetValueOrDefault("DNCDBG_CONSOLE") ?? Environment.GetEnvironmentVariable("DNCDBG_CONSOLE");
+            string? console = debuggerEnvironment?.GetValueOrDefault("DNCDBG_CONSOLE") ?? Environment.GetEnvironmentVariable("DNCDBG_CONSOLE");
             consolePort = console == "remoteConsole" ? (int)port : null;
             _launching = true;
             _dbgShim ??= LoadDbgShim();

@@ -9,6 +9,8 @@ wildcard prefixes; that post-migration feature is not added to this historical
 comparison or used to make new claims about other debuggers.
 Current [hit count breakpoints](hit_count_breakpoints.md) are also documented
 separately rather than adding a post-migration feature to this historical table.
+Current [launch settings profiles](launch_settings.md) are likewise documented
+without changing historical measurements or competitor claims.
 
 <details open>
 <summary><b>Legend</b></summary>

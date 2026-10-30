@@ -10,5 +10,6 @@
   <ItemGroup>
     <ProjectReference Include="../../src/DncDbg.Dap/DncDbg.Dap.csproj" ReferenceOutputAssembly="false" />
     <ProjectReference Include="../../src/DncDbg.Engine/DncDbg.Engine.csproj" />
+    <ProjectReference Include="../../src/DncDbg.Protocol/DncDbg.Protocol.csproj" />
   </ItemGroup>
 </Project>

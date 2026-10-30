@@ -26,26 +26,27 @@ internal static class LaunchResolver
         {
             string? msbuild = FindMSBuildFor(projectFile, output);
             string? framework = args.Framework;
-            if (program == null)
+            if (string.IsNullOrEmpty(program))
                 (program, framework) = GetTargetPath(msbuild, projectFile, args.Configuration, args.Framework, output);
             if (args.Build)
                 Build(msbuild, projectFile, args.Configuration, framework, output);
         }
+        string? cwd = args.Cwd;
+        (LaunchProfile? profile, string? profileDirectory) = LoadProfile(args, projectFile, output);
+        if (string.IsNullOrEmpty(program) && !string.IsNullOrEmpty(profile?.ExecutablePath))
+            program = ResolveProfilePath(profile.ExecutablePath, profileDirectory!);
         if (string.IsNullOrEmpty(program))
-            throw new DebuggerException("Either 'program' or 'project' is required for launch.");
+            throw new DebuggerException("The 'program' option is required.");
         if (!File.Exists(program))
-        {
             throw new DebuggerException(projectFile != null && !args.Build
                 ? $"Program '{program}' does not exist. Build the project first or set \"build\": true."
                 : $"Program '{program}' does not exist.");
-        }
-
-        LaunchProfile? profile = LoadProfile(args, projectFile);
 
         var environment = new Dictionary<string, string?>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
         if (profile != null)
         {
-            if (!string.IsNullOrEmpty(profile.ApplicationUrl))
+            // Project-based launching is a managed extension; ordinary native-compatible profiles ignore applicationUrl.
+            if (projectFile != null && !string.IsNullOrEmpty(profile.ApplicationUrl))
                 environment["ASPNETCORE_URLS"] = profile.ApplicationUrl;
             foreach (var (name, value) in profile.EnvironmentVariables)
                 environment[name] = value;
@@ -63,10 +64,12 @@ internal static class LaunchResolver
                 output("The program is compiled ReadyToRun: precompiled code is disabled for this session (\"suppressJitOptimizations\": false turns that off)." + Environment.NewLine);
         }
 
-        string[] arguments = args.Args ?? (profile?.CommandLineArgs is { Length: > 0 } commandLine ? SplitCommandLine(commandLine) : []);
+        string[] arguments = args.Args is { Length: > 0 } ? args.Args : CommandLineArguments.Split(profile?.CommandLineArgs ?? "");
 
         string defaultDirectory = Path.GetDirectoryName(projectFile ?? Path.GetFullPath(program))!;
-        string workingDirectory = args.Cwd ?? profile?.WorkingDirectory ?? defaultDirectory;
+        if (string.IsNullOrEmpty(cwd) && !string.IsNullOrEmpty(profile?.WorkingDirectory))
+            cwd = ResolveProfilePath(profile.WorkingDirectory, profileDirectory!);
+        string workingDirectory = string.IsNullOrEmpty(cwd) ? defaultDirectory : cwd;
         if (!Path.IsPathRooted(workingDirectory))
             workingDirectory = Path.GetFullPath(Path.Combine(defaultDirectory, workingDirectory));
         // checked here because the platforms disagree: Windows refuses to start the process, a Unix shell starts it elsewhere
@@ -267,95 +270,113 @@ internal static class LaunchResolver
 
     // ---------------------------------------------------------------- launchSettings.json
 
-    private sealed class LaunchSettingsFile
-    {
-        public Dictionary<string, LaunchProfile>? Profiles { get; set; }
-    }
-
     private sealed class LaunchProfile
     {
-        public string? CommandName { get; set; }
+        public string? ExecutablePath { get; set; }
         public string? CommandLineArgs { get; set; }
         public string? WorkingDirectory { get; set; }
         public string? ApplicationUrl { get; set; }
         public Dictionary<string, string?> EnvironmentVariables { get; set; } = [];
     }
 
-    private static LaunchProfile? LoadProfile(LaunchArguments args, string? projectFile)
+    private static (LaunchProfile? Profile, string? Directory) LoadProfile(LaunchArguments args, string? projectFile, Action<string> output)
     {
-        // "": explicitly disabled; null: the project's default profile if there is one
-        if (args.LaunchSettingsProfile == "")
-            return null;
-
-        string? path = args.LaunchSettingsFilePath
-            ?? (projectFile == null ? null : Path.Combine(Path.GetDirectoryName(projectFile)!, "Properties", "launchSettings.json"));
-        if (path == null || !File.Exists(path))
-        {
-            if (args.LaunchSettingsProfile != null || args.LaunchSettingsFilePath != null)
-                throw new DebuggerException($"Launch settings file '{path ?? "Properties/launchSettings.json"}' not found (profile '{args.LaunchSettingsProfile}').");
-            return null;
-        }
-
-        LaunchSettingsFile? file;
+        if (args.LaunchSettingsProfileSpecified && string.IsNullOrEmpty(args.LaunchSettingsProfile))
+            return (null, null);
+        string searchDirectory = !string.IsNullOrEmpty(args.Cwd) ? args.Cwd
+            : projectFile == null ? "" : Path.GetDirectoryName(projectFile)!;
+        string path = args.LaunchSettingsFilePath ?? "";
+        if (path.Length == 0)
+            path = searchDirectory.Length == 0 ? Path.Combine("Properties", "launchSettings.json")
+                : Path.Combine(searchDirectory, "Properties", "launchSettings.json");
+        else if (!Path.IsPathRooted(path) && searchDirectory.Length > 0)
+            path = Path.Combine(searchDirectory, path);
+        bool explicitlySelected = args.LaunchSettingsProfile != null || args.LaunchSettingsFilePath != null;
+        string content;
         try
         {
-            file = JsonSerializer.Deserialize<LaunchSettingsFile>(File.ReadAllText(path), new JsonSerializerOptions
-            {
-                PropertyNameCaseInsensitive = true,
-                ReadCommentHandling = JsonCommentHandling.Skip,
-                AllowTrailingCommas = true,
-            });
+            content = File.ReadAllText(path);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            if (explicitlySelected)
+                throw new DebuggerException($"Can't open the launchSettings.json file '{path}'.");
+            output($"Skipping launch settings '{path}': {e.Message}{Environment.NewLine}");
+            return (null, null);
+        }
+
+        JsonDocument file;
+        try
+        {
+            file = JsonDocument.Parse(content, new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip });
         }
         catch (JsonException e)
         {
-            throw new DebuggerException($"'{path}' is not valid: {e.Message}");
+            output($"Can't parse launch settings '{path}': {e.Message}{Environment.NewLine}");
+            if (explicitlySelected)
+                throw new DebuggerException($"Can't parse the launchSettings.json file '{path}'.");
+            return (null, null);
         }
-
-        Dictionary<string, LaunchProfile> profiles = file?.Profiles ?? [];
-        if (args.LaunchSettingsProfile != null)
+        using (file)
         {
-            return profiles.TryGetValue(args.LaunchSettingsProfile, out LaunchProfile? named)
-                ? named
-                : throw new DebuggerException($"Launch profile '{args.LaunchSettingsProfile}' not found in '{path}'.");
-        }
-        return profiles.Values.FirstOrDefault(p => string.Equals(p.CommandName, "Project", StringComparison.OrdinalIgnoreCase));
-    }
+            JsonElement profiles = default;
+            if (file.RootElement.ValueKind != JsonValueKind.Object ||
+                !file.RootElement.TryGetProperty("profiles", out profiles) ||
+                profiles.ValueKind != JsonValueKind.Object || !profiles.EnumerateObject().Any())
+            {
+                if (explicitlySelected)
+                    throw new DebuggerException($"Can't find profiles in the launchSettings.json file '{path}'.");
+                output($"No profiles found in the launchSettings.json file '{path}'.{Environment.NewLine}");
+                return (null, null);
+            }
 
-    /// <summary>Splits like a shell would for simple cases: whitespace separates, double quotes group.</summary>
-    internal static string[] SplitCommandLine(string commandLine)
-    {
-        var result = new List<string>();
-        var current = new StringBuilder();
-        bool inQuotes = false, hasToken = false;
-        for (int i = 0; i < commandLine.Length; i++)
-        {
-            char c = commandLine[i];
-            if (c == '\\' && i + 1 < commandLine.Length && commandLine[i + 1] == '"')
+            JsonElement selected = default;
+            string? name = args.LaunchSettingsProfile;
+            if (name != null)
             {
-                current.Append('"');
-                hasToken = true;
-                i++;
-            }
-            else if (c == '"')
-            {
-                inQuotes = !inQuotes;
-                hasToken = true;
-            }
-            else if (char.IsWhiteSpace(c) && !inQuotes)
-            {
-                if (hasToken)
-                    result.Add(current.ToString());
-                current.Clear();
-                hasToken = false;
+                if (!profiles.TryGetProperty(name, out selected) || selected.ValueKind != JsonValueKind.Object)
+                    throw new DebuggerException($"Can't find the '{name}' profile in the launchSettings.json file '{path}'.");
+                if (StringField(selected, "commandName") is not ("Project" or "Executable"))
+                    throw new DebuggerException($"The '{name}' profile in the launchSettings.json file '{path}' has an unsupported 'commandName' value: only 'Project' and 'Executable' are supported.");
             }
             else
             {
-                current.Append(c);
-                hasToken = true;
+                foreach (JsonProperty entry in profiles.EnumerateObject())
+                    if (entry.Value.ValueKind == JsonValueKind.Object && StringField(entry.Value, "commandName") == "Project")
+                    {
+                        selected = entry.Value;
+                        name = entry.Name;
+                        break;
+                    }
+                if (name == null)
+                {
+                    if (explicitlySelected)
+                        throw new DebuggerException($"Can't find a profile with \"commandName\": \"Project\" in the launchSettings.json file '{path}'.");
+                    output($"No Project profile found in the launchSettings.json file '{path}'.{Environment.NewLine}");
+                    return (null, null);
+                }
             }
+            output($"Using the '{name}' profile from the launchSettings.json file '{path}'.{Environment.NewLine}");
+            var profile = new LaunchProfile
+            {
+                ExecutablePath = StringField(selected, "executablePath"),
+                WorkingDirectory = StringField(selected, "workingDirectory"),
+                CommandLineArgs = StringField(selected, "commandLineArgs"),
+                ApplicationUrl = StringField(selected, "applicationUrl"),
+            };
+            if (selected.TryGetProperty("environmentVariables", out JsonElement environment) && environment.ValueKind == JsonValueKind.Object)
+                foreach (JsonProperty entry in environment.EnumerateObject())
+                    if (entry.Value.ValueKind == JsonValueKind.String)
+                        profile.EnvironmentVariables[entry.Name] = entry.Value.GetString();
+                    else
+                        output($"The '{entry.Name}' environment variable in the launchSettings.json profile is not a string and will be ignored.{Environment.NewLine}");
+            return (profile, Path.GetDirectoryName(Path.GetFullPath(path))!);
         }
-        if (hasToken)
-            result.Add(current.ToString());
-        return result.ToArray();
     }
+
+    private static string? StringField(JsonElement value, string name) =>
+        value.TryGetProperty(name, out JsonElement field) && field.ValueKind == JsonValueKind.String ? field.GetString() : null;
+
+    private static string ResolveProfilePath(string path, string directory) =>
+        Path.IsPathRooted(path) ? path : Path.GetFullPath(Path.Combine(directory, path));
 }

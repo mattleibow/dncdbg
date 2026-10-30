@@ -14,6 +14,8 @@ public sealed class LaunchOptions
     public IReadOnlyList<string> Args { get; init; } = [];
     public string? WorkingDirectory { get; init; }
     public IReadOnlyDictionary<string, string?>? Environment { get; init; }
+    /// <summary>Debugger settings before target-only profile variables are merged; null uses Environment.</summary>
+    public IReadOnlyDictionary<string, string?>? DebuggerEnvironment { get; init; }
     public bool StopAtEntry { get; init; }
     public bool NoDebug { get; init; }
     public bool JustMyCode { get; init; } = true;

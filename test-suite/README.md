@@ -62,6 +62,11 @@ Run these safety checks alone with:
 dotnet run --project tests/DncDbg.SmokeTests -- --safety bin/dncdbg-dap
 ```
 
+The smoke runner also checks evaluation callback ownership without launching a
+target: notification abort fallback, terminal completion with queued callbacks,
+and rejection of late or unrelated notifications. Run just these deterministic
+contracts with `dotnet run --project tests/DncDbg.SmokeTests -- --evaluation`.
+
 The self-hosted safety fixtures are separate from the unchanged acceptance
 suite. A surviving detached fixture is explicitly cleaned up by the smoke runner.
 
@@ -93,6 +98,7 @@ These tests preserve observable native behavior, not assumptions about DAP synta
 
 | Test | Exact contract |
 | --- | --- |
+| `TestCrossThreadEvaluation` | Forty complete variables responses across two stops must preserve the unchanged `TestStruct5` values (`111`, `<error>`, `"text_333"`, `<error>`, `555.5`), types and ordering, with a successful explicit getter after every response. A synchronized worker dependency halfway through the first stop proves timeout recovery releases suspended peers, reports the failed getter, and leaves the same evaluation thread usable for later getters and repeated variables requests. No sleeps, retries or changed deadlines are used. |
 | `TestHitConditionSyntax` | Across seven visits, `5` and `>=5` stop on visits 5, 6 and 7; `==5` and `%5` stop only on 5, with no removal diagnostics. All sequences are collected before comparison. Forty-four valid source/function requests and 56 invalid ones prove unsigned bounds, zero/modulo-zero, ASCII-space-only normalization, exact error messages, and rejection of expressions, signs, overflow, tabs/newlines, suffixes and NUL characters. |
 | `TestBreakpointHitCondition` | Exact upstream source/function fixture covers all seven forms (`N`, `<N`, `<=N`, `==N`, `>N`, `>=N`, `%N`) and every expected source/frame stop over seven visits. Repeat all sequences after exit and restart to prove counter reset, then verify the final process exit. |
 | `TestHitConditionLifecycle` | IDs and counts survive unchanged/equivalent/changed thresholds for source and function breakpoints; false expression conditions do not count; logpoint output is gated after counting. Invalid replacement requests preserve existing breakpoints; removal/re-addition resets the count. Repeat the complete sequence after post-exit replacement and restart. Exact stop sequences and expected output are required. |
@@ -106,6 +112,18 @@ These tests preserve observable native behavior, not assumptions about DAP synta
 | `TestInnerExceptionLimit` | Preserve the upstream 65-node fixture's default first/last inner messages (`level 62`/`level 31`) and assert every node's type/message plus the exact 32-inner cutoff. Twenty-two additional launch/attach sessions prove zero, small and unsigned-maximum limits, invalid/overflow fallback, complete unsigned-decimal parsing, request overrides and reset to the default. Trailing characters (`2suffix`, `2 `) now require the default 32 in both launch and attach, intentionally replacing the former prefix contract. These include the upstream 50-inner cutoff (`level 62`/`level 13`) and limit 100 exposing the complete finite chain (`level 62`/`innermost`). Fully populated terminal nodes are required without empty placeholders. |
 
 These are bounded scenarios, not full coverage of hit conditions or exception handling.
+The evaluation recovery contract is proven against preserved native master
+`fc643dfc`. `.github/workflows/evaluation.yml` pins the same Linux .NET 10.0.14
+container/runtime for native and managed debugging, proves the immutable pre-fix
+managed baseline fails, and preserves runtime/DBI/DAC hashes, raw protocol and
+engine logs. It requires five native and managed focused/unchanged-suite runs
+under CPU load, followed by full current-native (`9e970bf0`), managed and smoke suites.
+Normal evaluations suspend peer threads. As in native, timeout recovery may
+temporarily run those peers so dependencies can complete before abort settlement;
+their original frozen state is restored afterwards. Cross-thread notification
+abort does not itself complete an evaluation: the real terminal callback must
+arrive before the next getter starts.
+
 The remote-console configuration and complete-number inner-limit contracts
 are proven against the exact upstream `9e970bf0` native reference. To exercise
 the inherited console-port baseline as well as request overrides:

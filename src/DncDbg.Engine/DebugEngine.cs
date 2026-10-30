@@ -827,7 +827,6 @@ public sealed partial class DebugEngine : IDisposable
     private List<Action>? _synchronizedStopEvents;
     private CorDebugManagedCallbackKind _synchronizedStopKind;
     private bool _deferredInternalStop;
-    private PendingEval? _deferredEvalCompletion;
     private readonly ManualResetEventSlim _callbacksQuiet = new(true);
 
     private void OnManagedEvent(object? sender, CorDebugManagedCallbackEventArgs e)
@@ -850,25 +849,26 @@ public sealed partial class DebugEngine : IDisposable
                 _pendingEvents = null;
             }
 
+            if (action == EventAction.InternalStop &&
+                e.Kind is CorDebugManagedCallbackKind.EvalComplete or CorDebugManagedCallbackKind.EvalException)
+            {
+                // An owned completion is terminal. Continuing to drain ordinary callbacks can resume user code
+                // after the eval has ended and leave its waiter trying to abort an already completed eval.
+                _stopped = true;
+                Monitor.PulseAll(_lock);
+                return;
+            }
+
             bool queued = false;
             if (e.Kind == CorDebugManagedCallbackKind.ExitProcess)
             {
                 _synchronizedStopEvents = null;
                 _deferredInternalStop = false;
-                _deferredEvalCompletion = null;
             }
             if (e.Kind != CorDebugManagedCallbackKind.ExitProcess)
                 try { queued = e.Controller.HasQueuedCallbacks(null!); }
                 catch (Exception) { }
 
-            if (queued && action == EventAction.InternalStop
-                && e.Kind is CorDebugManagedCallbackKind.EvalComplete or CorDebugManagedCallbackKind.EvalException
-                && _pendingEval is { Completed: true } completed)
-            {
-                completed.Completed = false;
-                _deferredEvalCompletion = completed;
-                action = EventAction.Continue;
-            }
             if (action == EventAction.Stop)
             {
                 bool preferStep = e.Kind == CorDebugManagedCallbackKind.StepComplete
@@ -890,12 +890,6 @@ public sealed partial class DebugEngine : IDisposable
                 _callbacksQuiet.Reset();
             else
             {
-                if (_deferredEvalCompletion is { } completedEvaluation)
-                {
-                    completedEvaluation.Completed = true;
-                    _deferredEvalCompletion = null;
-                    action = EventAction.InternalStop;
-                }
                 if (_deferredInternalStop)
                 {
                     _deferredInternalStop = false;
@@ -1003,10 +997,11 @@ public sealed partial class DebugEngine : IDisposable
                 return OnEvalFinished(eval.Eval, threwException: true) ? EventAction.InternalStop : EventAction.Continue;
 
             case CustomNotificationCorDebugManagedCallbackEventArgs notification:
-                if (_pendingEval is { } pending && pending.ThreadId == notification.Thread.Id)
+                if (_pendingEval is { Completed: false } pending && pending.ThreadId == notification.Thread.Id)
                 {
+                    if ((int)pending.Eval.TryAbort() < 0)
+                        pending.Eval.RudeAbort();
                     pending.CrossThreadDependency = true;
-                    pending.Eval.Abort();
                 }
                 return EventAction.Continue;
 

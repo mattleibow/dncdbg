@@ -29,7 +29,7 @@ class Program
             numeric = Environment.GetEnvironmentVariable("DNCDBG_PROFILE_NUMBER"),
             url = Environment.GetEnvironmentVariable("ASPNETCORE_URLS"),
             console = Environment.GetEnvironmentVariable("DNCDBG_CONSOLE"),
-        }));
+        }, new JsonSerializerSettings { StringEscapeHandling = StringEscapeHandling.EscapeNonAscii }));
         Label.Checkpoint("finish", "", (Object context) => { });
     }
 }

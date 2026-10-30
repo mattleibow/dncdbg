@@ -1,0 +1,82 @@
+Production baseline: 454362e16d7487bcac35cc32d97db0998f667947.
+Tests were added and reproduced before the respective production fixes.
+Full raw local/CI logs are retained under build/validation/mixed-mode/.
+
+=== review-454362e1-sibling-attach-red.log (terminal exception) ===
+AssertionError: Uncorroborated attach process event authorized killing an external sibling
+
+=== review-454362e1-sibling-launch-red.log (terminal exception) ===
+AssertionError: Uncorroborated launch process event authorized killing an external sibling
+
+Both real external sibling targets start after backend initialization and before
+launch. The backend claims their local PID, rejects launch and exits. Chronology
+alone previously authorized their SIGKILL. Post-fix requires survival/normal
+test-controlled exit for both attach and false launch labels.
+
+=== Public isolated Linux forced-reuse pre-fix red ===
+Test-only commit: de0b554f8097ec5881b80ca477192546d43ffd64.
+Run: https://github.com/mattleibow/dncdbg/actions/runs/40117963388
+Exact completed Linux job excerpt (timestamps omitted only):
+
+Terminating retained owned local target 10 independently of the native adapter.
+Owned local target 10 did not exit within its termination budget.
+Traceback (most recent call last):
+  File "/home/runner/work/dncdbg/dncdbg/tests/DncDbg.MixedModeTests/pid_reuse.py", line 95, in <module>
+    raise AssertionError(f"Replacement PID {number} was killed after validated generation exited; same_tick={equal_tick}, status={status}")
+AssertionError: Replacement PID 10 was killed after validated generation exited; same_tick=False, status=9
+
+The supervisor runs as PID1 only inside sudo unshare --mount --pid --fork
+--mount-proc. It never writes the host ns_last_pid. The production Terminate
+log callback pauses after identity validation and immediately before signal;
+the supervisor kills/reaps the original, forces the same numeric PID for a
+replacement and resumes signaling. The post-fix worker retains the pidfd before
+the barrier and requires replacement survival, retrying until equal Linux
+creation ticks are also covered. No kernel private interface or production
+test hook is used.
+
+=== review-454362e1-three-output-red.log (terminal exception) ===
+AssertionError: Slow but responsive client did not receive its full valid output events
+
+The backend emits three valid 2MiB output frames, then exited and terminated.
+The client pauses three seconds after each large frame's header. Existing
+per-frame five-second deadlines must remain valid for every frame; the old
+queue-wide six-second timer dropped later output/terminals.
+
+=== Additional A: review-454362e1-dac-eof-memory-red.log (terminal exception) ===
+AssertionError: DAC COM wrapped backend loss into a generic runtime error: {'seq': 412, 'type': 'response', 'command': 'stackTrace', 'request_seq': 5, 'success': False, 'message': 'The runtime reported the error CORDBG_E_INCOMPATIBLE_PROTOCOL.', 'body': {'error': {'id': 1, 'format': 'The runtime reported the error CORDBG_E_INCOMPATIBLE_PROTOCOL.'}}}
+
+=== Additional A: review-454362e1-dac-eof-context-red.log (terminal exception) ===
+AssertionError: DAC COM wrapped backend loss into a generic runtime error: {'seq': 412, 'type': 'response', 'command': 'stackTrace', 'request_seq': 5, 'success': False, 'message': 'The runtime could not do that.', 'body': {'error': {'id': 1, 'format': 'The runtime could not do that.'}}}
+
+The test relay kills real LLDB during its second memory fetch (inside public
+OpenVirtualProcess/DAC work) or its register scope fetch (GetThreadContext).
+The generic exception catch must retain the recorded native transport failure,
+even when ClrDebug wraps COM failure as DebugException rather than IOException.
+
+=== Additional C: review-454362e1-late-capture-red.log ===
+Unhandled exception. System.InvalidOperationException: No process is associated with this object.
+   at System.Diagnostics.Process.EnsureState(State state)
+   at System.Diagnostics.Process.EnsureState(State state)
+   at System.Diagnostics.Process.get_Id()
+   at DncDbg.Dap.Native.NativeAdapterSession.TrackLaunchedLocalTarget(Int32 pid) in /Users/matthew/.copilot/repos/copilot-worktrees/dncdbg/mattleibow-fantastic-guide/src/DncDbg.Dap/Native/NativeAdapterSession.cs:line 31
+   at Program.<Main>$(String[] args) in /Users/matthew/.copilot/repos/copilot-worktrees/dncdbg/mattleibow-fantastic-guide/tests/DncDbg.NativeTests/Program.cs:line 13
+   at Program.<Main>(String[] args)
+
+=== Local post-fix greens (macOS independent fallback fails closed) ===
+PASS launch provenance rejects external sibling process event: startMethod=attach
+PASS launch provenance rejects external sibling process event: startMethod=launch
+PASS three-second pause per frame preserves 3 complete 2MiB outputs and ordered exit events
+PASS DAC COM backend failure retains transport-unavailable diagnostic: eof-dac-memory
+PASS DAC COM backend failure retains transport-unavailable diagnostic: eof-dac-context
+PASS disposing/disposed native sessions reject late target identity capture
+PASS Linux ancestry parsing fails closed on malformed/truncated process records
+PASS adapter-exit target ownership: orphan-eof (independent cleanup explicitly unavailable; fail-closed target survival)
+PASS adapter-exit target ownership: orphan-reverse (independent cleanup explicitly unavailable; fail-closed target survival)
+
+Windows pins a kernel process handle before metadata and uses corroborated
+Toolhelp32 ancestry. Linux retains a pidfd before metadata/ancestry validation,
+verifies its liveness after validation and sends only via pidfd_send_signal.
+macOS has no implemented bound identity, so independent cleanup is intentionally
+unavailable: normal debugger-controlled termination is preserved, but backend
+death may leave the target alive with an explicit diagnostic. No Unix numeric
+PID signal remains in the independent cleanup helper.

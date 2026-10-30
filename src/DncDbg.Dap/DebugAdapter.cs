@@ -467,6 +467,9 @@ internal sealed class DebugAdapter : IDisposable
                     ["debuggeeProcessId"] = _engine.ProcessId,
                 };
 
+            case "dotnet/setNativeBreakpoint":
+                throw new DebuggerException("The direct native controller is retired. Use standard native breakpoints with --native-debugger=lldb.");
+
             case "threads":
                 return new ThreadsResponseBody
                 {
@@ -734,6 +737,7 @@ internal sealed class DebugAdapter : IDisposable
             Environment = launch.Environment,
             StopAtEntry = args.StopAtEntry,
             NoDebug = args.NoDebug,
+            NativeDebugging = args.NativeDebugging,
             JustMyCode = args.JustMyCode ?? true,
             StepFiltering = args.EnableStepFiltering ?? true,
             SourceFileMap = args.SourceFileMap,
@@ -751,6 +755,8 @@ internal sealed class DebugAdapter : IDisposable
 
     private void Attach(AttachArguments args)
     {
+        if (args.NativeDebugging)
+            throw new DebuggerException("Direct native debugging is retired. Start dncdbg-dap with --native-debugger=lldb instead.");
         _engine.AllowImplicitFuncEval = args.ExpressionEvaluationOptions?.AllowImplicitFuncEval ?? args.AllowImplicitFuncEval ?? true;
         _engine.ShowRawValues = args.ExpressionEvaluationOptions?.ShowRawValues ?? false;
         _engine.Attach(args.GetProcessId(), args.JustMyCode ?? true, args.SourceFileMap, args.StopAtEntry, args.Env);

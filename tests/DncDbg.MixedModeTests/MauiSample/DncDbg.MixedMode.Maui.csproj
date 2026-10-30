@@ -1,0 +1,65 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>net10.0-maccatalyst;net10.0-macos</TargetFrameworks>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>DncDbg.MixedMode.Maui</RootNamespace>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <UseMaui>true</UseMaui>
+    <SingleProject>true</SingleProject>
+    <ApplicationTitle>DNCDbg Mixed Mode</ApplicationTitle>
+    <ApplicationId>com.mattleibow.dncdbg.mixedmode</ApplicationId>
+    <ApplicationDisplayVersion>1.0</ApplicationDisplayVersion>
+    <ApplicationVersion>1</ApplicationVersion>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
+    <LinkMode>None</LinkMode>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'maccatalyst'">
+    <SupportedOSPlatformVersion>15.0</SupportedOSPlatformVersion>
+    <ApplicationManifest>Platforms/MacCatalyst/Info.plist</ApplicationManifest>
+    <CodeSignEntitlements Condition="'$(Configuration)' == 'Debug'">Platforms/MacCatalyst/Entitlements.Debug.plist</CodeSignEntitlements>
+    <MixedModeNativePlatform>maccatalyst</MixedModeNativePlatform>
+    <MixedModeNativeArch Condition="$(RuntimeIdentifier.Contains('arm64'))">arm64</MixedModeNativeArch>
+    <MixedModeNativeArch Condition="'$(MixedModeNativeArch)' == '' and '$(NETCoreSdkRuntimeIdentifier)' == 'osx-arm64'">arm64</MixedModeNativeArch>
+    <MixedModeNativeArch Condition="'$(MixedModeNativeArch)' == ''">x86_64</MixedModeNativeArch>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'macos'">
+    <SupportedOSPlatformVersion>14.0</SupportedOSPlatformVersion>
+    <MixedModeNativePlatform>macos</MixedModeNativePlatform>
+    <MixedModeNativeArch Condition="$(RuntimeIdentifier.Contains('arm64'))">arm64</MixedModeNativeArch>
+    <MixedModeNativeArch Condition="'$(MixedModeNativeArch)' == '' and '$(NETCoreSdkRuntimeIdentifier)' == 'osx-arm64'">arm64</MixedModeNativeArch>
+    <MixedModeNativeArch Condition="'$(MixedModeNativeArch)' == ''">x86_64</MixedModeNativeArch>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <MixedModeNativeOutput>$(MSBuildProjectDirectory)/../../../build/validation/mixed-mode/maui-native/$(TargetFramework)/$(MixedModeNativeArch)/libmixedfixture.dylib</MixedModeNativeOutput>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Maui.Controls" Version="10.0.41" />
+    <PackageReference Include="Microsoft.Maui.DevFlow.Agent" Version="0.1.0-preview.13.26526.5" />
+  </ItemGroup>
+
+  <ItemGroup Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'macos'">
+    <PackageReference Include="Microsoft.Maui.Platforms.MacOS" Version="0.1.0-preview.13.26526.5" />
+    <PackageReference Include="Microsoft.Maui.Platforms.MacOS.Essentials" Version="0.1.0-preview.13.26526.5" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <NativeReference Include="$(MixedModeNativeOutput)" Kind="Dynamic">
+      <ForceLoad>false</ForceLoad>
+    </NativeReference>
+  </ItemGroup>
+
+  <Target Name="BuildMixedModeNative"
+          BeforeTargets="PrepareForBuild"
+          Inputs="../fixture/native.c;../fixture/native.cpp;build-native-apple.sh"
+          Outputs="$(MixedModeNativeOutput)">
+    <Exec Command="&quot;$(MSBuildProjectDirectory)/build-native-apple.sh&quot; &quot;$(MixedModeNativePlatform)&quot; &quot;$(MixedModeNativeArch)&quot; &quot;$(MixedModeNativeOutput)&quot;" />
+  </Target>
+</Project>

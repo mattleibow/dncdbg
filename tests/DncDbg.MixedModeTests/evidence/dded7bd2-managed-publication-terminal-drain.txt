@@ -1,0 +1,108 @@
+Production baseline: dded7bd2d4116ec9b205d392d47745da63558c67.
+Tests below reproduced before the respective production fixes. Raw full
+transcripts are retained under ignored build/validation/mixed-mode/.
+
+Real CoreCLR tests invoke the production proxy on one test worker and gate the
+actual DAP output stream after its header, before its managed response payload.
+The same LLDB-owned process transitions to another native stop, or receives a
+module event that changes only the inspection epoch; the gate is then released.
+No fake managed view or production injection hook is used.
+
+=== review-dded7bd2-managed-scopes-red.log (terminal exception) ===
+Unhandled exception. System.InvalidOperationException: Stale managed scopes succeeded after stop transition 3/403.
+   at ManagedPublicationProof.Run(String command, Boolean module) in /Users/matthew/.copilot/repos/copilot-worktrees/dncdbg/mattleibow-fantastic-guide/tests/DncDbg.NativeTests/ManagedPublicationProof.cs:line 60
+   at Program.<Main>$(String[] args)
+   at Program.<Main>(String[] args)
+
+=== review-dded7bd2-managed-variables-red.log (terminal exception) ===
+Unhandled exception. System.InvalidOperationException: Stale managed variables succeeded after stop transition 3/403.
+
+=== review-dded7bd2-managed-evaluate-red.log (terminal exception) ===
+Unhandled exception. System.InvalidOperationException: Stale managed evaluate succeeded after stop transition 3/403.
+
+=== review-dded7bd2-managed-stack-red.log (terminal exception) ===
+Unhandled exception. System.InvalidOperationException: Stale managed dotnet/managedStackTrace succeeded after stop transition 3/403.
+
+=== review-dded7bd2-managed-module-red.log (terminal exception) ===
+Unhandled exception. System.InvalidOperationException: Stale managed scopes succeeded after inspection transition 3/403.
+
+=== review-dded7bd2-module-variables-red.log (terminal exception) ===
+Unhandled exception. System.InvalidOperationException: Stale managed variables succeeded after inspection transition 3/403.
+
+=== review-dded7bd2-module-evaluate-red.log (terminal exception) ===
+Unhandled exception. System.InvalidOperationException: Stale managed evaluate succeeded after inspection transition 3/403.
+
+=== review-dded7bd2-module-dotnet-managedStackTrace-red.log (terminal exception) ===
+Unhandled exception. System.InvalidOperationException: Stale managed dotnet/managedStackTrace succeeded after inspection transition 3/403.
+
+=== review-dded7bd2-queued-terminals-red.log ===
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "tests/DncDbg.MixedModeTests/proxy_contracts.py", line 1124, in disconnect_terminal_drain_contract
+    check(terminals == ["exited", "terminated"], "Successful disconnect lost or duplicated terminal events: " + str(terminals))
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "tests/DncDbg.MixedModeTests/run.py", line 23, in check
+    raise AssertionError(message)
+AssertionError: Successful disconnect lost or duplicated terminal events: []
+
+=== review-dded7bd2-late-terminals-red.log (terminal exception) ===
+AssertionError: Successful disconnect lost or duplicated terminal events: []
+
+=== review-dded7bd2-zero-frame-red.log ===
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "tests/DncDbg.MixedModeTests/proxy_contracts.py", line 1100, in zero_frame_contract
+    check(result == "0", "Native frame zero was not remembered; frame-less REPL restored " + result)
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "tests/DncDbg.MixedModeTests/run.py", line 23, in check
+    raise AssertionError(message)
+AssertionError: Native frame zero was not remembered; frame-less REPL restored 2
+
+=== Additional A: review-dded7bd2-open-input-module-red.log ===
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "tests/DncDbg.MixedModeTests/proxy_contracts.py", line 999, in client_backpressure_contract
+    raise AssertionError("Client backpressure held state/teardown during " + command + "/" + finish) from None
+AssertionError: Client backpressure held state/teardown during variables/module
+
+=== Additional A: review-dded7bd2-open-input-deadline-red.log (terminal exception) ===
+AssertionError: Client backpressure held state/teardown during variables/deadline
+
+=== Additional C: review-dded7bd2-startup-atomic-red.log ===
+Unhandled exception. System.InvalidOperationException: Start reset erased target evidence arriving during admission.
+   at Program.<Main>$(String[] args) in /Users/matthew/.copilot/repos/copilot-worktrees/dncdbg/mattleibow-fantastic-guide/tests/DncDbg.NativeTests/Program.cs:line 37
+   at Program.<Main>(String[] args)
+
+=== Additional D: review-dded7bd2-backend-eof-red.log ===
+The native debug adapter closed its DAP connection.
+Unhandled exception. System.InvalidOperationException: Immediate backend EOF was misreported as a timeout.
+ ---> System.TimeoutException: Native debug adapter timed out handling 'eofRequest'.
+   at DncDbg.Dap.Native.NativeAdapterSession.Request(String command, Object arguments, CancellationToken cancellation) in /Users/matthew/.copilot/repos/copilot-worktrees/dncdbg/mattleibow-fantastic-guide/src/DncDbg.Dap/Native/NativeAdapterSession.cs:line 89
+   at Program.<Main>$(String[] args) in /Users/matthew/.copilot/repos/copilot-worktrees/dncdbg/mattleibow-fantastic-guide/tests/DncDbg.NativeTests/Program.cs:line 47
+   --- End of inner exception stack trace ---
+   at Program.<Main>$(String[] args) in /Users/matthew/.copilot/repos/copilot-worktrees/dncdbg/mattleibow-fantastic-guide/tests/DncDbg.NativeTests/Program.cs:line 50
+   at Program.<Main>(String[] args)
+
+=== Post-fix same-case greens ===
+PASS real managed scopes publication rejects stop transition behind client output gate
+PASS real managed scopes publication rejects module inspection transition behind client output gate
+PASS real managed variables publication rejects stop transition behind client output gate
+PASS real managed variables publication rejects module inspection transition behind client output gate
+PASS real managed evaluate publication rejects stop transition behind client output gate
+PASS real managed evaluate publication rejects module inspection transition behind client output gate
+PASS real managed dotnet/managedStackTrace publication rejects stop transition behind client output gate
+PASS real managed dotnet/managedStackTrace publication rejects module inspection transition behind client output gate
+PASS native frame zero replaces prior native selection without changing hybrid ownership
+PASS successful disconnect drains exited/terminated exactly once after reverse wait: queued-terminals
+PASS successful disconnect drains exited/terminated exactly once after reverse wait: late-terminals
+PASS full client pipe permits bounded variables/module shutdown
+PASS full client pipe permits bounded variables/deadline shutdown
+PASS atomic startup admission preserves concurrent process evidence before an explicit failure
+PASS immediate pending-request backend EOF is reported as transport loss, not timeout
+
+Additional ordering coverage emits exited before the response, then releases
+terminated only after the frontend observes exited; delivery must be exactly
+["exited", "terminated"] after the response. Additional open-input backpressure
+coverage owns a real child target and verifies both native adapter and child
+exit without closing client stdin or draining the partial response.
+ProtocolTests also require idempotent connection disposal.

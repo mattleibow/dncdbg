@@ -16,6 +16,7 @@ public sealed class LaunchOptions
     public IReadOnlyDictionary<string, string?>? Environment { get; init; }
     public bool StopAtEntry { get; init; }
     public bool NoDebug { get; init; }
+    public bool NativeDebugging { get; init; }
     public bool JustMyCode { get; init; } = true;
 
     /// <summary>Where to look for symbols that are not next to their module.</summary>

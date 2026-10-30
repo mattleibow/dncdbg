@@ -30,6 +30,8 @@ internal sealed record CallTarget(string TypeName, string TypeDisplayName, strin
     public bool IsConstructor => MethodName == ".ctor";
 }
 
+internal sealed record PInvokeTarget(string Library, string EntryPoint);
+
 // Call sites of a method as "step into targets" need them: every call with what it calls.
 internal sealed partial class ModuleMetadata
 {
@@ -101,6 +103,7 @@ internal sealed partial class ModuleMetadata
                 return new CallTarget(StripArity(GetTypeName(type)), GetTypeDisplayName(type), _md.GetString(method.Name),
                     signature.ParameterTypes.ToArray(), GetMethodParameters(token).ParameterNames, token);
             }
+
             case HandleKind.MemberReference:
             {
                 MemberReference member = _md.GetMemberReference((MemberReferenceHandle)target);
@@ -114,6 +117,32 @@ internal sealed partial class ModuleMetadata
                 return null;
         }
     }
+
+    public PInvokeTarget? GetPInvokeTarget(EntityHandle target)
+    {
+        if (target.Kind != HandleKind.MethodDefinition)
+            return null;
+        MethodDefinition method = _md.GetMethodDefinition((MethodDefinitionHandle)target);
+        if ((method.Attributes & System.Reflection.MethodAttributes.PinvokeImpl) == 0)
+            return null;
+        MethodImport import = method.GetImport();
+        if (import.Module.IsNil)
+            return null;
+        string entryPoint = import.Name.IsNil ? _md.GetString(method.Name) : _md.GetString(import.Name);
+        string library = _md.GetString(_md.GetModuleReference(import.Module).Name);
+        return new PInvokeTarget(library, entryPoint);
+    }
+
+    public IReadOnlyList<PInvokeTarget> GetPInvokeTargets(int methodToken, int startOffset, int endOffset, int minimumOffset) =>
+        GetCallInstructions(methodToken)
+            .Where(call => call.Kind == CallKind.Call
+                && call.Offset >= Math.Max(startOffset, minimumOffset)
+                && call.Offset < endOffset)
+            .Select(call => GetPInvokeTarget(call.Target))
+            .Where(target => target != null)
+            .Select(target => target!)
+            .Distinct()
+            .ToArray();
 
     // "Outer.Inner" without namespace or arity, for a type defined here or referenced from elsewhere
     private string GetTypeDisplayName(EntityHandle handle)

@@ -13,10 +13,25 @@ warnings as errors. It consists of three SDK-style projects:
 The `dncdbg` command name is reserved for a future human-oriented debugger CLI.
 IDEs and other DAP clients launch `dncdbg-dap`.
 
-The engine uses ClrDebug and the public CLR debugging APIs directly. It does not
+The default managed engine uses ClrDebug and the public CLR debugging APIs directly. It does not
 wrap another debugger executable. Native CLR debugging libraries and the Windows
 PDB reader remain runtime dependencies supplied through NuGet and the target
 runtime; no C++ compiler, CMake build, or vendored native source is required.
+
+Managed debugging across P/Invoke remains supported by the default adapter.
+An **experimental external native DAP backend** (`--native-debugger=lldb|dap`) delegates native
+debugging to an existing debugger instead of recreating it. LLDB may be found in
+the system/toolchain or supplied as an explicitly licensed upstream bundle.
+An optional read-only CoreCLR view enriches matching native frames with managed
+source/scalar locals on one locally proven configuration; it does not provide
+managed execution control or transparent mixed-mode debugging. Hosted CI proves
+native-only relay/lifecycle, not cross-platform managed overlays. This feature
+is not merge-ready.
+See [native debugger architecture and usage](docs/native_debuggers.md). The
+[mixed-mode investigation](docs/dap_status.md#mixed-managednative-debugging)
+preserves the earlier public baselines and dual-controller macOS blocker. The
+experimental direct Windows controller is **retired**, not a production backend.
+The fixture alone requires a C compiler and CMake; the debugger does not.
 
 ## Build and publish
 

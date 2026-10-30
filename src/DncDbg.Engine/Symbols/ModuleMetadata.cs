@@ -28,6 +28,7 @@ internal sealed partial class ModuleMetadata : IDisposable
 
     public string Path { get; }
     public bool HasSymbols => _pdb != null;
+    public Guid ModuleVersionId => _md.GetGuid(_md.GetModuleDefinition().Mvid);
 
     /// <summary>Where the symbols came from: a .pdb file, or the module itself when they are embedded. Null without symbols.</summary>
     public string? SymbolPath { get; private set; }

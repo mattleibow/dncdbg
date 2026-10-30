@@ -1,0 +1,84 @@
+Additional A-F review, reproduced before the corresponding production changes.
+Full exact transcripts are retained under build/validation/mixed-mode/ with
+the filenames below. These are verbatim terminal excerpts, not reconstructed
+errors. The original two publication/REPL defects have their own full evidence
+file: 84696b30-publication-repl-red-green.txt.
+
+=== A: review-A-deadlines-red.log ===
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "tests/DncDbg.MixedModeTests/proxy_contracts.py", line 818, in startup_deadline_gaps_contract
+    raise AssertionError("No bounded startup deadline for " + mode) from None
+AssertionError: No bounded startup deadline for startup-preinitialized
+
+=== A: review-A-retry-red.log ===
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "tests/DncDbg.MixedModeTests/proxy_contracts.py", line 818, in startup_deadline_gaps_contract
+    raise AssertionError("No bounded startup deadline for " + mode) from None
+AssertionError: No bounded startup deadline for startup-postconfig-retry
+
+=== A: review-A-disconnect-write-red.log (terminal exception) ===
+AssertionError: Disconnect did not cancel blocked launch transport ownership
+
+=== B: review-B-evidence-red.log (terminal exception) ===
+AssertionError: Explicit failed launch discarded observed process/stopped ownership
+
+=== C: review-C-sideeffect-red.log (terminal exception) ===
+AssertionError: Failed-after-side-effect evaluate retained a cached managed snapshot
+
+=== C: review-C-write-sideeffect-red.log (terminal exception) ===
+AssertionError: Failed-after-side-effect writeMemory retained a cached managed snapshot
+
+=== C: review-C-timeout-red.log (terminal exception) ===
+AssertionError: Failed-after-side-effect evaluate retained a cached managed snapshot
+
+=== D: review-D-client-error-red.log (unhandled error-response failure) ===
+Unhandled exception. System.Threading.Tasks.TaskCanceledException: A task was canceled.
+   at DncDbg.Protocol.DapConnection.SendAsync(DapMessage msg, CancellationToken cancellation, TaskCompletionSource`1 completion) in /Users/matthew/.copilot/repos/copilot-worktrees/dncdbg/mattleibow-fantastic-guide/src/DncDbg.Protocol/DapConnection.cs:line 196
+   at DncDbg.Protocol.DapConnection.Send(DapMessage message) in /Users/matthew/.copilot/repos/copilot-worktrees/dncdbg/mattleibow-fantastic-guide/src/DncDbg.Protocol/DapConnection.cs:line 190
+   at DncDbg.Protocol.DapConnection.SendErrorResponse(DapMessage request, String message) in /Users/matthew/.copilot/repos/copilot-worktrees/dncdbg/mattleibow-fantastic-guide/src/DncDbg.Protocol/DapConnection.cs:line 172
+   at DncDbg.Dap.Native.NativeDebugProxy.ProcessRequests() in /Users/matthew/.copilot/repos/copilot-worktrees/dncdbg/mattleibow-fantastic-guide/src/DncDbg.Dap/Native/NativeDebugProxy.cs:line 116
+   at System.Threading.Thread.StartCallback()
+
+=== D: review-D-sendmessage-red.log (terminal exception) ===
+Unhandled exception. System.InvalidOperationException: Native SendMessage did not surface its interrupted transport failure.
+   at Program.<Main>$(String[] args) in /Users/matthew/.copilot/repos/copilot-worktrees/dncdbg/mattleibow-fantastic-guide/tests/DncDbg.NativeTests/Program.cs:line 41
+   at Program.<Main>(String[] args)
+
+=== D: review-D-reverse-timeout-red.log (inner exception excerpt) ===
+ ---> System.TimeoutException: Test client output timed out.
+   at DncDbg.Protocol.DapConnection.SendAsync(DapMessage msg, CancellationToken cancellation, TaskCompletionSource`1 completion) in /Users/matthew/.copilot/repos/copilot-worktrees/dncdbg/mattleibow-fantastic-guide/src/DncDbg.Protocol/DapConnection.cs:line 217
+   at DncDbg.Protocol.DapConnection.SendRequestAsync(String command, Object arguments, CancellationToken cancellation) in /Users/matthew/.copilot/repos/copilot-worktrees/dncdbg/mattleibow-fantastic-guide/src/DncDbg.Protocol/DapConnection.cs:line 145
+   at DncDbg.Dap.Native.NativeDebugProxy.ForwardReverse(BackendMessage envelope) in /Users/matthew/.copilot/repos/copilot-worktrees/dncdbg/mattleibow-fantastic-guide/src/DncDbg.Dap/Native/NativeDebugProxy.cs:line 638
+
+=== E: review-E-wide-thread-red.log (terminal exception) ===
+AssertionError: {'seq': 7, 'type': 'response', 'command': 'stackTrace', 'request_seq': 5, 'success': False, 'message': "An element of type 'Number' cannot be converted to a 'System.Int32'.", 'body': {'error': {'id': 1, 'format': "An element of type 'Number' cannot be converted to a 'System.Int32'."}}}
+
+=== F: review-F-atomic-stop-red.log ===
+Unhandled exception. System.InvalidOperationException: Snapshot invalidation exposed stopped=true before allStopped=true.
+   at Program.<Main>$(String[] args) in /Users/matthew/.copilot/repos/copilot-worktrees/dncdbg/mattleibow-fantastic-guide/tests/DncDbg.NativeTests/Program.cs:line 25
+   at Program.<Main>(String[] args)
+
+=== Post-fix same-contract greens ===
+PASS bounded startup deadline: startup-preinitialized
+PASS bounded startup deadline: startup-postconfig-retry
+PASS explicit startup failure retains admission after actual target evidence
+PASS disconnect cancels blocked startup writes before queuing its own request
+PASS native-only 64-bit thread IDs round-trip without CLR API narrowing
+PASS managed snapshot expires before failed/timed-out native mutation: mutation-failure/evaluate
+PASS managed snapshot expires before failed/timed-out native mutation: mutation-failure/writeMemory
+PASS managed snapshot expires before failed/timed-out native mutation: mutation-timeout/evaluate
+PASS managed snapshot expires before failed/timed-out native mutation: mutation-timeout/writeMemory
+PASS completion/data-breakpoint queries preserve the live managed view without invalidation support
+PASS stopped/all-stop state commits atomically before snapshot cancellation observers
+PASS closed client output cannot throw an unhandled error-response exception during shutdown
+PASS native reverse-response write failure notifies the owning session
+PASS client reverse-write timeout fails explicitly to the originating backend
+
+The mutation tests use real LLDB to evaluate "phase = 9" or write the actual
+phase local's address. A test relay suppresses or fails the response only after
+the side effect completes. Each test rejects the old managed frame, opens a
+new snapshot and checks phase==9; no fake successful CLR inspection is used.
+The atomic-stop unit observes the snapshot cancellation boundary directly,
+without production scheduling hooks.

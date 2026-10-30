@@ -1,0 +1,96 @@
+Production baseline: 2b0170f7ad23c82f30da4b74204536d7b3773cde.
+Tests reproduced each defect before its corresponding production fix.
+Raw full transcripts remain under ignored build/validation/mixed-mode/.
+
+=== review-2b0170f7-orphan-eof-red.log ===
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "tests/DncDbg.MixedModeTests/proxy_contracts.py", line 1315, in orphan_target_contract
+    raise AssertionError("Owned local child survived cleanup after its native adapter exited: " + mode) from None
+AssertionError: Owned local child survived cleanup after its native adapter exited: orphan-eof
+
+=== review-2b0170f7-orphan-reverse-red.log ===
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "tests/DncDbg.MixedModeTests/proxy_contracts.py", line 1315, in orphan_target_contract
+    raise AssertionError("Owned local child survived cleanup after its native adapter exited: " + mode) from None
+AssertionError: Owned local child survived cleanup after its native adapter exited: orphan-reverse
+
+The peer launches a real target, reports its local PID, then exits. The ordinary
+case closes frontend input after observing backend exit; the reverse case
+exposes an 8MiB reverse-request header/payload byte, stops draining output and
+leaves input open. Both require owned target and backend exit. The attached and
+explicitly detached variants require survival, then release the child themselves.
+
+=== review-2b0170f7-slow-output-red.log (terminal exception) ===
+AssertionError: Slow terminal output was truncated: 65509/2097234
+
+After successful disconnect, the backend emits a valid 2MiB output event,
+exited, then terminated and exits. The frontend pauses reads for three seconds
+and resumes without closing stdin. The same post-fix test requires complete
+framing, exact output contents, response-first terminal order and bounded exit.
+
+=== review-2b0170f7-hybrid-eof-red.log (terminal exception) ===
+AssertionError: Hybrid acquisition swallowed fatal backend loss: {'seq': 9, 'type': 'response', 'command': 'stackTrace', 'request_seq': 4, 'success': False, 'message': 'cancelled: native stop or session changed', 'body': {'error': {'id': 1, 'format': 'cancelled: native stop or session changed'}}}
+
+=== Additional A: review-2b0170f7-inherited-stdout-red.log (terminal excerpt) ===
+subprocess.TimeoutExpired: Command '['bin/dncdbg-dap', '--native-debugger=dap', '--native-debugger-path=/Users/matthew/.pyenv/versions/3.13.5/bin/python3', '--native-debugger-arg=/Users/matthew/.copilot/repos/copilot-worktrees/dncdbg/mattleibow-fantastic-guide/tests/DncDbg.MixedModeTests/fake_native_adapter.py', '--native-debugger-arg=--mode=inherited-stdout', '--native-debugger-arg=--barrier=/Users/matthew/.copilot/repos/copilot-worktrees/dncdbg/mattleibow-fantastic-guide/build/validation/mixed-mode/inherited-stdout-False']' timed out after 18 seconds
+
+The target deliberately inherits backend stdout and outlives an accepted detach.
+Cleanup must stop its pipe reader without throwing/hanging or killing the
+attached/relinquished target. Public pipe-readiness APIs make the read wait
+cancellable; stream disposal happens after the reader is stopped.
+
+=== Additional B: review-2b0170f7-reverse-queued-red.log ===
+Native disconnect failed: Test backend refused detach while terminal is pending
+Native adapter did not exit after detach; terminating only the adapter, not its relinquished target.
+Unhandled exception. System.InvalidOperationException: Queued reverse request crossed a refused-disconnect generation.
+   at Program.<Main>$(String[] args) in /Users/matthew/.copilot/repos/copilot-worktrees/dncdbg/mattleibow-fantastic-guide/tests/DncDbg.NativeTests/Program.cs:line 44
+   at Program.<Main>(String[] args)
+
+=== Additional B: review-2b0170f7-reverse-completed-red.log ===
+Unhandled exception. System.InvalidOperationException: Successful client reverse response was overwritten by cancellation after completion.
+   at Program.<Main>$(String[] args) in /Users/matthew/.copilot/repos/copilot-worktrees/dncdbg/mattleibow-fantastic-guide/tests/DncDbg.NativeTests/Program.cs:line 42
+   at Program.<Main>(String[] args)
+
+The first unit enqueues a native reverse request before disconnect cancellation,
+processes an explicit refusal/reset, then dequeues the original request. It must
+fail to its origin without exposing a new client request. The second completes
+the client response successfully and cancels the reverse token immediately
+after completion; the backend must still receive that successful response.
+
+=== Post-fix same-case greens ===
+PASS adapter-exit target ownership: orphan-eof
+PASS adapter-exit target ownership: orphan-reverse
+PASS adapter-exit target ownership: orphan-eof attached
+PASS adapter-exit target ownership: orphan-detached
+PASS three-second client pause preserves complete 2MiB terminal output and ordered exit events
+PASS hybrid stack acquisition propagates fatal backend EOF as connection loss
+PASS inherited target stdout cannot throw or block bounded detached reader cleanup; attach=False
+PASS inherited target stdout cannot throw or block bounded detached reader cleanup; attach=True
+PASS reverse request enqueue/completion ownership: reverse-completed-cancel
+PASS reverse request enqueue/completion ownership: reverse-queued-refusal
+PASS independent target cleanup rejects changed identity and preexisting process adoption
+
+The independent target unit rejects a mismatched creation time and refuses
+adoption of a real process created before the native adapter. Production
+fallback records only explicit local process events for launch ownership;
+attached, non-local and relinquished targets are never independently adopted.
+Unix creation time is revalidated before signaling; this is not a claim of a
+kernel job/container or unlimited orphan-descendant tracking.
+
+=== Linux first candidate CI 40113683850, before equal-tick ancestry guard ===
+Candidate source: 5d5debf21e3c60ddfe82dfc8c6a7716be40cb330.
+The existing negative identity assertion was not weakened: it exposed Linux's
+coarse creation-time tick when a pre-existing child and later adapter shared
+the same reported time. Exact terminal excerpt:
+
+Native target 2659 identity changed or exited; refusing independent termination.
+Terminating retained owned local target 2659 independently of the native adapter.
+Unhandled exception. System.InvalidOperationException: Independent target cleanup adopted a process predating the adapter.
+   at Program.<Main>$(String[] args) in /home/runner/work/dncdbg/dncdbg/tests/DncDbg.NativeTests/Program.cs:line 70
+   at Program.<Main>(String[] args)
+
+Equal Linux timestamps now require actual /proc parent-chain proof. A missing,
+changed or unrelated identity is refused and logged instead of treating equality
+as proof of creation during this adapter session.

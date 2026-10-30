@@ -1,0 +1,144 @@
+Experimental Linux ancestry-generation admission proof
+====================================================
+
+Pre-fix production/test tip:
+  cfb87b28b6676e23b29c7d123ee53d375eccd1f7
+Red run:
+  https://github.com/mattleibow/dncdbg/actions/runs/40121244024
+Ubuntu job:
+  https://github.com/mattleibow/dncdbg/actions/runs/40121244024/job/120953030274
+Step: Publish and validate swappable DAP contracts (FAILED).
+
+Exact relevant red log (ANSI color codes omitted):
+2026-10-24T18:34:05.0872208Z Native launch ancestry edge 14 -> 13 requires generation validation.
+2026-10-24T18:34:05.0873250Z Native launch ancestry edge 13 -> 2 requires generation validation.
+2026-10-24T18:34:05.0874375Z Terminating retained kernel-bound owned target 14 independently of the native adapter.
+2026-10-24T18:34:05.2224186Z AssertionError: Unrelated target killed through reused intermediate parent; same_tick=True, status=9
+
+The outer red workflow was later cancelled by a subsequent push; the completed
+Ubuntu job and the exact executing assertion above, not that aggregate status,
+are the pre-fix red evidence.
+
+Generation-bound implementation:
+  22891de5 (Bind Linux launch ancestry to retained process generations)
+First hosted negative ancestry green tip (superseded by review below):
+  ebeefc845cb48135bf225638883b8698fe6b077c
+Run:
+  https://github.com/mattleibow/dncdbg/actions/runs/40122252777
+Ubuntu job:
+  https://github.com/mattleibow/dncdbg/actions/runs/40122252777/job/120956180924
+
+Exact relevant green log:
+2026-10-24T18:47:27.0554962Z PASS forced PID reuse replacement survives: pid=11, same_tick=True
+2026-10-24T18:47:27.2492504Z PASS intermediate-parent replacement rejected and unrelated target survives: same_tick=True
+2026-10-24T18:47:27.2532025Z PASS same-tick intermediate-parent PID reuse cannot authorize independent target termination
+
+This is an executing green for the unchanged parent_reuse.py scenario, not a
+proof SKIP and not an aggregate-green claim for this intermediate workflow:
+the same job deliberately continued into newly added optional-capture red tests.
+Those failed before their production hardening:
+2026-10-24T18:47:32.0119921Z Unhandled exception. System.InvalidOperationException: Optional kernel identity capture leaked failures: OverflowException, DllNotFoundException
+
+Review found that blanket equal-tick rejection masked relationship validation
+in this first negative green. It was not sufficient evidence of a complete fix.
+The corrected implementation must also admit a legitimate same-tick chain and
+bind the root to the identity retained at adapter startup.
+
+Executing review reds, before production correction:
+  832bb87f8da842dc187108a68b010d3e6ab38187
+  https://github.com/mattleibow/dncdbg/actions/runs/40123530993/job/120960025552
+2026-10-24T19:04:02.5149681Z FAIL Linux generation proof: native adapter startup did not retain its Linux root generation
+2026-10-24T19:04:02.5150624Z FAIL Linux generation proof: exited retained generation threw instead of returning false: No such process
+2026-10-24T19:04:02.5151374Z FAIL Linux generation proof: legitimate same-tick wrapper/child ancestry was rejected
+
+At 2067f7e6256055fc6876c3f72f2790b6e968996f (https://github.com/mattleibow/dncdbg/actions/runs/40123748805/job/120960679130),
+Ubuntu executed and passed:
+2026-10-24T19:07:10.6164887Z PASS native adapter startup retains its Linux root generation
+2026-10-24T19:07:10.6835125Z PASS exited retained Linux generation returns false without throwing
+2026-10-24T19:07:10.7039719Z PASS legitimate same-tick wrapper/child Capture retains its kernel-bound identity
+2026-10-24T19:07:11.0348862Z PASS forced PID reuse includes equal Linux creation ticks with replacement survival
+2026-10-24T19:07:11.1990865Z PASS same-tick intermediate-parent PID reuse cannot authorize independent target termination
+2026-10-24T19:07:11.1998915Z Native target 17 lacks live corroborated launch ancestry; independent cleanup is not authorized.
+The root-reuse harness then failed at parent_reuse.py:136 with ChildProcessError
+because it called os.waitpid(target, os.WNOHANG) from PID1 while the live
+replacement parent still owned target; parent_reuse.py now checks /proc/<target>/stat
+while the replacement parent is live and calls waitpid after reaping the parent
+reparents target to PID1.
+
+The positive fixture creates a real wrapper/child with consecutive forks and
+checks their actual /proc creation ticks before calling Capture. A preliminary
+fixture at b75840d7 included interpreter startup and did not exercise equal
+ticks; its positive assertion is not counted as product red evidence.
+
+The supervisor runs only as PID1 in sudo unshare --mount --pid --fork
+--mount-proc. It never writes the host PID allocator. The normal ancestry audit
+logger pauses after reading unrelated target T's PPID, then the supervisor
+reaps that parent and forces its numeric PID for a child of the actual adapter
+worker. It retries until that replacement and T have equal creation ticks.
+It requires Capture rejection and actual T survival. No production test hook
+or private kernel API is used.
+
+The fix retains pidfds for all resolved Linux parents through final chain
+validation, in addition to the already retained target pidfd. Poll plus signal
+zero reject exit/reuse, including zombies. Every PPID is reread after resolving
+its pinned parent and again across the final chain. Equal parent/child creation
+ticks require the complete live pinned-generation relationship proof; changed
+relationships and metadata/kernel failures reject admission. The adapter root
+uses its startup-retained pidfd, never a newly opened numeric adapter PID.
+Only the retained target pidfd can signal the target; no numeric-PID signaling
+fallback was introduced. Ancestry pidfds are released on every outcome.
+
+Additional bounded hardening red/green
+------------------------------------
+Tests were committed at ebeefc845cb48135bf225638883b8698fe6b077c before the
+corresponding production guards.
+
+Malformed startMethod=True, local red using the published pre-guard adapter:
+AssertionError: {'seq': 5, 'type': 'response', 'command': 'ownershipStatus', 'request_seq': 3, 'success': False, 'message': "Native debugger transport is unavailable: The requested operation requires an element of type 'String', but the target element has type 'True'.", 'body': {'error': {'id': 1, 'format': "Native debugger transport is unavailable: The requested operation requires an element of type 'String', but the target element has type 'True'."}}}
+
+Post-guard local greens require both a live ownershipStatus response from the
+same backend and unrelated sibling survival/normal release:
+PASS launch provenance rejects external sibling process event: startMethod=NoneType
+PASS launch provenance rejects external sibling process event: startMethod=bool
+PASS launch provenance rejects external sibling process event: startMethod=int
+PASS launch provenance rejects external sibling process event: startMethod=list
+PASS launch provenance rejects external sibling process event: startMethod=dict
+
+Proof CLI red before changing the skip convention:
+AssertionError: Proof SKIP used usage-error exit code 2, expected 77
+Post-change local greens:
+PASS pid_reuse.py: non-Linux SKIP=77
+PASS parent_reuse.py: non-Linux SKIP=77
+PASS pid_reuse.py: argparse usage error=2 (not SKIP)
+PASS parent_reuse.py: argparse usage error=2 (not SKIP)
+
+The hosted intermediate-parent proof is mandatory: every nonzero exit,
+including SKIP=77, fails the Ubuntu contract step. The older target-reuse
+optional disposition recognizes only 77, never argparse's usage-error code 2.
+The exact-tip hosted workflow must additionally execute both same-tick proofs
+and run the full three-OS native backend matrix before the branch is frozen.
+Its uploaded forced-parent-reuse.log, forced-pid-reuse.log,
+backend-contracts.log, native-only-proxy.log, managed smoke/regression logs and
+proof-disposition.json are the authoritative final matrix artifacts.
+The extended private-namespace supervisor must additionally reap the original
+adapter root, reuse its PID within the original creation tick for a new parent
+and child, and require rejection plus unrelated-target survival.
+
+Local root-fix validation also completed the protocol contracts, native
+contracts, real native-only LLDB continue/disconnect/EOF/detach proofs,
+retired-controller rejection and 95 CLI/protocol managed smoke checks.
+Raw local logs are under build/validation/mixed-mode/ancestry-*.log.
+
+Limits remain explicit
+----------------------
+Hosted managed-overlay proof is SKIP on unproven configurations, not a managed
+inspection pass. No managed source breakpoint, stepping, exception-control,
+func-eval, device, real attach/restart or broader platform parity is claimed.
+Windows retained-handle/Toolhelp behavior is unchanged. macOS has no independent
+kernel-bound orphan cleanup; its negative contracts require target survival
+and release their own fixture. Linux equal-tick chronology alone remains
+insufficient, but a fully pinned and revalidated legitimate chain is admitted.
+
+The separately suggested Linux post-signal EINTR budget and Windows
+TerminateProcess access-denied exit-race changes are deferred: deterministic
+fault-path red proofs were not established within this bounded change.

@@ -1,0 +1,85 @@
+Red-to-green evidence for review of f44c8836f3bec22a1ff0420ec9c8baa2316f46b2 and b640c2b5e71fb4631df6577b363ffa4cd9ebabb3:
+NativeAdapterLocator.Run monotonic deadline, complete-line/token validation on cancelled streams, deterministic pipe descriptor disposal, and launch-scoped descendant cleanup
+
+1. Pre-fix RED at f44c8836f3bec22a1ff0420ec9c8baa2316f46b2 (unbounded inherited pipe wait):
+Command:
+  python3 -c "import runpy; n=runpy.run_path('tests/DncDbg.MixedModeTests/proxy_contracts.py'); n['version_pipe_inheritance_contract']('bin/dncdbg-dap')"
+Output:
+  Traceback (most recent call last):
+    File "<string>", line 1, in <module>
+    File "tests/DncDbg.MixedModeTests/proxy_contracts.py", line 347, in version_pipe_inheritance_contract
+      raise AssertionError("Version discovery hung on inherited stdout/stderr pipes after probe process exit") from None
+  AssertionError: Version discovery hung on inherited stdout/stderr pipes after probe process exit
+
+2. Pre-fix RED at b640c2b5e71fb4631df6577b363ffa4cd9ebabb3 (truncated cancelled output, descriptor leak, and surviving pipe-holding descendants):
+Command A (100 repeated discoveries under low descriptor limit without forced GC):
+  dotnet run --project tests/DncDbg.NativeTests -c Release -- "$(command -v python3)" "$PWD/tests/DncDbg.MixedModeTests/fake_native_adapter.py" version-probe-descriptors
+Output A:
+  Unhandled exception. System.ArgumentException: Error: Cannot execute native debugger: An error occurred trying to start process '.../lldb-dap-probe' with working directory '...'. Too many open files
+   ---> System.ComponentModel.Win32Exception (24): An error occurred trying to start process '.../lldb-dap-probe' with working directory '...'. Too many open files
+
+Command B (truncated cancelled version prefix + surviving pipe-holding descendant):
+  python3 -c "import runpy; n=runpy.run_path('tests/DncDbg.MixedModeTests/proxy_contracts.py'); n['version_pipe_inheritance_contract']('bin/dncdbg-dap')"
+Output B:
+  truncated-pipe returncode: 0 stdout: {"kind":"lldb",...,"version":"21.1","rid":"osx-arm64","warnings":[]}
+  AssertionError: Version discovery (version-inherits-stdout) abandoned pipe-holding descendant 78545 after Resolve returned
+
+3. Pre-fix RED at 209307f19d48e7b68b4b5410c2184fbae770de3e (ThreadPool starvation callback disposal race, aggregated stream completion trimming valid EOF output, DAP fallback helper escape, and ParseVersion garbage tokens):
+Command A (ThreadPool starvation concurrent Resolve):
+  dotnet run --project tests/DncDbg.NativeTests -c Release -- "$(command -v python3)" "$PWD/tests/DncDbg.MixedModeTests/fake_native_adapter.py" version-probe-descriptors
+Output A:
+  Unhandled exception. System.ObjectDisposedException: The CancellationTokenSource has been disposed.
+     at System.Threading.CancellationTokenSource.get_Token()
+     at DncDbg.Dap.Native.NativeAdapterLocator.<>c__DisplayClass12_0.<RunUnix>b__1(Object _)
+
+Command B (complete no-newline stream paired with retained opposite stream):
+  version-no-newline-stdout-inherits-stderr returncode: 1 stderr: Error: Native debugger discovery/version probe timed out
+  version-no-newline-stderr-inherits-stdout returncode: 1 stderr: Error: Native debugger discovery/version probe timed out
+
+4. Pre-fix RED at 97c4149167106000e92e92f648c0228f855c9e13 (unbounded DAP fallback RejectMalformed auto-replies & ThreadPool CTS timer, Unix leader setpgid waitpid hang, unrelated inheritable canary pipe leak, >pipe-capacity DAP fallback stderr block, and cross-stream stdout/stderr splicing):
+Command A (canary pipe inheritance + cross-stream splicing + DAP fallback stderr flood + malformed flood + leader setpgid):
+  Unhandled exception. System.InvalidOperationException: Probe child inherited unrelated parent handle: UNRELATED_HANDLE_INHERITED
+  version-splice-stdout-stderr rc: 0 stdout: {"kind":"lldb",...,"version":"21.1.8",...}
+  version-splice-stderr-stdout rc: 0 stdout: {"kind":"lldb",...,"version":"21.1",...}
+  version-stdout-no-newline-stderr-diagnostic rc: 1 stderr: Error: Native debugger '...' could not complete its DAP version probe: The native debug adapter closed its DAP connection.
+  no-cli-version-stderr-flood rc: 1 stderr: Error: Native debugger '...' could not complete its DAP version probe: The operation was canceled.
+  no-cli-version-malformed-flood TIMED OUT (RED: hung past 7s)
+  version-leader-changes-pgid TIMED OUT (RED: hung past 7s)
+
+5. Pre-fix RED at 92747c117a795d2baf29b4f4fceb541b4a1710ca (partial-pipe EMFILE and spawn-failure client pipe descriptor leak):
+Command:
+  dotnet run --project tests/DncDbg.NativeTests -c Release -- "$(command -v python3)" "$PWD/tests/DncDbg.MixedModeTests/fake_native_adapter.py" version-probe-descriptors
+Output:
+  Unhandled exception. System.InvalidOperationException: Partial pipe construction failure leaked descriptors without GC: 125 -> 145.
+
+6. Post-fix GREEN (including atomic POSIX_SPAWN_CLOEXEC_DEFAULT / addclosefrom_np descriptor exclusion under external thread churn, waitid ECHILD ownership-loss zero-signal enforcement, ABI-correct macOS arm64 O_NONBLOCK configuration, post-exit Windows DAP fallback sleep, and multi-hyphen SemVer identifiers):
+Command:
+  dotnet run --project tests/DncDbg.NativeTests -c Release -- "$(command -v python3)" "$PWD/tests/DncDbg.MixedModeTests/fake_native_adapter.py" version-probe-descriptors
+  python3 -c "import runpy; n=runpy.run_path('tests/DncDbg.MixedModeTests/proxy_contracts.py'); n['version_pipe_inheritance_contract']('bin/dncdbg-dap'); n['version_stdin_contract']('bin/dncdbg-dap')"
+Output:
+  PASS 100 repeated version discoveries under low descriptor limit keep descriptor/handle count stable without GC
+  PASS version discovery bounds pipe wait and cleans up descendant holder: version-inherits-stdout
+  PASS version discovery bounds pipe wait and cleans up descendant holder: version-inherits-stderr
+  PASS version discovery bounds pipe wait and cleans up descendant holder: version-inherits-pipes
+  PASS version discovery bounds pipe wait and cleans up descendant holder: version-no-newline-stdout-inherits-stderr
+  PASS version discovery bounds pipe wait and cleans up descendant holder: version-no-newline-stderr-inherits-stdout
+  PASS version discovery bounds pipe wait and cleans up descendant holder: version-flood-stdout
+  PASS version discovery bounds pipe wait and cleans up descendant holder: version-flood-stderr
+  PASS version discovery bounds pipe wait and cleans up descendant holder: version-flood-both
+  PASS truncated cancelled version output is rejected and cleaned up: version-truncated-pipe
+  PASS truncated cancelled version output is rejected and cleaned up: version-truncated-token
+  PASS DAP fallback version probe cleans up delegated helper: no-cli-version-inherits-pipes
+  PASS DAP fallback version probe cleans up delegated helper: no-cli-version-failure-inherits-pipes
+  PASS DAP fallback version probe cleans up delegated helper: no-cli-version-malformed-flood
+  PASS DAP fallback version probe drains large stderr output and accepts hyphenated SemVer
+  PASS cross-stream version token splicing is rejected: version-splice-stdout-stderr
+  PASS cross-stream version token splicing is rejected: version-splice-stderr-stdout
+  PASS independent stream version is preserved alongside opposite stream output: version-stdout-no-newline-stderr-diagnostic
+  PASS independent stream version is preserved alongside opposite stream output: version-stderr-no-newline-stdout-diagnostic
+  PASS Unix version probe kills direct leader after setpgid without signaling caller PGID (escaped helper limitation proven)
+  PASS version discovery cannot read the frontend's DAP stdin
+
+
+
+
+

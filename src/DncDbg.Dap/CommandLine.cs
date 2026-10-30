@@ -14,6 +14,10 @@ internal sealed record CommandLineOptions
     public LogLevel MinimumLogLevel { get; private set; } = LogLevel.Info;
     public string? LogLevelWarning { get; private set; }
     public bool ExitRequested { get; private set; }
+    public string? NativeDebugger { get; private set; }
+    public string? NativeDebuggerPath { get; private set; }
+    public List<string> NativeDebuggerArguments { get; } = [];
+    public bool NativeDebuggerInfo { get; private set; }
 
     public static CommandLineOptions Parse(string[] args)
     {
@@ -35,6 +39,9 @@ internal sealed record CommandLineOptions
                     break; // The managed adapter always speaks DAP.
                 case "--server":
                     options.Port = 4711;
+                    break;
+                case "--native-debugger-info":
+                    options.NativeDebuggerInfo = true;
                     break;
                 default:
                     if (arg.StartsWith("--logProtocol=", StringComparison.Ordinal))
@@ -62,11 +69,21 @@ internal sealed record CommandLineOptions
                             throw new ArgumentException("Error: Invalid server port.");
                         options.Port = port;
                     }
+                    else if (arg.StartsWith("--native-debugger=", StringComparison.Ordinal))
+                        options.NativeDebugger = arg["--native-debugger=".Length..];
+                    else if (arg.StartsWith("--native-debugger-path=", StringComparison.Ordinal))
+                        options.NativeDebuggerPath = arg["--native-debugger-path=".Length..];
+                    else if (arg.StartsWith("--native-debugger-arg=", StringComparison.Ordinal))
+                        options.NativeDebuggerArguments.Add(arg["--native-debugger-arg=".Length..]);
                     else
                         throw new ArgumentException($"Error: Unknown option {arg}");
                     break;
             }
         }
+        if (options.NativeDebuggerInfo || options.NativeDebuggerPath != null)
+            options.NativeDebugger ??= "lldb";
+        if (options.NativeDebugger is not (null or "lldb" or "dap"))
+            throw new ArgumentException("Error: Native debugger must be 'lldb' or 'dap'.");
         return options;
     }
 
@@ -115,6 +132,10 @@ internal sealed record CommandLineOptions
         --version                                Displays the current version.
         --interpreter=vscode                     Accept the VS Code DAP interpreter option.
         --server[=PORT]                          Serve one DAP connection on localhost (default 4711).
+        --native-debugger=lldb|dap                Use one external native DAP controller instead of ICorDebug execution.
+        --native-debugger-path=PATH               Explicit adapter executable or licensed LLVM bundle directory.
+        --native-debugger-arg=ARG                 Adapter argument (repeatable; no shell expansion).
+        --native-debugger-info                    Print native adapter discovery/version metadata as JSON.
         """;
 }
 

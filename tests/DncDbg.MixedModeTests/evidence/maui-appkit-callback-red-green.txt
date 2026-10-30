@@ -1,0 +1,170 @@
+MAUI AppKit callback mixed-stack red/green
+
+Fixture:
+  C# MixedModeScenario.Run(19, 23)
+    -> C++ native_callback_roundtrip
+      -> C# ManagedCallback(42)
+        -> native_checkpoint(3, 42)
+      <- 84
+    <- 126
+
+Pre-production RED 1:
+  The MAUI callback did not invoke a native checkpoint while its managed frame
+  was active. `maui_debugger.py` timed out waiting for the LLDB stopped event.
+
+Pre-production RED 2:
+  After adding the callback checkpoint, LLDB stopped with native_checkpoint and
+  native_callback_roundtrip on the stack, but no managed frames were published.
+  The engine log reported:
+
+    Managed inspection unavailable: ClrDebug.DebugException (0x80131C35):
+    Error HRESULT CORDBG_E_MISSING_METADATA ...
+    at DncDbg.Engine.CoreClrInspection.GetStackTrace
+
+Root cause:
+  A runtime/interop frame without managed metadata caused the entire stack walk
+  to fail before reaching the user callback frame.
+
+GREEN:
+  CoreClrInspection skips an individual TryGetFrame result of
+  CORDBG_E_MISSING_METADATA and continues the stack walk.
+
+  python3 tests/DncDbg.MixedModeTests/maui_debugger.py
+
+  PASS MAUI AppKit LLDB-owned mixed stack includes active C# callback
+
+Assertions:
+  - native_checkpoint is the top native frame.
+  - native_callback_roundtrip remains on the physical native stack.
+  - [Managed] MixedModeScenario.ManagedCallback is mapped into the hybrid stack.
+  - managed callback source is MixedModeScenario.cs.
+  - managed callback argument value is 42.
+  - after continue, DevFlow observes MixedModeStatus.Text == 126.
+
+Managed-address breakpoint RED:
+  Reusing the managed frame's current safe-point InstructionPointerReference as
+  either a standard setInstructionBreakpoints address or an LLDB hardware
+  breakpoint did not stop the next callback invocation. The safe-point IP is not
+  a stable method-entry breakpoint identity.
+
+Managed-address breakpoint GREEN:
+  ManagedInspectionFrame now preserves both:
+    - InstructionPointer: current frame/safe-point PC used for native/managed
+      frame correlation.
+    - CodeStart: CorDebugNativeFrame.Code.Address used as the current native
+      method entry.
+
+  DNCDbg exposes CodeStart as dncdbgCodeStartReference on a managed hybrid frame.
+  The proof installs:
+
+    breakpoint set --hardware -a <dncdbgCodeStartReference>
+
+  It clears the original native checkpoint breakpoint, continues, and invokes
+  the same MAUI button again through the same DevFlow batch session. LLDB stops
+  at the managed callback code start, DNCDbg maps the stop to
+  [Managed] MixedModeScenario.ManagedCallback, validates the breakpoint stop
+  reason and LLDB breakpoint ID, and requires the managed callback to be the
+  top frame with both current IP and code-start equal to the breakpoint address.
+  Four DevFlow tap commands must succeed. The same untouched managed breakpoint
+  binding and ID must stop both the second and third invocations before the
+  request is replaced for the P/Invoke StepIn scenario. The final DevFlow
+  assertion is MixedModeStatus.Text == 126:4.
+
+  Hybrid stackTrace and dotnet/managedStackTrace both publish the exact
+  dncdbgCodeStartReference spelling. The managed inspection status reports
+  skippedFrames, and the engine log records each missing-metadata frame.
+
+  python3 tests/DncDbg.MixedModeTests/maui_debugger.py
+
+  PASS MAUI AppKit mixed stack and LLDB managed-address callback breakpoint
+
+Managed source breakpoint RED 1:
+  Replacing the manual address command with a standard DAP setBreakpoints
+  request for MixedModeScenario.cs reached a runtime module whose on-disk image
+  had metadata, but ICorDebugModule.GetMetaDataInterface returned
+  CORDBG_E_MISSING_METADATA. One unrelated runtime module aborted resolution of
+  the user module.
+
+Managed source breakpoint RED 2:
+  After unusable modules were skipped individually, the portable PDB sequence
+  point resolved but CorDebugFunction.EnumerateNativeCode returned no current
+  code in the virtual process view. The active callback frame already carried
+  the exact CorDebugNativeFrame.Code object, so reporting the breakpoint as
+  permanently unsupported was incorrect.
+
+Managed source breakpoint GREEN:
+  CoreClrInspection now:
+    - skips only individual loaded modules without usable metadata;
+    - resolves the requested source line to method token and IL offset;
+    - considers EnumerateNativeCode, GetNativeCode, and already inspected active
+      managed frames as public current-code sources;
+    - maps the IL offset through COR_DEBUG_IL_TO_NATIVE_MAP while rejecting
+      prolog/epilog/no-mapping sentinels and arithmetic overflow.
+
+  NativeDebugProxy owns stable managed DAP breakpoint IDs, installs/removes LLDB
+  address breakpoints only while all threads are stopped, translates LLDB hit
+  IDs back to the managed ID, and returns the resolved source span plus exact
+  instructionReference.
+
+  python3 tests/DncDbg.MixedModeTests/maui_debugger.py
+
+  PASS MAUI AppKit mixed stack and managed source callback breakpoint
+
+Managed-to-native StepOut RED:
+  Forwarding LLDB-DAP stepOut directly from the managed callback stopped in an
+  unsymbolized reverse-PInvoke/runtime thunk rather than the C++ caller.
+
+Managed-to-native StepOut GREEN:
+  At the managed source stop, DNCDbg locates the first source-bearing native
+  boundary in LLDB's physical stack after verifying the top PC is managed and
+  no intervening managed frame precedes it. It installs an LLDB-owned one-shot
+  breakpoint at that caller frame's exact return PC, scoped to the requesting
+  OS thread, and resumes. The internal breakpoint ID is removed from the client
+  event and the final stop is reported as reason=step,
+  description="managed/native step out". Coincident user breakpoint IDs keep
+  breakpoint semantics.
+
+  The proof requires the top frame to be native_callback_roundtrip in native.cpp
+  at the exact callback return PC, then continues and proves the same untouched
+  managed breakpoint ID fires on a third invocation. The fourth invocation
+  drives P/Invoke StepIn, and the final assertion is 126:4.
+
+  PASS MAUI AppKit managed source breakpoint and managed-to-native StepOut
+
+Managed-to-native StepIn GREEN:
+  At the fourth invocation's managed MAUI_MANAGED_BEFORE source stop, DNCDbg
+  decodes the statement's IL call instruction and the MethodDef P/Invoke import:
+    library=mixedfixture
+    entryPoint=native_callback_roundtrip
+
+  `stepInTargets` publishes that exact entry point. Selecting the target installs
+  an LLDB-owned one-shot symbol breakpoint qualified by libmixedfixture.dylib
+  and scoped to the original OS thread. A different-thread reuse is rejected.
+  A native breakpoint mutation invalidates the stop snapshot; reusing the old
+  managed target ID is rejected as stale, then a refreshed top-frame target is
+  required.
+  The accepted target resumes, removes the internal breakpoint ID, and reports
+  one reason=step stop on the original thread with native_callback_roundtrip as
+  the top native.cpp frame. Querying native stepInTargets at that stop must not
+  invalidate the managed snapshot.
+
+  The proof then continues and requires the retained managed callback breakpoint
+  ID to fire again before the final 126:4 DevFlow assertion.
+
+Native-to-managed callback StepIn blocker evidence:
+  LLDB can enumerate the C++ callback function pointer and stop at its delegate
+  thunk. On macOS arm64 the public CoreCLR route is:
+    delegate thunk -> TheUMEntryPrestub -> TheUMEntryPrestubWorker
+      -> generated reverse-PInvoke stub -> indirect blr managed target
+
+  Exact local disassembly matched public dotnet/runtime ARM64 asmhelpers.S:
+  TheUMEntryPrestub calls TheUMEntryPrestubWorker, receives the target in x0,
+  and tailcalls it. The generated reverse-PInvoke stub later loads an indirect
+  managed target into x2 and executes blr x2.
+
+  The current OpenVirtualProcess read-only view does not expose the callback
+  source frame or a bindable source sequence point early enough at these entry
+  stops. Repeated instruction stepping is too slow and races stop snapshots, so
+  that experiment was rejected and not retained in production. StepIn remains
+  unclaimed until an architecture/version-aware target recipe has deterministic
+  stop-generation correlation and bounded tests.

@@ -74,6 +74,7 @@ public sealed class LaunchArguments
     public bool StopAtEntry { get; set; }
     public bool? JustMyCode { get; set; }
     public bool NoDebug { get; set; }
+    public bool NativeDebugging { get; set; }
 
     /// <summary>Project file or directory; the alternative to <see cref="Program"/>.</summary>
     public string? Project { get; set; }
@@ -166,6 +167,7 @@ public sealed class RunInTerminalResponseBody
 
 public sealed class AttachArguments
 {
+    public bool NativeDebugging { get; set; }
     public Dictionary<string, string?>? Env { get; set; }
     public bool StopAtEntry { get; set; }
     public ExpressionEvaluationOptions? ExpressionEvaluationOptions { get; set; }
@@ -295,6 +297,7 @@ public sealed class Breakpoint
     public int? Column { get; set; }
     public int? EndLine { get; set; }
     public int? EndColumn { get; set; }
+    public string? InstructionReference { get; set; }
 }
 
 public sealed class FunctionBreakpoint
@@ -384,6 +387,9 @@ public sealed class StackFrame
     public int? EndLine { get; set; }
     public int? EndColumn { get; set; }
     public string? PresentationHint { get; set; }
+    public string? InstructionPointerReference { get; set; }
+    [JsonPropertyName("dncdbgCodeStartReference")]
+    public string? DncDbgCodeStartReference { get; set; }
 }
 
 public sealed class StackTraceResponseBody

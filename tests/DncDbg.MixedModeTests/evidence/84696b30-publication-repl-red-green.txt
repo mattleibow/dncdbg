@@ -1,0 +1,65 @@
+Production baseline: 84696b30525d45c4c90ef494ca55d354291a74ce.
+All four tests were added and reproduced before changing production.
+The test peer writes one sizeable native response immediately followed by
+continued/stopped in a single byte stream; there are no production test hooks.
+Full protocol captures remain under ignored build/validation/mixed-mode/.
+
+=== review-84696b30-variables-red.log ===
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "tests/DncDbg.MixedModeTests/proxy_contracts.py", line 752, in inspection_stop_publication_contract
+    check(not response["success"] and "cancel" in response.get("message", "").lower() and not response.get("body", {}).get(command),
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+          "Old " + command + " response published across stop " + str(generation) + " -> " + str(current)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+          + ": success=" + str(response["success"]))
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "tests/DncDbg.MixedModeTests/run.py", line 23, in check
+    raise AssertionError(message)
+AssertionError: Old variables response published across stop 3 -> 5: success=True
+
+=== review-84696b30-scopes-red.log ===
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "tests/DncDbg.MixedModeTests/proxy_contracts.py", line 752, in inspection_stop_publication_contract
+    check(not response["success"] and "cancel" in response.get("message", "").lower() and not response.get("body", {}).get(command),
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+          "Old " + command + " response published across stop " + str(generation) + " -> " + str(current)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+          + ": success=" + str(response["success"]))
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "tests/DncDbg.MixedModeTests/run.py", line 23, in check
+    raise AssertionError(message)
+AssertionError: Old scopes response published across stop 3 -> 5: success=True
+
+=== review-84696b30-explicit-repl-red.log ===
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "tests/DncDbg.MixedModeTests/proxy_contracts.py", line 776, in explicit_repl_contract
+    check(result["result"] == "1", "Explicit-frame REPL observed backend frame " + result["result"] + " instead of client frame 1")
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "tests/DncDbg.MixedModeTests/run.py", line 23, in check
+    raise AssertionError(message)
+AssertionError: Explicit-frame REPL observed backend frame 2 instead of client frame 1
+
+=== review-84696b30-real-explicit-repl-red.log ===
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "tests/DncDbg.MixedModeTests/proxy_contracts.py", line 799, in real_explicit_repl_contract
+    check("frame #1:" in result and "native_add" in result,
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+          "Real overlay explicit-frame REPL returned another selected frame: " + result)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "tests/DncDbg.MixedModeTests/run.py", line 23, in check
+    raise AssertionError(message)
+AssertionError: Real overlay explicit-frame REPL returned another selected frame: frame #0: 0x0000000100090b00 libmixedfixture.dylib`native_sum(left=19, right=23) at native.c:11:15
+
+=== review-84696b30-two-fixes-green.log (identical tests after production fixes) ===
+PASS native variables publication rejects old values and child handles across a stop transition
+PASS native variables publication rejects old values and child handles across a stop transition
+PASS native variables publication rejects old values and child handles across a stop transition
+PASS native scopes publication rejects old values and child handles across a stop transition
+PASS native scopes publication rejects old values and child handles across a stop transition
+PASS native scopes publication rejects old values and child handles across a stop transition
+PASS explicit native REPL restores actual backend selection before global-state commands
+PASS real LLDB explicit caller-frame REPL survives internal overlay register selection

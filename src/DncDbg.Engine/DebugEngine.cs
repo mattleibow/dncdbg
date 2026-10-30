@@ -133,6 +133,8 @@ public sealed partial class DebugEngine : IDisposable
         int? consolePort;
         lock (_lock)
         {
+            if (options.NativeDebugging)
+                throw new DebuggerException("Direct native debugging is retired. Start dncdbg-dap with --native-debugger=lldb instead.");
             ConfigureExceptionDetails(options.Environment);
             NoDebug = options.NoDebug;
             if (_processId != 0 || _launching)

@@ -4,6 +4,9 @@
     <ProjectReference Include="..\DncDbg.Protocol\DncDbg.Protocol.csproj" />
     <ProjectReference Include="..\DncDbg.Engine\DncDbg.Engine.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="DncDbg.NativeTests" />
+  </ItemGroup>
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
@@ -12,6 +15,7 @@
     <TargetFramework>$(DebuggerTargetFramework)</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
   </PropertyGroup>
 

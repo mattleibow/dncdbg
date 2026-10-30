@@ -11,7 +11,7 @@ namespace DncDbg.Engine.Launch;
 /// then have to come from an installed runtime or a runtime pack of exactly the same build.
 /// </summary>
 [GeneratedComClass]
-internal sealed partial class DebuggingLibraryProvider(Action<string>? log) : ICLRDebuggingLibraryProvider3
+internal sealed partial class DebuggingLibraryProvider(Action<string>? log, string? directoryOverride = null) : ICLRDebuggingLibraryProvider3
 {
     public HRESULT ProvideWindowsLibrary(string pwszFileName, string pwszRuntimeModule, LIBRARY_PROVIDER_INDEX_TYPE indexType,
         uint dwTimestamp, int dwSizeOfImage, out IntPtr ppResolvedModulePath)
@@ -69,9 +69,14 @@ internal sealed partial class DebuggingLibraryProvider(Action<string>? log) : IC
         }
     }
 
-    private static string? Find(string fileName, string runtimeModule, Func<string, bool> matches)
+    private string? Find(string fileName, string runtimeModule, Func<string, bool> matches)
     {
         string name = Path.GetFileName(fileName);
+        if (directoryOverride != null)
+        {
+            string candidate = Path.Combine(directoryOverride, name);
+            return File.Exists(candidate) && matches(candidate) ? candidate : null;
+        }
         foreach (string directory in CandidateDirectories(runtimeModule))
         {
             string candidate = Path.Combine(directory, name);

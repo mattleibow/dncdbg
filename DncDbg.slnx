@@ -6,6 +6,8 @@
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/DncDbg.DockerTests/DncDbg.DockerTests.csproj" />
+    <Project Path="tests/DncDbg.NativeTests/DncDbg.NativeTests.csproj" />
+    <Project Path="tests/DncDbg.ProtocolTests/DncDbg.ProtocolTests.csproj" />
     <Project Path="tests/DncDbg.SmokeTests/DncDbg.SmokeTests.csproj" />
   </Folder>
 </Solution>

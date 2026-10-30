@@ -12,9 +12,14 @@ public sealed class DapConnection : IDisposable
 {
     private readonly Stream _input;
     private readonly Stream _output;
-    private readonly object _writeLock = new();
+    private readonly SemaphoreSlim _writeLock = new(1, 1);
+    private readonly CancellationTokenSource _writes = new();
     private readonly Dictionary<int, TaskCompletionSource<DapMessage>> _pendingRequests = [];
+    private Exception? _writeFailure;
     private int _seq;
+    private int _disposed;
+
+    public bool WriteFailed => Volatile.Read(ref _writeFailure) != null;
 
     /// <summary>Optional sink that receives every raw message ("-> " sent, "<- " received).</summary>
     public Action<string>? Trace { get; set; }
@@ -124,30 +129,30 @@ public sealed class DapConnection : IDisposable
     }
 
     public int SendRequest(string command, object? arguments = null)
+        => Send(CreateRequest(command, arguments));
+
+    private static DapMessage CreateRequest(string command, object? arguments) => new()
     {
-        var msg = new DapMessage
-        {
-            Type = "request",
-            Command = command,
-            Arguments = arguments == null ? null : JsonSerializer.SerializeToElement(arguments, DapJson.Options),
-        };
-        return Send(msg);
-    }
+        Type = "request",
+        Command = command,
+        Arguments = arguments == null ? null : JsonSerializer.SerializeToElement(arguments, DapJson.Options),
+    };
 
     /// <summary>
     /// Sends a request whose response is delivered through <see cref="CompleteRequest"/> by whoever reads the stream.
     /// </summary>
-    public Task<DapMessage> SendRequestAsync(string command, object? arguments = null)
+    public async Task<DapMessage> SendRequestAsync(string command, object? arguments = null, CancellationToken cancellation = default)
     {
+        cancellation.ThrowIfCancellationRequested();
         var completion = new TaskCompletionSource<DapMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
-        lock (_writeLock)
+        int seq = await SendAsync(CreateRequest(command, arguments), cancellation, completion).ConfigureAwait(false);
+        using CancellationTokenRegistration registration = cancellation.Register(() =>
         {
-            // registered under the write lock so the response cannot overtake the registration
-            int seq = SendRequest(command, arguments);
             lock (_pendingRequests)
-                _pendingRequests[seq] = completion;
-        }
-        return completion.Task;
+                if (_pendingRequests.Remove(seq))
+                    completion.TrySetCanceled(cancellation);
+        });
+        return await completion.Task.ConfigureAwait(false);
     }
 
     /// <returns>false if the response does not belong to a request sent with <see cref="SendRequestAsync"/>.</returns>
@@ -180,26 +185,72 @@ public sealed class DapConnection : IDisposable
     public void SendEvent(string name, object? body = null) =>
         Send(new DapMessage { Type = "event", Event = name, Body = body });
 
-    private int Send(DapMessage msg)
+    public int SendMessage(DapMessage message) => Send(message);
+
+    public Task<int> SendMessageAsync(DapMessage message, CancellationToken cancellation = default) =>
+        SendAsync(message, cancellation);
+
+    private int Send(DapMessage message) => SendAsync(message, CancellationToken.None).GetAwaiter().GetResult();
+
+    private async Task<int> SendAsync(DapMessage msg, CancellationToken cancellation,
+        TaskCompletionSource<DapMessage>? completion = null)
     {
-        lock (_writeLock)
+        if (WriteFailed)
+            throw new IOException("The DAP output transport failed during a previous write.", _writeFailure);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellation, _writes.Token);
+        try { await _writeLock.WaitAsync(linked.Token).ConfigureAwait(false); }
+        catch (OperationCanceledException) when (WriteFailed)
+        { throw new IOException("The DAP output transport failed while waiting to write.", _writeFailure); }
+        bool exposed = false;
+        try
         {
-            msg.Seq = ++_seq;
-            byte[] payload = JsonSerializer.SerializeToUtf8Bytes(msg, OutgoingJsonOptions);
-            byte[] header = Encoding.ASCII.GetBytes($"Content-Length: {payload.Length}\r\n\r\n");
-            Trace?.Invoke("-> " + Encoding.UTF8.GetString(payload));
-            _output.Write(header);
-            _output.Write(payload);
-            _output.Flush();
+            if (WriteFailed)
+                throw new IOException("The DAP output transport failed during a previous write.", _writeFailure);
+            linked.Token.ThrowIfCancellationRequested();
+            msg.Seq = checked(++_seq);
+            // Register before writing: an in-process peer or fast pipe response can arrive during Flush.
+            if (completion != null)
+                lock (_pendingRequests)
+                    _pendingRequests.Add(msg.Seq, completion);
+            try
+            {
+                byte[] payload = JsonSerializer.SerializeToUtf8Bytes(msg, OutgoingJsonOptions);
+                byte[] header = Encoding.ASCII.GetBytes($"Content-Length: {payload.Length}\r\n\r\n");
+                Trace?.Invoke("-> " + Encoding.UTF8.GetString(payload));
+                linked.Token.ThrowIfCancellationRequested();
+                exposed = true;
+                // Some streams cannot cancel an already-started OS write. Bound the await
+                // too; the transport owner must abort the peer before disposing such a stream.
+                await _output.WriteAsync(header, linked.Token).AsTask().WaitAsync(linked.Token).ConfigureAwait(false);
+                await _output.WriteAsync(payload, linked.Token).AsTask().WaitAsync(linked.Token).ConfigureAwait(false);
+                await _output.FlushAsync(linked.Token).WaitAsync(linked.Token).ConfigureAwait(false);
+            }
+            catch (Exception error)
+            {
+                if (completion != null)
+                    lock (_pendingRequests)
+                        _pendingRequests.Remove(msg.Seq);
+                if (exposed)
+                {
+                    Interlocked.CompareExchange(ref _writeFailure, error, null);
+                    _writes.Cancel();
+                    CancelPendingRequests();
+                }
+                throw;
+            }
             return msg.Seq;
         }
+        finally { _writeLock.Release(); }
     }
 
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            return;
+        _writes.Cancel();
         CancelPendingRequests();
-        _input.Dispose();
-        _output.Dispose();
+        try { _output.Dispose(); }
+        finally { _input.Dispose(); }
     }
 
     public void CancelPendingRequests()

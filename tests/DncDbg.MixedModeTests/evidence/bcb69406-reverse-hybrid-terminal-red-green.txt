@@ -1,0 +1,101 @@
+Production baseline: bcb694060eddc7290dc1d0075f0f9b3184900e85.
+Each defect was reproduced before its corresponding production fix. Raw logs
+are retained under ignored build/validation/mixed-mode/ with the names below.
+All excerpts below are verbatim, not inferred failures.
+
+=== review-bcb69406-reverse-poison-red.log ===
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "tests/DncDbg.MixedModeTests/proxy_contracts.py", line 1006, in client_backpressure_contract
+    raise AssertionError("Client backpressure held state/teardown during " + command + "/" + finish) from None
+AssertionError: Client backpressure held state/teardown during reverse/deadline
+
+The peer sends an 8MiB runInTerminal request. The client reads its header and one
+payload byte, then leaves stdin open without draining stdout. The pre-fix proxy
+remained alive beyond 36 seconds; the post-fix test also requires native adapter
+and real owned child termination. Cancellation before any request bytes are
+exposed has a separate nonfatal test.
+
+=== review-bcb69406-hybrid-enumeration-red.log ===
+Debugging library libmscordbi.dylib (Runtime, build id 285783B2F81A3F33A654D148300365D5) for : /usr/local/share/dotnet/shared/Microsoft.NETCore.App/10.0.12/libmscordbi.dylib
+Debugging library libmscordaccore.dylib (Runtime, build id 285783B2F81A3F33A654D148300365D5) for : /usr/local/share/dotnet/shared/Microsoft.NETCore.App/10.0.12/libmscordaccore.dylib
+Unhandled exception. System.InvalidOperationException: Hybrid stack published managed frame IDs after module invalidation during cached CLR enumeration at epoch 403.
+   at ManagedPublicationProof.Run(String command, Boolean module) in /Users/matthew/.copilot/repos/copilot-worktrees/dncdbg/mattleibow-fantastic-guide/tests/DncDbg.NativeTests/ManagedPublicationProof.cs:line 61
+   at Program.<Main>$(String[] args)
+   at Program.<Main>(String[] args)
+
+The test opens the real CLR view over LLDB, then wraps only the cached
+IReadOnlyList<ManagedInspectionFrame> in the test harness so that enumeration
+delivers one module event. The actual managed frames, IPs and CLR view are
+unchanged; no fake inspection data or production injection hook is used.
+
+=== review-bcb69406-long-terminals-red.log ===
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "tests/DncDbg.MixedModeTests/proxy_contracts.py", line 1142, in disconnect_terminal_drain_contract
+    check(terminals == ["exited", "terminated"], "Successful disconnect lost or duplicated terminal events: " + str(terminals))
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "tests/DncDbg.MixedModeTests/run.py", line 23, in check
+    raise AssertionError(message)
+AssertionError: Successful disconnect lost or duplicated terminal events: []
+
+=== review-bcb69406-long-staggered-red.log ===
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "tests/DncDbg.MixedModeTests/proxy_contracts.py", line 1142, in disconnect_terminal_drain_contract
+    check(terminals == ["exited", "terminated"], "Successful disconnect lost or duplicated terminal events: " + str(terminals))
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "tests/DncDbg.MixedModeTests/run.py", line 23, in check
+    raise AssertionError(message)
+AssertionError: Successful disconnect lost or duplicated terminal events: ['exited']
+
+Both tests delay terminal delivery by three seconds, beyond the old two-second
+reader wait. The staggered test releases terminated three seconds after the
+frontend receives exited. Both require successful response first, then exactly
+one exited and terminated in order, with process shutdown under twelve seconds.
+
+=== Additional A: review-bcb69406-refused-reverse-red.log ===
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "tests/DncDbg.MixedModeTests/proxy_contracts.py", line 1169, in refused_reverse_contract
+    check(time.monotonic() < deadline, "Refused detach orphaned the originating runInTerminal request")
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "tests/DncDbg.MixedModeTests/run.py", line 23, in check
+    raise AssertionError(message)
+AssertionError: Refused detach orphaned the originating runInTerminal request
+
+=== Additional B: review-bcb69406-attached-ownership-red.log (terminal excerpt) ===
+AssertionError: Refused terminating disconnect escalated ownership of an attached target
+
+=== Additional C: original baseline active-inspection EOF matrix ===
+The stackTrace failure was initially reproduced before the production fix.
+For exact coverage of every command, the same original git source was also
+archived into a named ignored validation directory, published, and tested
+against the new peer. That temporary checkout was removed after preserving
+review-bcb69406-eof-baseline-build.log and
+review-bcb69406-inspection-eof-all-red.log.
+
+AssertionError: Inspection backend EOF was misreported as stop/session cancellation: {'seq': 8, 'type': 'response', 'command': 'stackTrace', 'request_seq': 4, 'success': False, 'message': 'cancelled: native stop or session changed', 'body': {'error': {'id': 1, 'format': 'cancelled: native stop or session changed'}}}
+AssertionError: Inspection backend EOF was misreported as stop/session cancellation: {'seq': 9, 'type': 'response', 'command': 'scopes', 'request_seq': 5, 'success': False, 'message': 'cancelled: native stop or session changed', 'body': {'error': {'id': 1, 'format': 'cancelled: native stop or session changed'}}}
+AssertionError: Inspection backend EOF was misreported as stop/session cancellation: {'seq': 10, 'type': 'response', 'command': 'variables', 'request_seq': 6, 'success': False, 'message': 'cancelled: native stop or session changed', 'body': {'error': {'id': 1, 'format': 'cancelled: native stop or session changed'}}}
+AssertionError: Inspection backend EOF was misreported as stop/session cancellation: {'seq': 8, 'type': 'response', 'command': 'readMemory', 'request_seq': 4, 'success': False, 'message': 'cancelled: native stop or session changed', 'body': {'error': {'id': 1, 'format': 'cancelled: native stop or session changed'}}}
+
+=== Post-fix same-case greens ===
+PASS full client pipe permits bounded reverse/deadline shutdown
+PASS hybrid stack retains originating inspection epoch across cached CLR enumeration
+PASS successful disconnect drains exited/terminated exactly once after reverse wait: long-terminals
+PASS successful disconnect drains exited/terminated exactly once after reverse wait: long-staggered-terminals
+PASS refused detach fails interrupted reverse to origin and permits the next reverse request
+PASS refused terminating detach preserves non-owned attached target through EOF cleanup
+PASS active stackTrace backend EOF reports transport loss rather than stop/session cancellation
+PASS active scopes backend EOF reports transport loss rather than stop/session cancellation
+PASS active variables backend EOF reports transport loss rather than stop/session cancellation
+PASS active readMemory backend EOF reports transport loss rather than stop/session cancellation
+PASS partial client reverse-write timeout aborts the poisoned client transport
+PASS reverse cancellation before frame exposure remains nonfatal
+
+The existing reverse-client-timeout unit now distinguishes a failed partial
+frame from a response wait timeout after successful publication: partial writes
+must abort the poisoned client, not try to keep it alive by replying only to
+the backend. The separate unanswered reverse-response and explicit client
+failure contracts still require failed replies to the captured backend.

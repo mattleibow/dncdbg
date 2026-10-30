@@ -1,0 +1,275 @@
+name: Native DAP backend integration
+
+on:
+  push:
+    branches: [main, mattleibow-mixed-mode-debugging]
+    paths:
+      - src/**
+      - tests/DncDbg.MixedModeTests/**
+      - tests/DncDbg.SmokeTests/**
+      - tests/DncDbg.ProtocolTests/**
+      - tests/DncDbg.NativeTests/**
+      - test-suite/**
+      - .github/workflows/mixed-mode-proof.yml
+      - global.json
+      - DncDbg.slnx
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-dap-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  maui-sample:
+    name: MAUI Catalyst and AppKit sample
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - name: Select Xcode 26.3
+        run: sudo xcode-select --switch /Applications/Xcode_26.3.app
+      - name: Install public MAUI workloads
+        run: dotnet workload install maui macos --skip-manifest-update
+      - name: Build the single-project MAUI callback sample
+        run: python3 tests/DncDbg.MixedModeTests/maui_sample.py
+      - name: Preserve MAUI build outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mixed-mode-maui-sample
+          path: |
+            build/validation/mixed-mode/maui-native/
+            tests/DncDbg.MixedModeTests/MauiSample/bin/
+
+  native-backend:
+    name: Native backend (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2025]
+    steps:
+      - name: Preserve source bytes
+        shell: pwsh
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - name: Supply public CPython ABI required by the runner LLVM
+        if: runner.os == 'Windows'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Find public native DAP toolchain
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force build/validation/mixed-mode | Out-Null
+          dotnet --info | Tee-Object build/validation/mixed-mode/dotnet-info.txt
+          $lldb = $null
+          if ($IsMacOS) {
+            $lldb = & xcrun --find lldb-dap
+            if ($LASTEXITCODE) { throw "The selected public Xcode toolchain has no lldb-dap." }
+          } elseif ($IsWindows) {
+            $candidate = Join-Path $env:ProgramFiles "LLVM/bin/lldb-dap.exe"
+            if (Test-Path $candidate) { $lldb = $candidate }
+            if (-not $lldb) {
+              $tool = Get-Command lldb-dap -ErrorAction SilentlyContinue
+              if ($tool) { $lldb = $tool.Source }
+            }
+            if (-not $lldb) {
+              choco install llvm --yes --no-progress
+              if ($LASTEXITCODE) { exit $LASTEXITCODE }
+              $lldb = $candidate
+            }
+            $llvmDir = Split-Path $lldb
+            $readobj = Join-Path $llvmDir "llvm-readobj.exe"
+            $library = Join-Path $llvmDir "liblldb.dll"
+            if ((Test-Path $readobj) -and (Test-Path $library)) {
+              $imports = (& $readobj --coff-imports $library) -join "`n"
+              $imports | Out-File build/validation/mixed-mode/lldb-imports.txt
+              $pythonDll = [regex]::Match($imports, 'Name:\s+(python\d+\.dll)', 'IgnoreCase').Groups[1].Value
+              if ($pythonDll) {
+                $pythonRoot = Join-Path $env:AGENT_TOOLSDIRECTORY "Python"
+                $dependency = Get-ChildItem $pythonRoot -Filter $pythonDll -Recurse -Depth 3 |
+                  Select-Object -First 1
+                if (-not $dependency) { throw "Public LLVM requires missing host dependency $pythonDll" }
+                $env:PATH = "$($dependency.DirectoryName);$env:PATH"
+                $dependency.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+              }
+            }
+          } else {
+            foreach ($name in @("lldb-dap", "lldb-dap-21", "lldb-dap-20", "lldb-dap-19", "lldb-dap-18")) {
+              $tool = Get-Command $name -ErrorAction SilentlyContinue
+              if ($tool) { $lldb = $tool.Source; break }
+            }
+            if (-not $lldb) {
+              sudo apt-get update -qq
+              if ($LASTEXITCODE) { exit $LASTEXITCODE }
+              sudo apt-get install --yes lldb-18
+              if ($LASTEXITCODE) { exit $LASTEXITCODE }
+              $lldb = (Get-Command lldb-dap-18).Source
+            }
+          }
+          if (-not (Test-Path $lldb)) { throw "Native DAP adapter not found: $lldb" }
+          & $lldb --version | Tee-Object build/validation/mixed-mode/lldb-version.txt
+          if ($LASTEXITCODE) {
+            Write-Warning "This adapter has no CLI --version; DNCDbg will require the public DAP initialization/version probe."
+            $global:LASTEXITCODE = 0
+          }
+          "LLDB_DAP=$lldb" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Publish and validate swappable DAP contracts
+        shell: pwsh
+        run: |
+          dotnet publish src/DncDbg.Dap -c Release -o bin --nologo
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          dotnet run --project tests/DncDbg.ProtocolTests -c Release
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $python = (Get-Command python).Source
+          if ($IsLinux) {
+            dotnet build tests/DncDbg.NativeTests -c Release --nologo
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+            dotnet tests/DncDbg.NativeTests/bin/Release/net10.0/DncDbg.NativeTests.dll `
+              $python (Join-Path $PWD "tests/DncDbg.MixedModeTests/fake_native_adapter.py") linux-ancestry-generations
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+            python tests/DncDbg.MixedModeTests/pid_reuse.py --dotnet (Get-Command dotnet).Source `
+              --tests (Join-Path $PWD "tests/DncDbg.NativeTests/bin/Release/net10.0/DncDbg.NativeTests.dll") `
+              --python $python --peer (Join-Path $PWD "tests/DncDbg.MixedModeTests/fake_native_adapter.py") 2>&1 |
+              Tee-Object build/validation/mixed-mode/forced-pid-reuse.log
+            if ($LASTEXITCODE -eq 77) { Write-Output "::notice title=Forced PID reuse SKIP::Private PID namespace proof unavailable."; $global:LASTEXITCODE = 0 }
+            elseif ($LASTEXITCODE) { exit $LASTEXITCODE }
+            python tests/DncDbg.MixedModeTests/parent_reuse.py --dotnet (Get-Command dotnet).Source `
+              --tests (Join-Path $PWD "tests/DncDbg.NativeTests/bin/Release/net10.0/DncDbg.NativeTests.dll") `
+              --python $python --peer (Join-Path $PWD "tests/DncDbg.MixedModeTests/fake_native_adapter.py") 2>&1 |
+              Tee-Object build/validation/mixed-mode/forced-parent-reuse.log
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          }
+          dotnet run --project tests/DncDbg.NativeTests -c Release -- $python (Join-Path $PWD "tests/DncDbg.MixedModeTests/fake_native_adapter.py")
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $adapter = if ($IsWindows) { "bin/dncdbg-dap.exe" } else { "bin/dncdbg-dap" }
+          python tests/DncDbg.MixedModeTests/proxy_contracts.py --adapter $adapter 2>&1 |
+            Tee-Object build/validation/mixed-mode/backend-contracts.log
+          exit $LASTEXITCODE
+      - name: Validate native-only LLDB relay and lifecycle
+        id: nativeproof
+        shell: pwsh
+        run: |
+          $adapter = if ($IsWindows) { "bin/dncdbg-dap.exe" } else { "bin/dncdbg-dap" }
+          python tests/DncDbg.MixedModeTests/native_proxy.py --native-only --adapter $adapter --lldb-dap $env:LLDB_DAP 2>&1 |
+            Tee-Object build/validation/mixed-mode/native-only-proxy.log
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python tests/DncDbg.MixedModeTests/run.py --reject-native --adapter $adapter 2>&1 |
+            Tee-Object build/validation/mixed-mode/retired-controller-rejection.log
+          exit $LASTEXITCODE
+      - name: Identify explicitly proven managed-overlay configuration
+        id: overlay
+        shell: pwsh
+        run: |
+          $adapter = if ($IsWindows) { "bin/dncdbg-dap.exe" } else { "bin/dncdbg-dap" }
+          $json = & $adapter --native-debugger=lldb "--native-debugger-path=$env:LLDB_DAP" --native-debugger-info
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $json | Out-File build/validation/mixed-mode/native-adapter-info.json
+          $native = $json | ConvertFrom-Json
+          $runtimes = @(dotnet --list-runtimes | ForEach-Object {
+            if ($_ -match '^Microsoft.NETCore.App (10\.0\.\d+) ') { [version]$Matches[1] }
+          } | Sort-Object)
+          $macVersion = if ($IsMacOS) { [version](& sw_vers -productVersion) } else { [version]'0.0' }
+          $supported = $IsMacOS -and
+            [System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture -eq 'Arm64' -and
+            $macVersion -eq [version]'27.0.1' -and
+            $native.version -eq '2103.0.34.103' -and $runtimes.Count -gt 0 -and
+            $runtimes[-1] -eq [version]'10.0.12'
+          "supported=$($supported.ToString().ToLowerInvariant())" | Out-File $env:GITHUB_OUTPUT -Append
+          if (-not $supported) {
+            Write-Output 'Managed overlay unavailable on this unproven CI configuration; native-only results are separate.'
+          }
+      - name: Validate unchanged strict overlay assertions on proven configuration
+        id: overlayproof
+        if: steps.overlay.outputs.supported == 'true'
+        shell: pwsh
+        run: |
+          $adapter = "bin/dncdbg-dap"
+          python tests/DncDbg.MixedModeTests/native_proxy.py --adapter $adapter --lldb-dap $env:LLDB_DAP 2>&1 |
+            Tee-Object build/validation/mixed-mode/managed-overlay-proxy.log
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python tests/DncDbg.MixedModeTests/proxy_contracts.py --adapter $adapter --lldb-dap $env:LLDB_DAP 2>&1 |
+            Tee-Object build/validation/mixed-mode/managed-overlay-failures.log
+          exit $LASTEXITCODE
+      - name: Record separate native and managed-overlay proof disposition
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force build/validation/mixed-mode | Out-Null
+          $eligible = '${{ steps.overlay.outputs.supported }}' -eq 'true'
+          $native = '${{ steps.nativeproof.outcome }}'
+          $overlay = '${{ steps.overlayproof.outcome }}'
+          $message = if (-not $eligible) {
+            'SKIP: hosted managed overlay is unproven on this configuration; not a managed-inspection pass.'
+          } else { "Strict managed overlay: $overlay" }
+          if (-not $eligible) { Write-Output "::notice title=Managed overlay proof SKIP::$message" }
+          @("## Experimental native proxy proof", "", "Native-only LLDB relay/lifecycle: $native", "", $message,
+            "", 'No managed source breakpoints, stepping, exception control, func-eval or device parity claimed.') |
+            Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          @{ nativeOnly = $native; managedOverlayEligible = $eligible; managedOverlay = $overlay; note = $message } |
+            ConvertTo-Json | Out-File build/validation/mixed-mode/proof-disposition.json -Encoding utf8
+      - name: Verify unchanged managed debugger regressions
+        shell: pwsh
+        run: |
+          $adapter = if ($IsWindows) { "bin/dncdbg-dap.exe" } else { "bin/dncdbg-dap" }
+          dotnet run --project tests/DncDbg.SmokeTests -c Release -- $adapter 2>&1 |
+            Tee-Object build/validation/mixed-mode/managed-smoke.log
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $regressionLog = Join-Path $PWD "build/validation/mixed-mode/managed-regressions.log"
+          & ./test-suite/run_tests.ps1 TestBreakpoint TestStackTrace TestThreads TestStepping TestAttach TestDisconnect 2>&1 |
+            Tee-Object $regressionLog
+          exit $LASTEXITCODE
+      - name: Preserve logs and fixture artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-dap-${{ matrix.os }}
+          path: build/validation/mixed-mode/
+          retention-days: 14
+
+  retired-windows-research:
+    name: Retired raw Windows API research (not production)
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - name: Run preserved public raw Windows evidence
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force build/validation/mixed-mode | Out-Null
+          dotnet build tests/DncDbg.MixedModeTests/fixture/Fixture.csproj -o build/validation/mixed-mode/fixture --nologo
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cmake -S tests/DncDbg.MixedModeTests/fixture -B build/validation/mixed-mode/native -A x64
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cmake --build build/validation/mixed-mode/native --config Debug
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Copy-Item build/validation/mixed-mode/native/Debug/mixedfixture.* build/validation/mixed-mode/fixture/
+          foreach ($mode in @("", "--attach", "--terminate-native")) {
+            $arguments = @("run", "--project", "tests/DncDbg.MixedModeTests/WindowsProof", "--",
+              "build/validation/mixed-mode/fixture/Fixture.dll", "tests/DncDbg.MixedModeTests/fixture")
+            if ($mode) { $arguments += $mode }
+            dotnet @arguments 2>&1 | Tee-Object -Append build/validation/mixed-mode/retired-windows-research.log
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: retired-windows-research
+          path: build/validation/mixed-mode/
+          retention-days: 14

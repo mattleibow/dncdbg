@@ -45,18 +45,27 @@ The suite launches `dncdbg-dap` with `remote`, not `program`/the desktop engine:
 ```json
 {
   "remote": {
-    "hostPath": "/built/test/native-host",
-    "agentPath": "/built/test/libdncdbg_target.so",
-    "assemblyPath": "/built/test/Payload.dll",
-    "runtimeDirectory": "/exact/runtime/shared/Microsoft.NETCore.App/11.0.0-rc.1.26425.128",
     "assetsPath": "/built/test",
     "outputPath": "/this/checkout/build/remote-run",
-    "tunnel": { "provider": "localTcpProxy" }
+    "target": {
+      "provider": "nativeHost",
+      "nativeHost": {
+        "hostPath": "/built/test/native-host",
+        "agentPath": "/built/test/libdncdbg_target.so",
+        "assemblyPath": "/built/test/Payload.dll",
+        "runtimeConfigPath": "/built/test/Payload.runtimeconfig.json",
+        "runtimeDirectory": "/exact/runtime/shared/Microsoft.NETCore.App/11.0.0-rc.1.26425.128",
+        "mode": "component",
+        "entryPointType": "NativeHostPayload.Entry, Payload",
+        "entryPointMethod": "Run"
+      }
+    },
+    "tunnel": { "provider": "proxy" }
   }
 }
 ```
 
-Use `.dylib` on macOS, or `directLoopback` for a direct route. Unsupported
+Use `.dylib` on macOS, or `loopback` for a direct route. Unsupported
 providers/options fail closed. There is no physical Apple USB provider yet.
 `dotnet/info.remote` reports generic capabilities, the non-secret session
 generation and route ports; credentials are never DAP output.

@@ -79,7 +79,9 @@ internal static class RemoteProviderFactory
                 before = async (port, token) =>
                 {
                     Directory.CreateDirectory(path);
-                    await File.WriteAllTextAsync(Path.Combine(path, "allocated.json"), JsonSerializer.Serialize(new { port }), token);
+                    string staging = Path.Combine(path, "allocated.staging");
+                    await File.WriteAllTextAsync(staging, JsonSerializer.Serialize(new { port }), token);
+                    File.Move(staging, Path.Combine(path, "allocated.json"));
                     while (!File.Exists(Path.Combine(path, "release"))) await Task.Delay(10, token);
                 };
             }

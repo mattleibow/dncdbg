@@ -88,6 +88,7 @@ jobs:
         with:
           name: dncdbg-target-${{ matrix.rid }}
           path: build/target-package-${{ matrix.rid }}/
+          include-hidden-files: true
           retention-days: 7
           if-no-files-found: error
       - name: Upload bounded native-host architecture evidence

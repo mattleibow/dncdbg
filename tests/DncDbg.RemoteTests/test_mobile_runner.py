@@ -56,6 +56,12 @@ class MobileRunnerTests(unittest.TestCase):
         self.assertIn("source-head.txt", workflow)
         self.assertIn("windows-detach-${{ github.event.pull_request.head.sha || github.sha }}", workflow)
 
+    def test_target_artifact_upload_preserves_hidden_inventory_entries(self):
+        workflow = (ROOT / ".github/workflows/remote.yml").read_text()
+        upload = workflow.split("name: Upload explicit target deployment package", 1)[1].split("\n      - ", 1)[0]
+        self.assertIn("include-hidden-files: true", upload,
+                      "Runtime .version and hidden payload files must survive upload with their integrity inventory.")
+
     def test_mobile_restore_is_scoped_to_the_selected_platform(self):
         self.suite.state |= {"uiPort": 9223, "name": "ownedrun"}
         with patch.object(self.suite, "json", side_effect=RuntimeError("evaluation only")) as evaluate:

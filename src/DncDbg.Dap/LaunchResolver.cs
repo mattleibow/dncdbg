@@ -45,8 +45,7 @@ internal static class LaunchResolver
         var environment = new Dictionary<string, string?>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
         if (profile != null)
         {
-            // Project-based launching is a managed extension; ordinary native-compatible profiles ignore applicationUrl.
-            if (projectFile != null && !string.IsNullOrEmpty(profile.ApplicationUrl))
+            if (!string.IsNullOrEmpty(profile.ApplicationUrl))
                 environment["ASPNETCORE_URLS"] = profile.ApplicationUrl;
             foreach (var (name, value) in profile.EnvironmentVariables)
                 environment[name] = value;

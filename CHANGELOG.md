@@ -2,6 +2,7 @@
 Upcoming changes compared to the previous version.
 
 #### DAP
+- Apply nonempty `applicationUrl` from launch-settings profiles as target `ASPNETCORE_URLS` for ordinary program launches as well as managed project launches. Request `env` and profile `environmentVariables` take precedence, including explicitly empty values; no browser is opened.
 - Matched upstream `launchSettings.json` profile selection, explicit null/empty disabling, settings-relative paths, request precedence, diagnostics and saved/updated restart behavior. Profile environment affects the target only. Existing managed project/build/ReadyToRun extensions remain available.
 - Accept string or string-array launch `args`; use the shared native-compatible splitter and let an empty parsed request list fall back to profile arguments, including whitespace-only strings.
 - Renamed the console-relay setting to `DNCDBG_REMOTECONSOLE_PORT`, with default 22534 and range 1-65535. Invalid values log and fall back to the default; the former spelling is no longer interpreted. Apply launch/restart overrides before opening the relay and allow retry after a bind failure.
@@ -18,6 +19,7 @@ Upcoming changes compared to the previous version.
 - Added `supportsReadMemoryRequest` and `supportsWriteMemoryRequest` support in Capabilities.
 
 #### Added
+- Add the exact upstream `TestLaunchSettings` fixture and profile files; retain the previous broader matrix as `TestLaunchSettingsPrecedence`, with native-proven URL type, precedence and empty-value checks.
 - Mirrored upstream hit-count restart coverage and request-linked documentation; retained prior strict parser and lifecycle tests.
 - Added upstream `TestBreakpointHitCondition` and native-proven strict hit-condition parsing/lifecycle coverage; obsolete evaluated hit-condition expressions are now rejected at request time.
 - Added the upstream `TestExceptionWildcardCondition` project, 50/100 inner-limit assertions, and `WithConditions` test-helper naming. Existing broader parity matrices are retained.

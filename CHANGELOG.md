@@ -2,6 +2,7 @@
 Upcoming changes compared to the previous version.
 
 #### DAP
+- Report invalid supported debugger environment settings to the debug console as newline-terminated `stderr` output events as well as engine logs. Preserve parse/range-specific messages, fallback defaults and successful session configuration.
 - Apply nonempty `applicationUrl` from launch-settings profiles as target `ASPNETCORE_URLS` for ordinary program launches as well as managed project launches. Request `env` and profile `environmentVariables` take precedence, including explicitly empty values; no browser is opened.
 - Matched upstream `launchSettings.json` profile selection, explicit null/empty disabling, settings-relative paths, request precedence, diagnostics and saved/updated restart behavior. Profile environment affects the target only. Existing managed project/build/ReadyToRun extensions remain available.
 - Accept string or string-array launch `args`; use the shared native-compatible splitter and let an empty parsed request list fall back to profile arguments, including whitespace-only strings.

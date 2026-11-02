@@ -27,12 +27,19 @@ public sealed partial class DebugEngine
     {
         if (value == null)
             return defaultValue;
-        if (value.Length > 0 && value.All(static c => c is >= '0' and <= '9') &&
-            uint.TryParse(value, System.Globalization.NumberStyles.None,
-                System.Globalization.CultureInfo.InvariantCulture, out uint number) &&
-            number >= minimum && number <= maximum)
+        string message;
+        if (value.Length == 0 || !value.All(static c => c is >= '0' and <= '9') ||
+            !uint.TryParse(value, System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out uint number))
+            message = $"Failed to parse environment variable {variable} as a number, using the default value.";
+        else if (number > maximum)
+            message = $"Environment variable {variable} exceeds the maximum allowed value, using the default value.";
+        else if (number < minimum)
+            message = $"Environment variable {variable} is below the minimum allowed value, using the default value.";
+        else
             return number;
-        Log?.Invoke($"Invalid {variable} value '{value}'; expected an unsigned decimal number in range {minimum}-{maximum}, using the default value {defaultValue}.");
+        Output?.Invoke("stderr", message + "\n");
+        Log?.Invoke(message);
         return defaultValue;
     }
 

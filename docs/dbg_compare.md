@@ -11,6 +11,8 @@ Current [hit count breakpoints](hit_count_breakpoints.md) are also documented
 separately rather than adding a post-migration feature to this historical table.
 Current [launch settings profiles](launch_settings.md) are likewise documented
 without changing historical measurements or competitor claims.
+Current managed [logpoint tokens](logpoints.md) are documented separately from
+this historical comparison.
 
 <details open>
 <summary><b>Legend</b></summary>

@@ -90,14 +90,23 @@ internal static class SafetyChecks
         {
             DbgShim shim = DebugEngine.LoadDbgShim();
             var exitCodes = new List<int?>();
-            for (int attempt = 0; attempt < 3; attempt++)
+            var outputs = new List<string>();
+            var errors = new List<string>();
+            for (int attempt = 0; attempt < 12; attempt++)
                 foreach (bool noDebug in new[] { true, false })
                 {
-                    LaunchedProcess launched = ProcessLauncher.Launch(shim, "/bin/sh", ["-c", "exit 0"], null, null, noDebug: noDebug);
+                    LaunchedProcess launched = ProcessLauncher.Launch(shim, "/bin/sh",
+                        ["-c", "printf target-stdout; printf target-stderr >&2; exit 0"], null, null, noDebug: noDebug);
                     try
                     {
+                        using var stdout = new StreamReader(launched.StdOut);
+                        using var stderr = new StreamReader(launched.StdErr);
+                        Task<string> output = stdout.ReadToEndAsync();
+                        Task<string> error = stderr.ReadToEndAsync();
                         launched.Resume();
                         exitCodes.Add(await launched.ExitCode!.WaitAsync(TimeSpan.FromSeconds(5)));
+                        outputs.Add(await output.WaitAsync(TimeSpan.FromSeconds(5)));
+                        errors.Add(await error.WaitAsync(TimeSpan.FromSeconds(5)));
                     }
                     finally
                     {
@@ -106,7 +115,9 @@ internal static class SafetyChecks
                         launched.StdErr.Dispose();
                     }
                 }
-            Check(exitCodes.All(code => code == 0), "managed and native Unix launcher children retain one reaping owner");
+            Check(exitCodes.All(code => code == 0) && outputs.All(text => text == "target-stdout") &&
+                errors.All(text => text == "target-stderr"),
+                "managed and native Unix helpers retain one reaping owner and exact target-only stdout/stderr");
         }
 
         var gate = new object();

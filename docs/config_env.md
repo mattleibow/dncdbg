@@ -19,7 +19,9 @@ Set the port in the debugger process environment or override it in the launch
 configuration's `env`. Restart applies its saved or updated launch environment
 before opening the relay. A session without an override uses the debugger
 process value, not the preceding session's override. Invalid values, including
-zero, overflow, whitespace, signs and trailing characters, log an error and use
+zero, overflow, whitespace, signs and trailing characters, report an error to
+the DAP debug console (`output` event, `stderr` category, one terminating
+newline) and the engine log, then use
 22534 rather than failing configuration parsing. An occupied port still fails
 the launch; a subsequent request can retry after that port becomes available.
 The former `DNCDBG_REMOTECONSOLEPORT` spelling is no longer interpreted.
@@ -40,8 +42,15 @@ The limit counts inner exceptions, not the outer node. The final included node
 is fully populated; no empty placeholder is appended at the cutoff. Parsing
 matches the native complete unsigned-decimal behavior: only ASCII digits are
 accepted. Empty values, whitespace, signs, trailing characters and overflow
-fall back to 32 with an engine-log diagnostic. In particular, `2suffix` and
+fall back to 32 with a newline-terminated `stderr` output event and the same
+engine-log diagnostic. In particular, `2suffix` and
 `2 ` now use 32 rather than the former numeric-prefix value of 2.
+
+Parse errors and values below/above the supported range have distinct
+diagnostics. Rejected values do not fail launch/attach configuration; valid
+values do not emit these errors. The diagnostics identify the variable without
+echoing its supplied value. Profile-only environment entries remain target
+configuration and do not produce debugger-setting diagnostics.
 
 Target environment variables supplied in a DAP launch configuration's `env`
 are forwarded to the target process. Console-relay settings are additionally

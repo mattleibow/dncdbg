@@ -65,7 +65,8 @@ survival beyond disposal timeouts, and pause during function evaluation followed
 by a heartbeat after exactly one continue. On Unix they also alternate real
 managed/noDebug and native launcher helpers to ensure a single reaping owner:
 `System.Diagnostics.Process` reaps its children, while native-created helpers
-use native waiting. They also arm static-initializer and
+use native waiting. Twelve alternating pairs also require exact target stdout
+and stderr, without parent-shell watchdog termination notifications. They also arm static-initializer and
 user breakpoints, detach, verify internal breakpoint cleanup, dispose the
 debugger, and let the detached target complete its watched initializer.
 Run these safety checks alone with:
@@ -110,6 +111,7 @@ These tests preserve observable native behavior, not assumptions about DAP synta
 
 | Test | Exact contract |
 | --- | --- |
+| `TestEnvironmentDiagnostics` | Twenty launch/attach/restart sessions require thirteen exact parse/min/max fallback messages in DAP `output` events with category `stderr` and exactly one terminating newline. Valid settings and recovered restart configurations emit none; every target still exits successfully. Existing inner-limit and remote-console matrices independently retain exact fallback behavior. Attach diagnostics emitted before entry are included without dropping earlier events. |
 | `TestLaunchSettings` | Byte-identical upstream fixture/profile files check three real debugging sessions: explicit settings file with request arguments, default profile from request `cwd`, and a named profile whose `ASPNETCORE_URLS` environment entry overrides `applicationUrl`. Preserve every entry/source breakpoint, exact local/environment/argument value, out-of-range argument error and actual exit assertion. |
 | `TestLaunchSettingsPrecedence` | Preserve the prior 43-case native profile matrix for ordered/default/named selection, explicit null/empty disable, request precedence, relative paths, string/array/empty/whitespace args, target-only profile environment, malformed/missing/unsuitable default fallback, exact type/selection errors and bare versus updated restart. File mutation must not affect a bare ordinary program restart. Ten additional URL cases prove exact string fallback, null/empty/non-string ignoring, request and profile environment precedence (including empty values), and non-string environment entries not suppressing the URL fallback. The splitter's escaped-quote/empty/unmatched-quote/ASCII-whitespace cases remain independently native-proven. |
 | `TestCrossThreadEvaluation` | Forty complete variables responses across two stops must preserve the unchanged `TestStruct5` values (`111`, `<error>`, `"text_333"`, `<error>`, `555.5`), types and ordering, with a successful explicit getter after every response. A synchronized worker dependency halfway through the first stop proves timeout recovery releases suspended peers, reports the failed getter, and leaves the same evaluation thread usable for later getters and repeated variables requests. No sleeps, retries or changed deadlines are used. |

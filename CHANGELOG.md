@@ -2,6 +2,7 @@
 Upcoming changes compared to the previous version.
 
 #### DAP
+- Report invalid supported debugger environment settings to the debug console as newline-terminated `stderr` output events as well as engine logs. Preserve parse/range-specific messages, fallback defaults and successful session configuration.
 - Apply nonempty `applicationUrl` from launch-settings profiles as target `ASPNETCORE_URLS` for ordinary program launches as well as managed project launches. Request `env` and profile `environmentVariables` take precedence, including explicitly empty values; no browser is opened.
 - Matched upstream `launchSettings.json` profile selection, explicit null/empty disabling, settings-relative paths, request precedence, diagnostics and saved/updated restart behavior. Profile environment affects the target only. Existing managed project/build/ReadyToRun extensions remain available.
 - Accept string or string-array launch `args`; use the shared native-compatible splitter and let an empty parsed request list fall back to profile arguments, including whitespace-only strings.
@@ -42,6 +43,7 @@ Upcoming changes compared to the previous version.
 - Added an `E_POINTER` check to `QueryInterface()` and reused `Threads::GetId()` in `LogMessage()` instead of a direct `ICorDebugThread::GetID()` call.
 
 #### Fixed
+- Reap the completed Unix launch helper's watchdog without forwarding the parent shell's intentional termination notification as target stderr. Actual target stderr, exit status, detach ownership and managed/native helper reaping remain intact.
 - Fixed Unix noDebug helper reaping: retain the `Process.Start` child until `Process.WaitForExit` completes rather than racing the runtime with raw `waitpid`, which can fail fast with `ECHILD` when managed and native helpers are interleaved.
 - Fixed startup failure on systems with no locales generated at all (e.g. a minimal Ubuntu chroot): fall back to the "C.UTF-8" or "C" locale when the environment locale is unavailable instead of exiting.
 - Fixed incorrect uppercase conversion of non-ASCII input when the environment locale is not UTF-8 capable (e.g. a Docker container with `LANG` unset): verify the applied locale and fall back to the "C.UTF-8" or "C" locale otherwise.

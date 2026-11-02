@@ -28,6 +28,10 @@
             // Apply the launchSettings.json profile (see docs/launch_settings.md):
             // "launchSettingsFilePath": "${workspaceFolder}/Properties/launchSettings.json",
             // "launchSettingsProfile": "http",
+            // Reserved upstream example; launchBrowser is ignored by dncdbg-dap:
+            // "launchBrowser": {
+            //     "enabled": true
+            // },
             "console": "internalConsole",
             "stopAtEntry": false,
             "justMyCode" : true,

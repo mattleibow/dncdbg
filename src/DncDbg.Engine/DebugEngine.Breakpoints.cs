@@ -1,4 +1,5 @@
 using ClrDebug;
+using System.Runtime.InteropServices;
 using DncDbg.Engine.Symbols;
 using DncDbg.Engine.Values;
 
@@ -394,7 +395,8 @@ public sealed partial class DebugEngine
                 var stopping = new List<UserBreakpoint>();
                 foreach (UserBreakpoint bp in matches)
                 {
-                    var evaluator = new Evaluator(this, TopFrame(threadId), allowCalls: true);
+                    FrameRef frame = TopFrame(threadId);
+                    var evaluator = new Evaluator(this, frame, allowCalls: true);
                     if (bp.Condition != null)
                     {
                         try
@@ -420,7 +422,8 @@ public sealed partial class DebugEngine
 
                     if (bp.LogMessage != null)
                     {
-                        string message = FormatLogMessage(bp.LogMessage, evaluator);
+                        string message = FormatLogMessage(bp.LogMessage, evaluator,
+                            logpointTokens: bp.Path == null || !bp.LogMessage.Contains('$') ? null : CreateLogpointTokens(bp, frame));
                         events.Add(() => Output?.Invoke("console", message + "\n"));
                         continue;
                     }
@@ -497,7 +500,8 @@ public sealed partial class DebugEngine
 
     // "{expression}" is replaced by its value; "{{" and "}}" are literal braces
     /// <param name="quoteStrings">false for log messages, true for [DebuggerDisplay] (where ",nq" removes the quotes).</param>
-    private static string FormatLogMessage(string template, Evaluator evaluator, bool quoteStrings = false)
+    private static string FormatLogMessage(string template, Evaluator evaluator, bool quoteStrings = false,
+        IReadOnlyDictionary<string, string>? logpointTokens = null)
     {
         var sb = new System.Text.StringBuilder();
         for (int i = 0; i < template.Length; i++)
@@ -530,7 +534,10 @@ public sealed partial class DebugEngine
                 }
                 try
                 {
-                    sb.Append(evaluator.EvaluateToText(expression, quoteStrings));
+                    bool hasTokens = logpointTokens != null && logpointTokens.Keys.Any(expression.Contains);
+                    if (hasTokens)
+                        expression = ExpandLogpointTokens(expression, logpointTokens!);
+                    sb.Append(evaluator.EvaluateToText(expression, quoteStrings || hasTokens));
                 }
                 catch (DebuggerException e)
                 {
@@ -547,5 +554,69 @@ public sealed partial class DebugEngine
             }
         }
         return sb.ToString();
+    }
+
+    private IReadOnlyDictionary<string, string> CreateLogpointTokens(UserBreakpoint breakpoint, FrameRef frame)
+    {
+        ulong address = 0;
+        string path = breakpoint.Path!;
+        int line = breakpoint.Resolved?.Line ?? breakpoint.RequestedLine;
+        try
+        {
+            CorDebugILFrame current = RequireILFrame(frame);
+            ModuleMetadata? metadata = GetMetadata(current.Function.Module);
+            if (metadata?.GetSourceLocation((int)current.Function.Token.Value, current.IP.pnOffset, out _) is { } source)
+            {
+                _modules.TryGetValue(current.Function.Module, out LoadedModule? module);
+                path = DescribeSource(module, source.Path).Path;
+            }
+            CorDebugCode code = current.Function.NativeCode;
+            var mappings = code.ILToNativeMapping.Where(m => m.ilOffset >= 0 && m.ilOffset <= current.IP.pnOffset)
+                .OrderByDescending(m => m.ilOffset).ToArray();
+            if (mappings.Length == 0)
+                Log?.Invoke("Logpoint native address unavailable: no IL-to-native mapping.");
+            else
+                address = code.Address.Value + (ulong)mappings[0].nativeStartOffset;
+        }
+        catch (Exception error) when (error is COMException or DebuggerException)
+        {
+            Log?.Invoke("Logpoint source/native address unavailable: " + error.Message);
+        }
+        return new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["$FILEPOS"] = VerbatimLiteral(path + ":" + line.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+            ["$ADDRESS"] = VerbatimLiteral("0x" + address.ToString("x16", System.Globalization.CultureInfo.InvariantCulture)),
+            ["$TID"] = "$tid",
+            ["$PID"] = "$pid",
+            ["$HITCOUNT"] = breakpoint.HitCount.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        };
+    }
+
+    private static string VerbatimLiteral(string text) => "@\"" + text.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
+
+    private static string ExpandLogpointTokens(string expression, IReadOnlyDictionary<string, string> values)
+    {
+        var result = new System.Text.StringBuilder();
+        int position = 0;
+        while (position < expression.Length)
+        {
+            string? match = null;
+            int next = expression.Length;
+            foreach (string token in values.Keys)
+            {
+                int found = expression.IndexOf(token, position, StringComparison.Ordinal);
+                if (found >= 0 && found < next)
+                {
+                    next = found;
+                    match = token;
+                }
+            }
+            result.Append(expression, position, next - position);
+            if (match == null)
+                break;
+            result.Append(values[match]);
+            position = next + match.Length;
+        }
+        return result.ToString();
     }
 }

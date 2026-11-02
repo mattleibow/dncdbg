@@ -305,7 +305,8 @@ internal static class ProcessLauncher
         "watchdog=$!\n" +
         "wait $child 2>/dev/null\n" + // dash prints the remark from "wait" as well
         "code=$?\n" +
-        "kill $watchdog 2>/dev/null\n" +
+        // Reap the watchdog with the parent shell's job-status diagnostic redirected, not the target's stderr.
+        "{ kill \"$watchdog\"; wait \"$watchdog\"; } 2>/dev/null\n" +
         // the FIFO disappears when the debugger has detached or is gone: nobody would ever read it
         "if [ -p \"$ctl\" ]; then echo \"exit $code\" > \"$ctl\"; fi\n";
 

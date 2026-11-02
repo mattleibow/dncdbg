@@ -65,7 +65,8 @@ survival beyond disposal timeouts, and pause during function evaluation followed
 by a heartbeat after exactly one continue. On Unix they also alternate real
 managed/noDebug and native launcher helpers to ensure a single reaping owner:
 `System.Diagnostics.Process` reaps its children, while native-created helpers
-use native waiting. They also arm static-initializer and
+use native waiting. Twelve alternating pairs also require exact target stdout
+and stderr, without parent-shell watchdog termination notifications. They also arm static-initializer and
 user breakpoints, detach, verify internal breakpoint cleanup, dispose the
 debugger, and let the detached target complete its watched initializer.
 Run these safety checks alone with:

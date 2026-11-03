@@ -232,6 +232,10 @@ are unchanged; no mobile device proof is replaced by these portable contracts.
 Desktop CI selects Python 3.13 explicitly through the existing `DNCDBG_PYTHON`
 facade override rather than using Xcode's bundled interpreter for every fake
 device-tool process. This does not change application SDK/runtime pins.
+Fixture device/package commands load the small `fake_mobile_tools.py` CLI,
+not the complete unittest driver and its fake-server dependencies on each
+invocation. Command transcripts, package mutation negatives and delay barriers
+are unchanged; real device proofs never use these fake tools.
 
 Require **both named mobile jobs** in branch protection alongside all existing
 Debugger Windows/Linux/macOS, Docker and VS Code checks. Workflow triggers create

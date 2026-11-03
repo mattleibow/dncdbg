@@ -245,6 +245,26 @@ class MobileRunnerTests(unittest.TestCase):
                 self.assertRaisesRegex(RuntimeError, "Darwin/x86_64"):
             hosted.preflight()
 
+    def test_parallel_dap_contracts_run_every_test_once_and_propagate_failures(self):
+        import test_dap
+        expected = {"MobileDapTests." + name for name in unittest.defaultTestLoader.getTestCaseNames(test_dap.MobileDapTests)}
+        with patch.object(sys, "argv", ["test_dap.py", "--parallel"]), \
+                patch("subprocess.Popen") as start:
+            start.return_value.wait.side_effect = [0, 1]
+            with self.assertRaises(SystemExit) as result:
+                runpy.run_path(str(ROOT / "tests/DncDbg.RemoteTests/test_dap.py"), run_name="__main__")
+            self.assertEqual(result.exception.code, 1)
+            commands = [call.args[0] for call in start.call_args_list]
+            self.assertEqual(len(commands), 2)
+            tests = [name for command in commands for name in command[2:]]
+            self.assertEqual(set(tests), expected)
+            self.assertEqual(len(tests), len(expected))
+            self.assertTrue(all(command[:2] == [sys.executable, str(ROOT / "tests/DncDbg.RemoteTests/test_dap.py")]
+                                for command in commands))
+        source = (ROOT / "tests/DncDbg.MobileTests/run_suite.py").read_text()
+        self.assertIn('timeout=180', source)
+        self.assertIn('["--parallel"]', source)
+
     def test_ios_x64_build_and_every_proof_use_selected_rid(self):
         suite = Suite(Namespace(platform="ios", output=self.output, xcode_dir=None, ios_architecture="x64"))
         suite.state = {"uiPort": 12345, "name": "ownedrun", "device": "owned-simulator"}

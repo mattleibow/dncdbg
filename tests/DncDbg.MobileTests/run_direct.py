@@ -61,6 +61,7 @@ class FixtureApp:
         self.reverse = False
         self.installed = False
         self.container = None
+        self.descriptors = {}
 
     def journal(self, phase, **values):
         with (self.args.output / "ownership.jsonl").open("a") as stream:
@@ -142,6 +143,7 @@ class FixtureApp:
             try:
                 candidate = json.loads(self.read(name))
                 if candidate["SessionId"] == generation and (pid is None or candidate["ProcessId"] == pid):
+                    self.descriptors[name] = candidate
                     return candidate
             except (FileNotFoundError, json.JSONDecodeError):
                 pass
@@ -172,7 +174,7 @@ class FixtureApp:
         destination = self.args.output / phase
         destination.mkdir(exist_ok=True)
         limit = 256 * 1024
-        secrets, errors = [], []
+        secrets, errors, descriptors = [], [], {}
 
         def redacted(value):
             if isinstance(value, dict):
@@ -204,6 +206,8 @@ class FixtureApp:
                 result = self.device("shell", "-T", "run-as", APP, "tail", "-c", str(limit),
                                      "files/" + name, check=False, timeout=10)
                 if result.returncode:
+                    if "No such file or directory" in result.stdout + result.stderr:
+                        raise FileNotFoundError(name)
                     raise RuntimeError("Target diagnostic unavailable")
                 return result.stdout
             path = self.container / "Library" / name
@@ -212,7 +216,17 @@ class FixtureApp:
                 return stream.read(limit).decode(errors="replace")
 
         for name in ("dncdbg-remote.json", "dncdbg-fixture-control.json"):
-            collect(name, lambda name=name: json.dumps(redacted(json.loads(read(name))), indent=2))
+            def descriptor(name=name):
+                try:
+                    value = json.loads(read(name))
+                    descriptors[name] = "live-before-cleanup"
+                except FileNotFoundError:
+                    if name not in self.descriptors:
+                        raise
+                    value = self.descriptors[name]
+                    descriptors[name] = "admitted-before-removal"
+                return json.dumps(redacted(value), indent=2)
+            collect(name, descriptor)
         collect("native-report.jsonl", lambda: read("dncdbg-startup.jsonl"))
         if self.serial:
             commands = {
@@ -233,9 +247,9 @@ class FixtureApp:
                     result = self.device(*command, check=False, timeout=10)
                     return f"exitCode={result.returncode}\n{result.stdout}{result.stderr}"
                 collect(name, snapshot)
-        save("state.json", json.dumps({"phase": phase, "controllerPid": os.getpid(),
+        save("snapshot.json", json.dumps({"phase": phase, "controllerPid": os.getpid(),
              "controllerGroup": os.getpgrp(), "device": self.args.device, "installed": self.installed,
-             "forwards": self.forwards, "reverse": self.reverse, "errors": errors}, indent=2))
+             "forwards": self.forwards, "reverse": self.reverse, "descriptors": descriptors, "errors": errors}, indent=2))
         self.journal("capture", snapshot=phase, errors=errors)
         if errors:
             raise RuntimeError("Incomplete diagnostic capture: " + json.dumps(errors))
@@ -291,6 +305,9 @@ def dap_proof(app, args, assets, environment):
         dap.request("configurationDone")
         dap.response(launch)
         info = dap.request("dotnet/info")
+        manifest = app.descriptor("dncdbg-remote.json", info["sessionId"])
+        assert manifest["Process"]["Id"] == info["debuggeeProcessId"]
+        assert manifest["Process"]["OwnershipId"] == info["sessionId"]
         endpoint = app.forward(app.descriptor("dncdbg-fixture-control.json", info["sessionId"], info["debuggeeProcessId"]))
         assert endpoint["BrokerRequired"] is False, "Independent DAP fixture must not register DevFlow"
         control = FixtureClient(endpoint)

@@ -279,6 +279,26 @@ class MobileRunnerTests(unittest.TestCase):
         self.assertEqual(len(logs), 2)
         self.assertTrue(all("--pid=42" in call.args for call in logs))
 
+    def test_dap_cleanup_preserves_admitted_descriptor_after_provider_removes_live_credential(self):
+        app = FixtureApp(Namespace(platform="ios", output=self.output, device="owned-simulator"))
+        app.container = self.output / "container"
+        library = app.container / "Library"
+        library.mkdir(parents=True)
+        endpoint = library / "dncdbg-remote.json"
+        endpoint.write_text(json.dumps({"SessionId": "generation",
+            "Endpoint": {"Token": "credential"}, "Process": {"Id": 42}, "Profile": {"Rid": "android-x64"}}))
+        with patch.object(app, "run", return_value=subprocess.CompletedProcess([], 0, str(app.container), "")):
+            app.descriptor("dncdbg-remote.json", "generation")
+        endpoint.unlink()
+        (library / "dncdbg-fixture-control.json").write_text('{"ProcessId":42}')
+        (library / "dncdbg-startup.jsonl").write_text('{"Phase":"owner-finished"}\n')
+        app.capture("before-cleanup")
+        evidence = self.output / "before-cleanup"
+        self.assertNotIn("credential", (evidence / "dncdbg-remote.json").read_text())
+        snapshot = json.loads((evidence / "snapshot.json").read_text())
+        self.assertEqual(snapshot["descriptors"]["dncdbg-remote.json"], "admitted-before-removal")
+        self.assertEqual(snapshot["errors"], [])
+
     def test_emulator_ports_stay_inside_the_official_console_and_adb_range(self):
         from run_suite import ANDROID_CONSOLE_PORTS
         self.assertEqual(list(ANDROID_CONSOLE_PORTS), list(range(5554, 5586, 2)))

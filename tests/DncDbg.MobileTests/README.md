@@ -158,6 +158,18 @@ apps and desktop packages exclude the fixture control implementation.
 Owned POSIX group liveness uses a kernel signal-zero probe; only ambiguous
 macOS `EPERM` requires a targeted owned-process-group query. An ordinary completed CLI
 command must not depend on scanning every process on a loaded hosted runner.
+
+Independent proofs capture `before-cleanup/` on failure as well as success, before
+force-stop/uninstall or forwarding removal: bounded native ownership reports,
+credential-stripped endpoint/profile descriptors, Android target process state,
+PID-filtered logcat/crash buffers and ADB forward/reverse state. Each diagnostic
+file is limited to 256 KiB. Missing diagnostics are recorded explicitly and fail
+the proof without skipping cleanup. `ownership.jsonl` records controller commands,
+exit codes and cleanup; the direct managed proof logs DNC1 operation/sequence and
+request/response/failure metadata, never request bodies or authentication values.
+These records distinguish losing the peer before a stop from disconnecting an
+already acquired stop. Manual CI dispatch can select `platform: android` or `ios`
+without changing the mandatory two-platform PR/main gates.
 SDK processes explicitly disable the persistent MSBuild server
 (`DOTNET_CLI_USE_MSBUILD_SERVER=false`, `MSBUILDUSESERVER=0`). Structured
 `-getProperty/-getItem` output must remain exact JSON; the runner does not strip

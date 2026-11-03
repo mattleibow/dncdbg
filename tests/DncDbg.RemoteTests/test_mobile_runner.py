@@ -198,7 +198,7 @@ class MobileRunnerTests(unittest.TestCase):
         self.assertTrue(trace.exists())
 
     def test_direct_native_cleanup_waits_for_the_same_exact_owner_fence_as_dap(self):
-        app = FixtureApp(Namespace(platform="ios", output=self.output))
+        app = FixtureApp(Namespace(platform="ios", output=self.output, device="owned-simulator"))
         finished = "\n".join(json.dumps({"Phase": phase, "HResult": "0x00000000"}, separators=(",", ":"))
                              for phase in ("cleanup-detach-return", "terminate-return", "owner-finished"))
         with patch.object(app, "read", side_effect=['{"Phase":"cleanup-stop-return"}', finished]) as read, \
@@ -208,6 +208,40 @@ class MobileRunnerTests(unittest.TestCase):
         with patch.object(app, "read", return_value=finished.replace("0x00000000", "0x80004005")):
             with self.assertRaises(AssertionError):
                 app.native_cleanup()
+
+    def test_direct_failure_capture_is_bounded_redacted_and_precedes_target_cleanup(self):
+        app = FixtureApp(Namespace(platform="ios", output=self.output, device="owned-simulator"))
+        app.installed = True
+        app.container = self.output / "container"
+        library = app.container / "Library"
+        library.mkdir(parents=True)
+        (library / "dncdbg-startup.jsonl").write_text('{"Phase":"attach-return","HResult":"0x00000000"}\n')
+        (library / "dncdbg-remote.json").write_text(json.dumps({
+            "Endpoint": {"Token": "never-publish", "Port": 1234},
+            "Process": {"Id": 42, "OwnershipId": "generation"}, "Profile": {"Agent": {"Hash": "exact"}}}))
+        (library / "dncdbg-fixture-control.json").write_text('{"Token":"never-publish","ProcessId":42}')
+        def uninstall(*command, **kwargs):
+            if "uninstall" in command:
+                shutil.rmtree(app.container)
+        with patch.object(app, "run", side_effect=uninstall) as run:
+            app.close()
+            captured = self.output / "before-cleanup"
+            self.assertIn("attach-return", (captured / "native-report.jsonl").read_text())
+            self.assertNotIn("never-publish", "".join(p.read_text() for p in captured.iterdir()))
+            descriptor = json.loads((captured / "dncdbg-remote.json").read_text())
+            self.assertEqual(descriptor["Profile"]["Agent"]["Hash"], "exact")
+            self.assertNotIn("Token", descriptor["Endpoint"])
+            self.assertTrue(run.called)
+
+    def test_direct_diagnostic_error_does_not_skip_cleanup_or_hide_failure(self):
+        app = FixtureApp(Namespace(platform="ios", output=self.output, device="owned-simulator"))
+        app.installed = True
+        with patch.object(app, "capture", side_effect=RuntimeError("capture failed")), \
+                patch.object(app, "run") as run:
+            with self.assertRaisesRegex(RuntimeError, "capture failed"):
+                app.close()
+        self.assertTrue(any("uninstall" in call.args for call in run.call_args_list))
+
     def test_emulator_ports_stay_inside_the_official_console_and_adb_range(self):
         from run_suite import ANDROID_CONSOLE_PORTS
         self.assertEqual(list(ANDROID_CONSOLE_PORTS), list(range(5554, 5586, 2)))

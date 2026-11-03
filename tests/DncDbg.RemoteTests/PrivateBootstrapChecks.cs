@@ -19,7 +19,18 @@ internal static class PrivateBootstrapChecks
         Reject(supported with { DacBuildId = new string('0', 32) }, exports, "DAC build identity");
         Reject(supported, ["CoreCLRCreateCordbObject3"], "missing DllMain export");
         Reject(supported, ["DllMain"], "missing factory export");
-        check(PrivateBootstrapPolicy.SupportedBuilds.Count == 4, "application allowlist separately pins Android architectures and Apple simulator/device images");
+        check(PrivateBootstrapPolicy.SupportedBuilds.Count == 5, "application allowlist separately pins both simulator/Android architectures and Apple device image");
+        PrivateBootstrapIdentity? iosX64 = PrivateBootstrapPolicy.SupportedBuilds.SingleOrDefault(x =>
+            x.Platform == "iOSSimulator" && x.Architecture == "X64");
+        check(iosX64 != null, "iOS simulator x64 requires its own qualified identity, not ARM pins");
+        if (iosX64 != null)
+        {
+            check(PrivateBootstrapPolicy.Validate(iosX64, exports) == null, "exact iOS simulator x64 private tuple accepted");
+            Reject(iosX64 with { Architecture = "Arm64" }, exports, "iOS x64 identity used for ARM");
+            Reject(iosX64 with { DbiHash = supported.DbiHash }, exports, "iOS ARM DBI hash used for x64");
+            Reject(iosX64 with { Platform = "MacOSNativeHost" }, exports, "simulator DBI used for desktop x64");
+            Reject(iosX64, ["DllMain"], "iOS x64 missing factory export");
+        }
         PrivateBootstrapIdentity androidX64 = PrivateBootstrapPolicy.SupportedBuilds.Single(x =>
             x.Platform == "Android" && x.Architecture == "X64");
         check(PrivateBootstrapPolicy.Validate(androidX64, exports) == null, "exact Android x64 mobile private tuple accepted");
@@ -42,7 +53,9 @@ internal static class PrivateBootstrapChecks
         "GNU\0"u8.CopyTo(elf.AsSpan(132));
         check(NativeImageIdentity.Read(elf, "Android").BuildId == "00000000",
             "read Android x64 ELF build identity and code hash");
-        check(PrivateBootstrapPolicy.NativeHostBuilds.Count == 3, "native host has explicit macOS arm64 and Linux x64/arm64 tuples");
+        check(PrivateBootstrapPolicy.NativeHostBuilds.Count == 4, "native host has explicit macOS and Linux x64/arm64 tuples");
+        check(PrivateBootstrapPolicy.NativeHostBuilds.Any(x => x.Platform == "MacOSNativeHost" && x.Architecture == "X64"),
+            "desktop macOS x64 requires independent qualification");
         foreach (PrivateBootstrapIdentity native in PrivateBootstrapPolicy.NativeHostBuilds)
         {
             check(PrivateBootstrapPolicy.Validate(native, exports) == null, "exact native-host private tuple accepted: " + native.Platform + "/" + native.Architecture);
@@ -76,7 +89,11 @@ internal static class PrivateBootstrapChecks
         Write(64, 1);
         RejectImage("reject desktop Mach-O before target activation");
         Write(64, 7); Write(4, 0x01000007);
-        RejectImage("reject x64 Mach-O before target activation");
+        NativeImageIdentity x64 = NativeImageIdentity.Read(image, "iOSSimulator");
+        check(x64.BuildId == valid.BuildId && x64.CodeHash == valid.CodeHash,
+            "inspect thin x64 simulator Mach-O metadata without loading ARM code");
+        Write(4, 0x01000012);
+        RejectImage("reject unqualified Mach-O CPU before target activation");
         using var prior = new RemoteLeaseTable<int>(_ => { });
         using var next = new RemoteLeaseTable<int>(_ => { });
         long stale = prior.Add(1), current = next.Add(2);

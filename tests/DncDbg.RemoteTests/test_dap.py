@@ -21,6 +21,10 @@ from fake_adb import FakeAdbDaemon
 ROOT = Path(__file__).resolve().parents[2]
 ADAPTER = ROOT / "src/DncDbg.Dap/bin/Release/net10.0/dncdbg-dap.dll"
 IDENTITIES = {
+    "iOSX64": [
+        "iOSSimulator", "F685A9CDD88037F9ABDF7271021C6192", "221BC56DA09E6096B6CDE00C2628E2037B394CB7A254A71886A9F1172F6FFF62",
+        "3C088149276A37239C5A8B244C1F33AD", "362BF9C28525D29E647BA1CE309C87A7F257208C0948317EDB24D199C29CA7C4",
+        "D6EA7FA5BA273AD5A9FE525510D2C2B0", "6A5327EA49D3CF0E70C574A712E75929490AC4C411AF7FE1FB7A4633E380E393"],
     "AndroidX64": [
         "Android", "A3ABA7AECC5E3B02CEF376BA080FEEFD5D3C992F", "CEB01AE9B0CCCE2437C768CB2EE1BE0E719D6B60903F5521AEDFA1C7D16FD736",
         "6182AB42360380FF67C9F829EBCEBEFE500D51D2", "911AEE78E1143BD419228C4D2B768DE7092DEC2586867AF07CB08F274935C3A1",
@@ -60,10 +64,11 @@ def bundle_hash(directory):
 def fake_profile(platform):
     identity = dict(zip(["Platform", "RuntimeBuildId", "RuntimeHash", "DbiBuildId", "DbiHash", "DacBuildId", "DacHash"],
                         IDENTITIES[platform]))
-    identity |= {"Architecture": "X64" if platform == "AndroidX64" else "Arm64",
+    identity |= {"Architecture": "X64" if platform.endswith("X64") else "Arm64",
                  "RuntimeVersion": "11.0.0-rc.1.26425.128"}
-    rid = "android-x64" if platform == "AndroidX64" else "android-arm64" if platform == "Android" else "iossimulator-arm64"
-    return {"SchemaVersion": 1, "Os": "ios" if platform == "iOS" else "android",
+    rid = "android-x64" if platform == "AndroidX64" else "android-arm64" if platform == "Android" else (
+        "iossimulator-x64" if platform == "iOSX64" else "iossimulator-arm64")
+    return {"SchemaVersion": 1, "Os": "ios" if platform.startswith("iOS") else "android",
             "Architecture": identity["Architecture"].lower(), "Runtime": identity, "Agent": fake_agent(rid), "Capabilities": FEATURES}
 
 
@@ -222,7 +227,7 @@ class Remote:
                             "Provider": "coreclr", "Bootstrap": "coreclr-dbi-v1",
                             "SupportedBuild": dict(zip(
                                 ["Platform", "RuntimeBuildId", "RuntimeHash", "DbiBuildId", "DbiHash", "DacBuildId", "DacHash"],
-                                identity)) | {"Architecture": "X64" if self.platform == "AndroidX64" else "Arm64",
+                                identity)) | {"Architecture": "X64" if self.platform.endswith("X64") else "Arm64",
                                               "RuntimeVersion": "11.0.0-rc.1.26425.128"},
                             "Features": [
                                 "sourceBreakpoints", "threads", "modules", "scopes", "variables",
@@ -571,6 +576,22 @@ class MobileDapTests(unittest.TestCase):
     def test_android_x64_rejects_an_arm64_target_identity(self):
         self.remote = Remote(self.state, "Android")
         launch = self.dap.send("launch", self.arguments(self.options("android") | {"runtimeIdentifier": "android-x64"}))
+        self.dap.response(launch, success=False)
+
+    def test_ios_x64_uses_the_same_mobile_provider(self):
+        self.remote = Remote(self.state, "iOSX64")
+        launch = self.dap.send("launch", self.arguments(self.options("iosSimulator") | {"runtimeIdentifier": "iossimulator-x64"}))
+        self.dap.request("setExceptionBreakpoints", {"filters": []})
+        self.dap.request("configurationDone")
+        self.dap.response(launch)
+        self.dap.event("stopped")
+        self.assertEqual(self.dap.request("threads")["threads"][0]["id"], 7)
+        self.dap.request("disconnect", {"terminateDebuggee": True})
+        self.dap.event("terminated")
+
+    def test_ios_x64_rejects_an_arm64_target_identity(self):
+        self.remote = Remote(self.state, "iOS")
+        launch = self.dap.send("launch", self.arguments(self.options("iosSimulator") | {"runtimeIdentifier": "iossimulator-x64"}))
         self.dap.response(launch, success=False)
 
     def test_terminate_interrupts_a_blocked_inspection_before_taking_the_state_lock(self):

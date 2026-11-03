@@ -231,6 +231,51 @@ class MobileRunnerTests(unittest.TestCase):
         self.assertEqual(self.suite.android["hostSystem"], "Darwin")
         self.assertEqual(PIN["android"]["imageRevision"], "8")
 
+    def test_ios_x64_tuple_is_explicit_and_does_not_replace_arm64(self):
+        hosted = Suite(Namespace(platform="ios", output=self.output, xcode_dir=None, ios_architecture="x64"))
+        local = Suite(Namespace(platform="ios", output=self.output, xcode_dir=None))
+        self.assertEqual(hosted.ios["rid"], "iossimulator-x64")
+        self.assertEqual(hosted.ios["hostArchitecture"], "x86_64")
+        self.assertEqual(local.ios["rid"], "iossimulator-arm64")
+        self.assertEqual(local.ios["hostArchitecture"], "arm64")
+        for key in ("xcode", "xcodeBuild", "runtime", "runtimeBuild", "deviceType"):
+            self.assertEqual(hosted.ios[key], local.ios[key])
+        with patch("run_suite.platform.system", return_value="Darwin"), \
+                patch("run_suite.platform.machine", return_value="arm64"), \
+                self.assertRaisesRegex(RuntimeError, "Darwin/x86_64"):
+            hosted.preflight()
+
+    def test_ios_x64_build_and_every_proof_use_selected_rid(self):
+        suite = Suite(Namespace(platform="ios", output=self.output, xcode_dir=None, ios_architecture="x64"))
+        suite.state = {"uiPort": 12345, "name": "ownedrun", "device": "owned-simulator"}
+        evaluated = {"Properties": {"MauiVersion": PIN["maui"], "DefineConstants": ""},
+                     "Items": {key: [] for key in ("NativeReference", "AndroidNativeLibrary", "PackageReference", "ProjectReference")}}
+        with patch.object(suite, "json", return_value=evaluated), patch.object(suite, "run") as run, \
+                patch("run_suite.Path.exists", return_value=True):
+            app, assets = suite.build("Release")
+            self.assertIn("iossimulator-x64", str(app))
+            build = next(call for call in run.call_args_list if call.args[:2] == ("dotnet", "build"))
+            self.assertIn("-p:RuntimeIdentifier=iossimulator-x64", build.args)
+            for helper in ("run_device.py", "run_faults.py"):
+                suite.proof(helper, app, assets, helper)
+                self.assertIn("iossimulator-x64", run.call_args.args)
+            suite.fixture_proof(app, assets, "dap", "direct")
+            self.assertIn("iossimulator-x64", run.call_args.args)
+
+    def test_intel_ci_routes_matching_rids_without_renaming_protected_contexts(self):
+        ci = (ROOT / ".github/workflows/ci.yml").read_text()
+        remote = (ROOT / ".github/workflows/remote.yml").read_text()
+        mobile = (ROOT / ".github/workflows/mobile.yml").read_text()
+        self.assertIn("name: Debugger (${{ matrix.os }})", ci)
+        self.assertIn("runner: macos-26-intel", ci)
+        self.assertIn("rid: osx-x64", ci)
+        self.assertIn("name: Remote native host (${{ matrix.os }})", remote)
+        self.assertIn("runner: macos-26-intel", remote)
+        self.assertIn("rid: osx-x64", remote)
+        self.assertIn("name: Mobile iOS simulator (pinned)", mobile)
+        self.assertIn("runs-on: macos-26-intel", mobile)
+        self.assertEqual(mobile.count("--ios-architecture x64"), 2)
+
     def test_android_tuple_rejects_nonmatching_host_instead_of_substituting_abi(self):
         with patch("run_suite.platform.system", return_value="Linux"), \
                 patch("run_suite.platform.machine", return_value="x86_64"), \

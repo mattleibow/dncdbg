@@ -297,6 +297,19 @@ class MobileRunnerTests(unittest.TestCase):
         self.assertNotIn("unittest", namespace)
         self.assertNotIn("FakeAdbDaemon", namespace)
 
+    def test_android_reclaims_only_unused_hosted_payloads_before_pinned_install(self):
+        source = (ROOT / ".github/workflows/mobile.yml").read_text()
+        start = source.index("name: Reclaim unused hosted SDK payloads")
+        end = source.index("name: Provision immutable checksummed Android emulator and image")
+        self.assertLess(start, end)
+        cleanup = source[start:end]
+        self.assertIn('test "$RUNNER_ENVIRONMENT" = github-hosted', cleanup)
+        self.assertIn('test "${ANDROID_HOME%/}" = /usr/local/lib/android/sdk', cleanup)
+        self.assertIn("sudo rm -rf -- /usr/local/lib/android/sdk/system-images /usr/local/lib/android/sdk/ndk /usr/local/lib/android/sdk/emulator", cleanup)
+        self.assertNotIn("sdk/cmdline-tools", cleanup)
+        self.assertNotIn("sdk/platform-tools", cleanup)
+        self.assertNotIn('rm -rf "$ANDROID_HOME"', cleanup)
+
     def test_ios_x64_build_and_every_proof_use_selected_rid(self):
         suite = Suite(Namespace(platform="ios", output=self.output, xcode_dir=None, ios_architecture="x64"))
         suite.state = {"uiPort": 12345, "name": "ownedrun", "device": "owned-simulator"}

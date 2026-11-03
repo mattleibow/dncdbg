@@ -164,8 +164,11 @@ Independent proofs capture `before-cleanup/` on failure as well as success, befo
 force-stop/uninstall or forwarding removal: bounded native ownership reports,
 credential-stripped endpoint/profile descriptors, Android target process state,
 PID-filtered logcat/crash buffers and ADB forward/reverse state. Each diagnostic
-file is limited to 256 KiB. Missing diagnostics are recorded explicitly and fail
-the proof without skipping cleanup. `ownership.jsonl` records controller commands,
+file is limited to 256 KiB. An endpoint removed by normal DAP credential cleanup
+uses the descriptor observed at exact-generation admission, explicitly marked
+`admitted-before-removal` in `snapshot.json`; it is never reported as still live.
+Unexpected missing diagnostics fail the proof without skipping cleanup.
+`ownership.jsonl` records controller commands,
 exit codes and cleanup; the direct managed proof logs DNC1 operation/sequence and
 request/response/failure metadata, never request bodies or authentication values.
 These records distinguish losing the peer before a stop from disconnecting an

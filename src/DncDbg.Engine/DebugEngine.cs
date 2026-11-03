@@ -1398,14 +1398,7 @@ public sealed partial class DebugEngine : IDisposable
                 foreach (CorDebugThread thread in _process.Threads)
                 {
                     int id = thread.Id;
-                    string? name = null;
-                    try
-                    {
-                        name = _values.ReadString(_values.GetFieldByName(thread.Object, "_name", "m_Name"));
-                    }
-                    catch (Exception)
-                    {
-                    }
+                    string? name = ReadThreadName(thread);
                     name ??= id == _firstThreadId ? "Main Thread" : ".NET Thread";
                     result.Add(new ThreadInfo(id, _frozenThreads.Contains(id) ? name + " (frozen)" : name));
                 }
@@ -1416,6 +1409,19 @@ public sealed partial class DebugEngine : IDisposable
                 if (stoppedHere)
                     _process.Continue(false);
             }
+        }
+    }
+
+    private string? ReadThreadName(CorDebugThread thread)
+    {
+        try
+        {
+            return _values.ReadString(_values.GetFieldByName(thread.Object, "_name", "m_Name"));
+        }
+        catch (Exception error) when (error is COMException or DebuggerException)
+        {
+            Log?.Invoke("Thread name unavailable: " + error.Message);
+            return null;
         }
     }
 }

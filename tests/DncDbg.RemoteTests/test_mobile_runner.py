@@ -277,6 +277,16 @@ class MobileRunnerTests(unittest.TestCase):
         self.assertNotIn('["TMPDIR"] =', probe)
         self.assertIn('["runtimeBuild"]', probe)
 
+    def test_desktop_contract_facade_uses_explicit_python_instead_of_xcode_python(self):
+        source = (ROOT / ".github/workflows/ci.yml").read_text().split("\n  docker:", 1)[0]
+        self.assertIn("uses: actions/setup-python@v5", source)
+        self.assertIn('python-version: "3.13"', source)
+        contracts = source.split("name: Check native target ownership contracts (no mobile runtime)", 1)[1]
+        contracts = contracts.split("\n      - ", 1)[0]
+        self.assertIn("DNCDBG_PYTHON: ${{ steps.python.outputs.python-path }}", contracts)
+        facade = (ROOT / "tests/CommonRunner.cs").read_text()
+        self.assertIn('Environment.GetEnvironmentVariable("DNCDBG_PYTHON")', facade)
+
     def test_ios_x64_build_and_every_proof_use_selected_rid(self):
         suite = Suite(Namespace(platform="ios", output=self.output, xcode_dir=None, ios_architecture="x64"))
         suite.state = {"uiPort": 12345, "name": "ownedrun", "device": "owned-simulator"}

@@ -287,6 +287,16 @@ class MobileRunnerTests(unittest.TestCase):
         facade = (ROOT / "tests/CommonRunner.cs").read_text()
         self.assertIn('Environment.GetEnvironmentVariable("DNCDBG_PYTHON")', facade)
 
+    def test_fake_tool_processes_do_not_reload_the_entire_unittest_driver(self):
+        helper = ROOT / "tests/DncDbg.RemoteTests/fake_mobile_tools.py"
+        self.assertTrue(helper.is_file(), "Tool startup must not import every DAP test and server dependency.")
+        source = (ROOT / "tests/DncDbg.RemoteTests/test_dap.py").read_text()
+        self.assertIn('with_name("fake_mobile_tools.py")', source)
+        namespace = runpy.run_path(str(helper))
+        self.assertTrue(callable(namespace["tool"]))
+        self.assertNotIn("unittest", namespace)
+        self.assertNotIn("FakeAdbDaemon", namespace)
+
     def test_ios_x64_build_and_every_proof_use_selected_rid(self):
         suite = Suite(Namespace(platform="ios", output=self.output, xcode_dir=None, ios_architecture="x64"))
         suite.state = {"uiPort": 12345, "name": "ownedrun", "device": "owned-simulator"}

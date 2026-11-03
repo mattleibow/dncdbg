@@ -53,6 +53,12 @@ jobs:
         with:
           global-json-file: global.json
 
+      - name: Install Python for portable contracts
+        id: python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
       - name: Verify native runner matches the artifact RID
         shell: pwsh
         run: |
@@ -90,6 +96,8 @@ jobs:
 
       - name: Check native target ownership contracts (no mobile runtime)
         if: runner.os != 'Windows'
+        env:
+          DNCDBG_PYTHON: ${{ steps.python.outputs.python-path }}
         run: dotnet run --project tests/DncDbg.MobileTests --configuration Release --no-build -- --platform contracts --output build/validation/mobile-contracts
 
       - name: Upload portable mobile contract evidence

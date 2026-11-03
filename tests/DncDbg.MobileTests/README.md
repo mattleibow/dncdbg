@@ -229,6 +229,9 @@ architectures. Every discovered case runs once, either failure makes the command
 fail, and children remain in the owned process group for timeout cleanup.
 The existing 180-second aggregate budget and individual protocol/fault deadlines
 are unchanged; no mobile device proof is replaced by these portable contracts.
+Desktop CI selects Python 3.13 explicitly through the existing `DNCDBG_PYTHON`
+facade override rather than using Xcode's bundled interpreter for every fake
+device-tool process. This does not change application SDK/runtime pins.
 
 Require **both named mobile jobs** in branch protection alongside all existing
 Debugger Windows/Linux/macOS, Docker and VS Code checks. Workflow triggers create

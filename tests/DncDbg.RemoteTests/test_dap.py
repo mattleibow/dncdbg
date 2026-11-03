@@ -1122,7 +1122,7 @@ elif __name__ == "__main__":
         children = []
         try:
             for shard in range(2):
-                children.append(subprocess.Popen([sys.executable, str(Path(__file__).resolve()), *names[shard::2]]))
+                children.append(subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "-v", *names[shard::2]]))
             failed = any([child.wait() != 0 for child in children])
         finally:
             for child in children:

@@ -32,6 +32,35 @@ jobs:
           dotnet-version: |
             10.0.401
             11.0.100-rc.1.26425.128
+      - name: Verify pinned simulator inventory in the runner environment
+        timeout-minutes: 4
+        shell: bash
+        run: |
+          python3 -u - <<'PY'
+          import json, os, platform, subprocess, sys
+          from pathlib import Path
+          sys.path.insert(0, "tests/DncDbg.RemoteTests")
+          from process_tools import run_owned
+          pin = json.loads(Path("tests/DncDbg.MobileTests/tuple.json").read_text())["iosX64"]
+          output = Path("build/validation/mobile-ci/ios-prerequisite")
+          output.mkdir(parents=True)
+          env = dict(os.environ) | {"DEVELOPER_DIR": "/Applications/Xcode_26.6.app/Contents/Developer"}
+          report = {"head": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+                    "hostArchitecture": platform.machine(), "complete": False, "passed": False}
+          try:
+              assert platform.system() == "Darwin" and platform.machine() == pin["hostArchitecture"]
+              version = run_owned("xcodebuild", "-version", env=env, timeout=30, log=output / "xcode.log").stdout.strip()
+              assert version == f"Xcode {pin['xcode']}\nBuild version {pin['xcodeBuild']}", version
+              inventory = run_owned("xcrun", "simctl", "list", "runtimes", "-j",
+                                    env=env, timeout=180, log=output / "runner-environment.log").stdout
+              observed = [r for r in json.loads(inventory)["runtimes"]
+                          if r["identifier"] == pin["runtime"] and r.get("isAvailable")
+                          and r["buildversion"] == pin["runtimeBuild"]]
+              assert len(observed) == 1, "Exact pinned simulator runtime unavailable; no substitution."
+              report.update({"passed": True, "xcode": version, "runtime": observed[0]})
+          finally:
+              (output / "prerequisite.json").write_text(json.dumps(report, indent=2))
+          PY
       - name: Install exact workload and DevFlow CLI
         shell: bash
         run: |
@@ -59,7 +88,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: mobile-ios-${{ github.run_id }}-${{ github.run_attempt }}
-          path: build/validation/mobile-ci/ios/evidence/
+          path: |
+            build/validation/mobile-ci/ios/evidence/
+            build/validation/mobile-ci/ios-prerequisite/
           if-no-files-found: error
           retention-days: 7
           compression-level: 6

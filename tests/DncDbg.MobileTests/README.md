@@ -216,6 +216,12 @@ remains a red gate, never a successful skip.
   the separate x64 pins. It does not merely cross-build an APK, run host fakes,
   or pass an arm64 image to x64 KVM. Immutable archive/hash drift fails provisioning;
   emulator boot failure or missing KVM fails the job.
+  Before installing the isolated pinned SDK, the job records disk usage and
+  reclaims only the unused preinstalled SDK's `system-images`, `ndk` and
+  `emulator` directories, guarded to the exact GitHub-hosted SDK root.
+  Command-line/platform tools and the run's selected SDK are never removed.
+  This avoids keeping two large image/NDK installations; archive pins and
+  checksum/size/property validation are unchanged.
 
 [.NET 11 Android supports `android-x64` CoreCLR](https://github.com/dotnet/android/blob/main/Documentation/docs-mobile/building-apps/build-properties.md).
 [Android requires matching host/image architecture for acceleration](https://developer.android.com/studio/run/emulator-acceleration);

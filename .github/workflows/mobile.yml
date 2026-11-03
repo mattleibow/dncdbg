@@ -126,6 +126,24 @@ jobs:
           sudo chmod 0666 /dev/kvm
           stat /dev/kvm | tee build/validation/android-provision/kvm.log
           test -r /dev/kvm && test -w /dev/kvm
+      - name: Reclaim unused hosted SDK payloads
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "${ANDROID_HOME%/}" = /usr/local/lib/android/sdk
+          mkdir -p build/validation/android-provision
+          {
+            df -h "$GITHUB_WORKSPACE"
+            for path in /usr/local/lib/android/sdk/system-images /usr/local/lib/android/sdk/ndk /usr/local/lib/android/sdk/emulator; do
+              if [ -e "$path" ]; then
+                test -d "$path" && test ! -L "$path"
+                sudo du -sk -- "$path"
+              fi
+            done
+            sudo rm -rf -- /usr/local/lib/android/sdk/system-images /usr/local/lib/android/sdk/ndk /usr/local/lib/android/sdk/emulator
+            df -h "$GITHUB_WORKSPACE"
+          } | tee build/validation/android-provision/hosted-payload-reclamation.log
       - name: Provision immutable checksummed Android emulator and image
         shell: bash
         run: |

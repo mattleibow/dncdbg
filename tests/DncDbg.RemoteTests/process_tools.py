@@ -76,10 +76,12 @@ def native_listener_closed(port, forwarded):
         return False
 
 
-def run_owned(*args, env=None, check=True, input=None, timeout=180, log=None, cwd=ROOT):
+def run_owned(*args, env=None, check=True, input=None, timeout=180, log=None, cwd=ROOT, journal=None):
     with start_owned(args, cwd=cwd, env=env, text=True, stdin=subprocess.PIPE if input is not None else None,
                      stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
         try:
+            if journal:
+                journal("child-start", childPid=process.pid, childGroup=process.pid)
             stdout, stderr = process.communicate(input, timeout=timeout)
             result = subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
         except subprocess.TimeoutExpired as error:
@@ -91,6 +93,8 @@ def run_owned(*args, env=None, check=True, input=None, timeout=180, log=None, cw
             raise
         finally:
             stop_owned(process)
+            if journal:
+                journal("child-reaped", childPid=process.pid, exitCode=process.returncode)
     if log:
         Path(log).write_text(result.stdout + result.stderr)
     if check and result.returncode:

@@ -242,6 +242,43 @@ class MobileRunnerTests(unittest.TestCase):
                 app.close()
         self.assertTrue(any("uninstall" in call.args for call in run.call_args_list))
 
+    def test_direct_controller_exit_journal_records_exact_owned_child_and_failure_code(self):
+        app = FixtureApp(Namespace(platform="ios", output=self.output, device="owned-simulator"))
+        with self.assertRaisesRegex(RuntimeError, r"failed \(7\)"):
+            app.run(sys.executable, "-c", "raise SystemExit(7)")
+        records = [json.loads(row) for row in (self.output / "ownership.jsonl").read_text().splitlines()]
+        started = next(row for row in records if row["phase"] == "child-start")
+        reaped = next(row for row in records if row["phase"] == "child-reaped")
+        self.assertEqual(started["childPid"], started["childGroup"])
+        self.assertEqual(started["childPid"], reaped["childPid"])
+        self.assertEqual(reaped["exitCode"], 7)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(reaped["childPid"], 0)
+
+    def test_direct_android_capture_limits_bytes_and_filters_logs_to_exact_target_pid(self):
+        with patch("run_direct.adb_path", return_value="/sdk/platform-tools/adb"):
+            app = FixtureApp(Namespace(platform="android", output=self.output, device="emulator-5566"))
+        descriptor = {"Endpoint": {"Token": "credential"}, "Process": {"Id": 42}, "Profile": {"Rid": "android-x64"}}
+        def device(*command, **kwargs):
+            text = ""
+            if command[-1] == "files/dncdbg-remote.json":
+                text = json.dumps(descriptor)
+            elif command[-1] == "files/dncdbg-fixture-control.json":
+                text = '{"Token":"credential","ProcessId":42}'
+            elif command[-1] == "files/dncdbg-startup.jsonl":
+                text = '{"Phase":"attach-return"}\n'
+            elif command[0] == "logcat":
+                text = "credential\n" + "x" * (300 * 1024)
+            return subprocess.CompletedProcess(command, 0, text, "")
+        with patch.object(app, "device", side_effect=device) as commands:
+            app.capture("before-cleanup")
+        for path in (self.output / "before-cleanup").iterdir():
+            self.assertLessEqual(path.stat().st_size, 256 * 1024)
+            self.assertNotIn(b"credential", path.read_bytes())
+        logs = [call for call in commands.call_args_list if call.args[0] == "logcat"]
+        self.assertEqual(len(logs), 2)
+        self.assertTrue(all("--pid=42" in call.args for call in logs))
+
     def test_emulator_ports_stay_inside_the_official_console_and_adb_range(self):
         from run_suite import ANDROID_CONSOLE_PORTS
         self.assertEqual(list(ANDROID_CONSOLE_PORTS), list(range(5554, 5586, 2)))

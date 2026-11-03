@@ -91,7 +91,7 @@ public static partial class ApplicationPackagePolicy
                 AndroidImagePath(rid), FileHash(app), androidBuildToolsVersion);
             agent = source with { Sha256 = actual, ImageKind = "native-library" };
         }
-        else if (rid is "iossimulator-arm64" or "ios-arm64")
+        else if (rid is "iossimulator-arm64" or "iossimulator-x64" or "ios-arm64")
         {
             var observed = await AppleIdentityAsync(app, token);
             string executable = Path.Combine(app, observed.Executable);
@@ -131,7 +131,7 @@ public static partial class ApplicationPackagePolicy
         }
         else
         {
-            if (agent.Rid is not ("iossimulator-arm64" or "ios-arm64") || agent.ImageKind != "linked-executable")
+            if (agent.Rid is not ("iossimulator-arm64" or "iossimulator-x64" or "ios-arm64") || agent.ImageKind != "linked-executable")
                 throw new InvalidDataException("Apple admission requires the final linked executable, not an archive hash.");
             SafeRelative(expected.ImagePath);
             EqualHash(FileHash(Path.Combine(app, expected.ImagePath)), agent.Sha256,

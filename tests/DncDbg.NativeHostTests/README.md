@@ -14,7 +14,7 @@ the **same** `src/DncDbg.Remote.Target/Bootstrap.cpp`, `RemoteModel.h` and gener
 contract used on Android/iOS. It does not substitute `EngineBackend`, a managed
 agent fake, or the ordinary desktop `DebugEngine`.
 
-Prerequisites: the root SDK, Python 3, a C++17 compiler and macOS arm64 or Linux
+Prerequisites: the root SDK, Python 3, a C++17 compiler and macOS x64/arm64 or Linux
 x64/arm64. The public SDK's `KnownAppHostPack` selects `nethost.h`, `hostfxr.h`,
 `coreclr_delegates.h` and `libnethost.a`; **only the native test fixture** compiles
 C++. Normal adapter builds/publishes still need no C++ toolchain.
@@ -24,10 +24,20 @@ If absent, the runner installs the official SHA-512-locked archive in
 [`runtime-lock.json`](runtime-lock.json) under this checkout's ignored `build/`.
 No SDK/workload/global installation is changed. `--runtime-directory PATH` can
 select an existing exact runtime. `PrivateBootstrapPolicy.NativeHostBuilds`
-separately pins macOS arm64 and Linux x64/arm64 runtime/DBI/DAC identities/code
+separately pins macOS x64/arm64 and Linux x64/arm64 runtime/DBI/DAC identities/code
 hashes. The original arm64 mobile tuples are retained separately from the new
 hosted Android x64 mobile tuple; no desktop DBI is ever
 substituted for a mobile DBI, and no product-version-only fallback is admitted.
+
+Hosted macOS proof runs on `macos-26-intel`, publishes `osx-x64`, and runs every
+direct/proxy/lifecycle assertion and deployment inventory check. The stable
+`Remote native host (macos-26)` context still denotes a real macOS 26 job, not
+an ARM job emulated or skipped on Intel. The original ARM64 runtime profile and
+local native-host path remain available. Intel runtime archives have their own
+official SHA-512 lock; thin Mach-O CPU, platform, UUID and executable code hash
+are checked before activation. A framework directory in a shared installation
+must also have the exact hostfxr; use an isolated locked installation when newer
+global hostfxr versions coexist.
 
 ## What actually runs
 

@@ -84,7 +84,7 @@ class Proof:
 
     def build(self):
         if self.rid not in LOCK["archives"]:
-            raise RuntimeError("Native architecture proof requires macOS arm64 or Linux x64/arm64.")
+            raise RuntimeError("Native architecture proof requires a separately pinned macOS or Linux x64/arm64 tuple.")
         if self.args.runtime_directory:
             self.runtime = self.args.runtime_directory.resolve()
         else:

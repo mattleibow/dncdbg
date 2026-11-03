@@ -19,7 +19,7 @@ concurrency:
 jobs:
   debugger:
     name: Debugger (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner || matrix.os }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -32,7 +32,8 @@ jobs:
           - os: ubuntu-latest
             rid: linux-x64
           - os: macos-latest
-            rid: osx-arm64
+            runner: macos-26-intel
+            rid: osx-x64
           - os: windows-latest
             rid: win-x64
 
@@ -51,6 +52,16 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           global-json-file: global.json
+
+      - name: Verify native runner matches the artifact RID
+        shell: pwsh
+        run: |
+          $expected = "${{ matrix.rid }}".Split('-')[-1]
+          $process = [System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString().ToLowerInvariant()
+          $hostArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
+          if ($process -ne $expected -or $hostArchitecture -ne $expected) {
+            throw "Runner/process architecture must match $expected; got host=$hostArchitecture process=$process."
+          }
 
       - name: Restore
         run: dotnet restore DncDbg.slnx

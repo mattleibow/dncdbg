@@ -16,6 +16,10 @@ public static class PrivateBootstrapPolicy
             "6907233237423C4CB8189F481F1CF5DA", "2AD1DCECBA0C66483A774B7CC77345E47C11456320602A48BCA5E4AB40155476",
             "E5520AE2A6593A3A9CBE2DD3B8B60DA7", "A6D01239286F0141DC3D6A90E425C022F96340CA052B41757D2AB26CC84FC0DC",
             "2267F3F5CDC63995B4E0D3B89F52C148", "81CB0104D53425EC22F006C382D706370C4B2A5A99A54FE816866C25ACF06928"),
+        new PrivateBootstrapIdentity("iOSSimulator", "X64", RuntimeVersion,
+            "F685A9CDD88037F9ABDF7271021C6192", "221BC56DA09E6096B6CDE00C2628E2037B394CB7A254A71886A9F1172F6FFF62",
+            "3C088149276A37239C5A8B244C1F33AD", "362BF9C28525D29E647BA1CE309C87A7F257208C0948317EDB24D199C29CA7C4",
+            "D6EA7FA5BA273AD5A9FE525510D2C2B0", "6A5327EA49D3CF0E70C574A712E75929490AC4C411AF7FE1FB7A4633E380E393"),
         new PrivateBootstrapIdentity("Android", "Arm64", RuntimeVersion,
             "F741D77EAE68D01DA37161129423DEC3AA9DFBF9", "E2FAE5E1F10FA61CDE54D9CC8E6E4537C3EDCE24B8E0216E078F655B04EACC92",
             "25A4607527A49B76F797C582AFB6D45338D2DB85", "363A647DCADB9D8200F2098B9C4313A6EC38735D970B6F2890D7A9951932A52A",
@@ -35,6 +39,10 @@ public static class PrivateBootstrapPolicy
             "6BB5037327BB336CB48F3CAE461D3F9D", "0B5E07630AAE52ABDC391D98ABF22C90C7C9BFC1A6BEFBB7C557569CB61C7451",
             "7D6858E2ECF73718A9271DA4ADFF870F", "A2C8AE76F6672443386E13857BAF5D0E3E864755C2BE35E491BDE78E2979BA02",
             "08BAFC49ED99342587271663A11B22BF", "4BE3A23608BDBF9025280B6FB6F5EE94EFF14C6C08CD539A8FCBB9FDA0816FD8"),
+        new PrivateBootstrapIdentity("MacOSNativeHost", "X64", RuntimeVersion,
+            "BC313A6081C13192805E07502C56B392", "782068C04EBDED5DFD0B5308364469CFA2E1B9C383D3C11907B481E49FA372A9",
+            "C9F0CCB1EC523DD299AB885075BADA81", "562C9EBA61FFB0AE1EEF2790A8BE005778D0C597BD67242B38184022910DBF69",
+            "E4F19686B46D3FEEA74856EE859E7E0B", "A9755752C632E73BC02992D8A2F8900419759012DB2E9F7F4F4E08AB0AEC8694"),
         new PrivateBootstrapIdentity("LinuxNativeHost", "X64", RuntimeVersion,
             "8690E42653274E4C3B79432A004274ECF37F6BAF", "6D38A042803BED1CA3C6D98A76B0A0707A572366DA0F88918FA06E4B87FDBB3D",
             "500279BBE68B8C45A2F7B2CD3B9163A86542D99C", "64B5CA1BD26EF8E833F6CBC4D39EED7BC3B4D31D1C0D1C6C822FD6A32ABAAD42",
@@ -50,10 +58,11 @@ public static class PrivateBootstrapPolicy
         string platform = OperatingSystem.IsMacOS() ? "MacOSNativeHost" :
             OperatingSystem.IsLinux() ? "LinuxNativeHost" : throw new PlatformNotSupportedException("Native hosting is POSIX-only.");
         string extension = OperatingSystem.IsMacOS() ? ".dylib" : ".so";
-        NativeImageIdentity clr = NativeImageIdentity.Read(Path.Combine(runtimeDirectory, "libcoreclr" + extension), platform);
-        NativeImageIdentity dbi = NativeImageIdentity.Read(Path.Combine(runtimeDirectory, "libmscordbi" + extension), platform);
-        NativeImageIdentity dac = NativeImageIdentity.Read(Path.Combine(runtimeDirectory, "libmscordaccore" + extension), platform);
-        var observed = new PrivateBootstrapIdentity(platform, System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture.ToString(),
+        string architecture = System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture.ToString();
+        NativeImageIdentity clr = NativeImageIdentity.Read(Path.Combine(runtimeDirectory, "libcoreclr" + extension), platform, architecture);
+        NativeImageIdentity dbi = NativeImageIdentity.Read(Path.Combine(runtimeDirectory, "libmscordbi" + extension), platform, architecture);
+        NativeImageIdentity dac = NativeImageIdentity.Read(Path.Combine(runtimeDirectory, "libmscordaccore" + extension), platform, architecture);
+        var observed = new PrivateBootstrapIdentity(platform, architecture,
             Path.GetFileName(Path.TrimEndingDirectorySeparator(runtimeDirectory)), clr.BuildId, clr.CodeHash,
             dbi.BuildId, dbi.CodeHash, dac.BuildId, dac.CodeHash);
         if (Validate(observed, ["DllMain", "CoreCLRCreateCordbObject3"]) is { } error)

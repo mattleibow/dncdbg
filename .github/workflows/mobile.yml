@@ -17,7 +17,7 @@ concurrency:
 jobs:
   ios:
     name: Mobile iOS simulator (pinned)
-    runs-on: macos-26
+    runs-on: macos-26-intel
     timeout-minutes: 50
     env:
       DOTNET_INSTALL_DIR: ${{ github.workspace }}/build/mobile-sdk
@@ -45,14 +45,14 @@ jobs:
       - name: Build, provision and prove exact iOS simulator tuple
         run: >-
           dotnet run --project tests/DncDbg.MobileTests -c Release --
-          --platform ios --xcode-dir /Applications/Xcode_26.6.app/Contents/Developer
+          --platform ios --ios-architecture x64 --xcode-dir /Applications/Xcode_26.6.app/Contents/Developer
           --output build/validation/mobile-ci/ios
       - name: Recover owned simulator and processes even after cancellation
         if: always() && hashFiles('build/validation/mobile-ci/ios/state.json') != ''
         timeout-minutes: 3
         run: >-
           dotnet run --project tests/DncDbg.MobileTests -c Release --no-build --
-          --platform ios --xcode-dir /Applications/Xcode_26.6.app/Contents/Developer
+          --platform ios --ios-architecture x64 --xcode-dir /Applications/Xcode_26.6.app/Contents/Developer
           --output build/validation/mobile-ci/ios --cleanup
       - name: Upload bounded iOS evidence
         if: always()

@@ -16,7 +16,7 @@ public static class ApplicationProfiles
     public static TargetProfile ForRid(string rid, string agentManifest)
     {
         string platform = rid.StartsWith("android-", StringComparison.Ordinal) ? "Android" :
-            rid == "iossimulator-arm64" ? "iOSSimulator" : rid == "ios-arm64" ? "iOSDevice" :
+            rid is "iossimulator-arm64" or "iossimulator-x64" ? "iOSSimulator" : rid == "ios-arm64" ? "iOSDevice" :
             throw new PlatformNotSupportedException("The application RID has no qualified runtime profile.");
         string architecture = rid.EndsWith("-x64", StringComparison.Ordinal) ? "X64" : "Arm64";
         PrivateBootstrapIdentity identity = PrivateBootstrapPolicy.SupportedBuilds.SingleOrDefault(x =>

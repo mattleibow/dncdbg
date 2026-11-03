@@ -60,6 +60,7 @@ class Suite:
         self.emulator_log = None
         self.broker_process = None
         self.android = PIN["androidX64" if getattr(args, "android_abi", "arm64-v8a") == "x86_64" else "android"]
+        self.ios = PIN["iosX64" if getattr(args, "ios_architecture", "arm64") == "x64" else "ios"]
 
     def save(self):
         self.state_path.write_text(json.dumps(self.state, indent=2))
@@ -142,7 +143,7 @@ class Suite:
 
     def preflight(self):
         require(os.name == "posix", "Device orchestration requires POSIX process ownership.")
-        system, architecture = (("Darwin", "arm64") if self.args.platform == "ios" else
+        system, architecture = (("Darwin", self.ios["hostArchitecture"]) if self.args.platform == "ios" else
                                 (self.android["hostSystem"], self.android["hostArchitecture"]))
         require(platform.system() == system and platform.machine() == architecture,
                 f"The selected pinned tuple requires {system}/{architecture}; never substitute another ABI.")
@@ -160,12 +161,12 @@ class Suite:
             require(self.args.xcode_dir is not None, "Select the pinned Xcode explicitly with --xcode-dir.")
             self.env["DEVELOPER_DIR"] = str(self.args.xcode_dir.resolve())
             version = self.run("xcodebuild", "-version").stdout
-            require(version.strip() == f"Xcode {PIN['ios']['xcode']}\nBuild version {PIN['ios']['xcodeBuild']}",
-                    f"Expected Xcode {PIN['ios']['xcode']} ({PIN['ios']['xcodeBuild']}), got {version!r}.")
+            require(version.strip() == f"Xcode {self.ios['xcode']}\nBuild version {self.ios['xcodeBuild']}",
+                    f"Expected Xcode {self.ios['xcode']} ({self.ios['xcodeBuild']}), got {version!r}.")
             runtimes = self.json("xcrun", "simctl", "list", "runtimes", "-j")["runtimes"]
-            require(any(r["identifier"] == PIN["ios"]["runtime"] and r.get("isAvailable") and
-                        r["buildversion"] == PIN["ios"]["runtimeBuild"] for r in runtimes),
-                    f"Required simulator runtime {PIN['ios']['runtime']} ({PIN['ios']['runtimeBuild']}) unavailable.")
+            require(any(r["identifier"] == self.ios["runtime"] and r.get("isAvailable") and
+                        r["buildversion"] == self.ios["runtimeBuild"] for r in runtimes),
+                    f"Required simulator runtime {self.ios['runtime']} ({self.ios['runtimeBuild']}) unavailable.")
         else:
             sdk = android_sdk()
             self.env["PATH"] = str(sdk / "emulator") + os.pathsep + self.env["PATH"]
@@ -204,8 +205,8 @@ class Suite:
             self.state["uiPort"] = reserve.getsockname()[1] if self.args.platform == "ios" else 9223
         self.save()
         if self.args.platform == "ios":
-            device = self.run("xcrun", "simctl", "create", name, PIN["ios"]["deviceType"],
-                              PIN["ios"]["runtime"]).stdout.strip()
+            device = self.run("xcrun", "simctl", "create", name, self.ios["deviceType"],
+                              self.ios["runtime"]).stdout.strip()
             self.state["device"] = device
             self.save()
             self.run("xcrun", "simctl", "boot", device)
@@ -271,7 +272,7 @@ class Suite:
         # Android's 9223 fallback is explicitly UI-only. No reverse/discovery claim is needed.
 
     def build(self, configuration="Debug", faults=False):
-        rid = "iossimulator-arm64" if self.args.platform == "ios" else self.android["rid"]
+        rid = self.ios["rid"] if self.args.platform == "ios" else self.android["rid"]
         tfm = "net11.0-" + self.args.platform
         if configuration == "Debug":
             command = [sys.executable, "src/DncDbg.Remote.Target/build.py", rid, "--configuration", "Debug"]
@@ -319,7 +320,7 @@ class Suite:
                  "--app", app, "--assets", assets, "--output", self.output / name,
                  "--ui-port", str(self.state["uiPort"]),
                  "--ui-session", self.state["name"],
-                 "--runtime-identifier", "iossimulator-arm64" if self.args.platform == "ios" else self.android["rid"],
+                 "--runtime-identifier", self.ios["rid"] if self.args.platform == "ios" else self.android["rid"],
                  timeout=900)
 
     def execute(self):
@@ -344,7 +345,7 @@ class Suite:
                    "--device", self.state["device"], "--app", str(app), "--assets", str(assets), "--output",
                    str(self.output / name), "--proof", proof, "--ui-session", self.state["name"],
                    "--ui-port", str(self.state["uiPort"]), "--runtime-identifier",
-                   "iossimulator-arm64" if self.args.platform == "ios" else self.android["rid"]]
+                   self.ios["rid"] if self.args.platform == "ios" else self.android["rid"]]
         if disconnect:
             command.append("--disconnect-stopped")
         self.run(*command, timeout=600)
@@ -491,8 +492,8 @@ class Suite:
                     "platform": self.args.platform, "pins": PIN, "passed": passed, "error": error,
                     "cleanup": self.state.get("cleanupDone", False),
                     "cleanupErrors": self.state.get("cleanupErrors", []), "files": {}}
-        if self.args.platform == "android":
-            manifest["runtimeIdentifier"] = self.android["rid"]
+        if self.args.platform in ("ios", "android"):
+            manifest["runtimeIdentifier"] = self.ios["rid"] if self.args.platform == "ios" else self.android["rid"]
         total = 0
         for path in self.output.rglob("*"):
             relative = path.relative_to(self.output)
@@ -527,6 +528,8 @@ def main():
     parser.add_argument("--platform", required=True, choices=["contracts", "ios", "android"])
     parser.add_argument("--output", type=Path)
     parser.add_argument("--xcode-dir", type=Path)
+    parser.add_argument("--ios-architecture", choices=["arm64", "x64"], default="arm64",
+                        help="Select the separately pinned simulator tuple; no host-architecture fallback")
     parser.add_argument("--android-abi", choices=["arm64-v8a", "x86_64"], default="arm64-v8a",
                         help="Explicit separate local Apple Silicon or hosted Linux/KVM tuple; no automatic substitution")
     parser.add_argument("--cleanup", action="store_true", help="Idempotent recovery using this run's ownership journal")

@@ -262,7 +262,7 @@ def main():
     parser.add_argument("--disconnect-stopped", action="store_true")
     parser.add_argument("--ui-session")
     parser.add_argument("--ui-port", type=int)
-    parser.add_argument("--runtime-identifier", choices=["iossimulator-arm64", "android-arm64", "android-x64"])
+    parser.add_argument("--runtime-identifier", choices=["iossimulator-arm64", "iossimulator-x64", "android-arm64", "android-x64"])
     args = parser.parse_args()
     if args.proof == "ui" and (not args.ui_session or args.ui_port is None or not 0 < args.ui_port <= 65535):
         parser.error("The DevFlow-only proof requires its explicit run identity and configured agent port.")

@@ -33,6 +33,12 @@ skipped on other operating systems.
 
 The target framework can be overridden with the `DNCDBG_TARGET_FRAMEWORK` environment variable (for example, `net8.0`); by default, the tests target `net10.0`.
 
+The required `Debugger (macos-latest)` check uses the official
+`macos-26-intel` runner and publishes an `osx-x64` adapter. Its stable context
+name is not an ARM64 coverage claim. The same complete suite remains runnable
+locally on Apple Silicon; remote native-host and simulator profiles preserve
+separate exact x64/ARM64 qualifications. No tests are skipped for Intel.
+
 For the managed debugger, build or publish from the repository root first:
 
 ```sh

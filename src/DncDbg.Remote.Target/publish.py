@@ -159,7 +159,7 @@ def write_inventory(output, rid):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--rid", required=True, choices=["linux-x64", "linux-arm64", "osx-arm64", "android-arm64", "android-x64", "iossimulator-arm64", "ios-arm64"])
+    parser.add_argument("--rid", required=True, choices=["linux-x64", "linux-arm64", "osx-arm64", "osx-x64", "android-arm64", "android-x64", "iossimulator-arm64", "iossimulator-x64", "ios-arm64"])
     parser.add_argument("--output", type=Path, required=True)
     runtime = parser.add_mutually_exclusive_group()
     runtime.add_argument("--include-runtime", action="store_true")

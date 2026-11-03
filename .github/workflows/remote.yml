@@ -47,7 +47,7 @@ jobs:
           if-no-files-found: error
   native:
     name: Remote native host (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner || matrix.os }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -57,7 +57,8 @@ jobs:
           - os: ubuntu-24.04
             rid: linux-x64
           - os: macos-26
-            rid: osx-arm64
+            runner: macos-26-intel
+            rid: osx-x64
     steps:
       - uses: actions/checkout@v4
         with:

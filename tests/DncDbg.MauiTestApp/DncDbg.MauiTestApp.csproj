@@ -99,6 +99,9 @@
 	<ItemGroup Condition="'$(Configuration)' == 'Debug' And '$(RuntimeIdentifier)' == 'iossimulator-arm64'">
 		<NativeReference Include="../../build/native-private/iossimulator-arm64/libdncdbg_target.a" Kind="Static" ForceLoad="true" IsCxx="true" SmartLink="false" />
 	</ItemGroup>
+	<ItemGroup Condition="'$(Configuration)' == 'Debug' And '$(RuntimeIdentifier)' == 'iossimulator-x64'">
+		<NativeReference Include="../../build/native-private/iossimulator-x64/libdncdbg_target.a" Kind="Static" ForceLoad="true" IsCxx="true" SmartLink="false" />
+	</ItemGroup>
 	<ItemGroup Condition="'$(Configuration)' == 'Debug' And '$(RuntimeIdentifier)' == 'ios-arm64'">
 		<NativeReference Include="../../build/native-private/ios-arm64/libdncdbg_target.a" Kind="Static" ForceLoad="true" IsCxx="true" SmartLink="false" />
 	</ItemGroup>
@@ -115,7 +118,7 @@
 	<Target Name="BuildDebugTargetAgent" BeforeTargets="PrepareForBuild" Condition="'$(Configuration)' == 'Debug' And '$(TargetFramework)' != ''">
 		<Error Condition="'$(UseMonoRuntime)' == 'true' Or '$(PublishAot)' == 'true'"
 		       Text="This qualified target agent requires CoreCLR, not Mono/NativeAOT." />
-		<Error Condition="'$(RuntimeIdentifier)' != 'iossimulator-arm64' And '$(RuntimeIdentifier)' != 'ios-arm64' And '$(RuntimeIdentifier)' != 'android-arm64' And '$(RuntimeIdentifier)' != 'android-x64'"
+		<Error Condition="'$(RuntimeIdentifier)' != 'iossimulator-arm64' And '$(RuntimeIdentifier)' != 'iossimulator-x64' And '$(RuntimeIdentifier)' != 'ios-arm64' And '$(RuntimeIdentifier)' != 'android-arm64' And '$(RuntimeIdentifier)' != 'android-x64'"
 		       Text="This fixture has qualified iOS simulator/Android RID assets only. Physical Apple targets require an independently qualified runtime profile and external device route." />
 		<Exec Command="python3 &quot;$(MSBuildProjectDirectory)/../../src/DncDbg.Remote.Target/build.py&quot; $(RuntimeIdentifier) --configuration Debug $(_DncDbgFaultArgument)" />
 	</Target>
@@ -134,6 +137,11 @@
 		<CodesignEntitlements>Platforms/iOS/Entitlements.Debug.plist</CodesignEntitlements>
 	</PropertyGroup>
 	<PropertyGroup Condition="'$(RuntimeIdentifier)' == 'iossimulator-arm64'">
+		<EnableCodeSigning>true</EnableCodeSigning>
+		<CodesignKey>-</CodesignKey>
+		<CodesignRequireProvisioningProfile>false</CodesignRequireProvisioningProfile>
+	</PropertyGroup>
+	<PropertyGroup Condition="'$(RuntimeIdentifier)' == 'iossimulator-x64'">
 		<EnableCodeSigning>true</EnableCodeSigning>
 		<CodesignKey>-</CodesignKey>
 		<CodesignRequireProvisioningProfile>false</CodesignRequireProvisioningProfile>

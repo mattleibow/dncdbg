@@ -37,7 +37,8 @@ internal static class TargetAgentStartup
         {
             bool apple = OperatingSystem.IsIOS();
             string platform = apple ? DeviceInfo.DeviceType == DeviceType.Virtual ? "iOSSimulator" : "iOSDevice" : "Android";
-            string rid = apple ? platform == "iOSSimulator" ? "iossimulator-arm64" : "ios-arm64" :
+            string rid = apple ? platform == "iOSSimulator"
+                ? RuntimeInformation.ProcessArchitecture == Architecture.X64 ? "iossimulator-x64" : "iossimulator-arm64" : "ios-arm64" :
                 RuntimeInformation.ProcessArchitecture == Architecture.X64 ? "android-x64" : "android-arm64";
             if (Native.ContractVersion() != RemoteContract.ModelVersion)
                 throw new PlatformNotSupportedException("Target agent/host model mismatch; redeploy matching RID assets.");
@@ -82,10 +83,11 @@ internal static class TargetAgentStartup
             string extension = apple ? ".dylib" : ".so";
             string directory = Path.GetDirectoryName(runtime)!;
             string dbi = Path.Combine(directory, "libmscordbi" + extension), dac = Path.Combine(directory, "libmscordaccore" + extension);
-            NativeImageIdentity clrImage = NativeImageIdentity.Read(runtime, platform);
-            NativeImageIdentity dbiImage = NativeImageIdentity.Read(dbi, platform);
-            NativeImageIdentity dacImage = NativeImageIdentity.Read(dac, platform);
-            var identity = new PrivateBootstrapIdentity(platform, RuntimeInformation.ProcessArchitecture.ToString(),
+            string architecture = RuntimeInformation.ProcessArchitecture.ToString();
+            NativeImageIdentity clrImage = NativeImageIdentity.Read(runtime, platform, architecture);
+            NativeImageIdentity dbiImage = NativeImageIdentity.Read(dbi, platform, architecture);
+            NativeImageIdentity dacImage = NativeImageIdentity.Read(dac, platform, architecture);
+            var identity = new PrivateBootstrapIdentity(platform, architecture,
                 RuntimeInformation.FrameworkDescription.Replace(".NET ", "", StringComparison.Ordinal),
                 clrImage.BuildId, clrImage.CodeHash, dbiImage.BuildId, dbiImage.CodeHash, dacImage.BuildId, dacImage.CodeHash);
             if (PrivateBootstrapPolicy.Validate(identity, ["DllMain", "CoreCLRCreateCordbObject3"]) is { } mismatch)

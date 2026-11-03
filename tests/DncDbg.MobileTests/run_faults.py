@@ -25,7 +25,7 @@ def main():
     parser.add_argument("--assets", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--ui-port", type=int, default=9223)
-    parser.add_argument("--runtime-identifier", choices=["iossimulator-arm64", "android-arm64", "android-x64"])
+    parser.add_argument("--runtime-identifier", choices=["iossimulator-arm64", "iossimulator-x64", "android-arm64", "android-x64"])
     parser.add_argument("--ui-session")
     args = parser.parse_args()
     args.output = args.output.resolve()

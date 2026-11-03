@@ -12,7 +12,7 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[2]
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("rid", nargs="?", choices=["iossimulator-arm64", "ios-arm64", "android-arm64", "android-x64", "osx-arm64", "linux-x64", "linux-arm64"])
+parser.add_argument("rid", nargs="?", choices=["iossimulator-arm64", "iossimulator-x64", "ios-arm64", "android-arm64", "android-x64", "osx-arm64", "osx-x64", "linux-x64", "linux-arm64"])
 parser.add_argument("--test-host", action="store_true", help="Run native contract fakes without loading a runtime or DBI")
 parser.add_argument("--test-faults", action="store_true", help="Explicit fixture-only watchdog fault injection; excluded from normal helpers")
 parser.add_argument("--configuration", choices=["Debug", "Release"], default="Debug")
@@ -54,7 +54,7 @@ if args.test_host:
     subprocess.run(command, cwd=ROOT, check=True)
     subprocess.run([str(test)], cwd=ROOT, check=True, timeout=30)
     raise SystemExit(0)
-if args.rid in ("osx-arm64", "linux-x64", "linux-arm64"):
+if args.rid in ("osx-arm64", "osx-x64", "linux-x64", "linux-arm64"):
     expected = ("osx-" if platform.system() == "Darwin" else "linux-") + (
         "arm64" if platform.machine() in ("arm64", "aarch64") else "x64")
     if args.rid != expected:
@@ -64,12 +64,14 @@ if args.rid in ("osx-arm64", "linux-x64", "linux-arm64"):
                "-dynamiclib" if platform.system() == "Darwin" else "-shared", "-o", str(library)]
     if platform.system() != "Darwin":
         command.append("-ldl")
-elif args.rid in ("iossimulator-arm64", "ios-arm64"):
-    sdk = subprocess.check_output(["xcrun", "--sdk", "iphonesimulator" if args.rid == "iossimulator-arm64" else "iphoneos", "--show-sdk-path"], text=True).strip()
+elif args.rid in ("iossimulator-arm64", "iossimulator-x64", "ios-arm64"):
+    simulator = args.rid.startswith("iossimulator-")
+    sdk = subprocess.check_output(["xcrun", "--sdk", "iphonesimulator" if simulator else "iphoneos", "--show-sdk-path"], text=True).strip()
     library = out / "libdncdbg_target.a"
     obj = out / "Bootstrap.o"
+    architecture = "x86_64" if args.rid.endswith("-x64") else "arm64"
     command = ["xcrun", "clang++", *common, "-target",
-               "arm64-apple-ios15.0-simulator" if args.rid == "iossimulator-arm64" else "arm64-apple-ios15.0",
+               architecture + "-apple-ios15.0" + ("-simulator" if simulator else ""),
                "-isysroot", sdk, "-c", "-o", str(obj)]
 else:
     sdk = os.environ.get("ANDROID_HOME") or os.environ.get("ANDROID_SDK_ROOT")
@@ -84,7 +86,7 @@ else:
     library = out / "libdncdbg_target.so"
     command = [str(compiler), *common, "-shared", "-static-libstdc++", "-ldl", "-o", str(library)]
 subprocess.run(command, cwd=ROOT, check=True)
-if args.rid in ("iossimulator-arm64", "ios-arm64"):
+if args.rid in ("iossimulator-arm64", "iossimulator-x64", "ios-arm64"):
     subprocess.run(["xcrun", "ar", "rcs", str(library), str(obj)], check=True)
 print(library.relative_to(ROOT))
 model = int(re.search(r"ModelVersion\s*=\s*(\d+)", (Path(__file__).parent / "RemoteContract.g.h").read_text()).group(1))

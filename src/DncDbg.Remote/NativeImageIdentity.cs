@@ -6,26 +6,26 @@ namespace DncDbg.Remote;
 /// <summary>Reads public image metadata without loading code. Apple signatures are excluded from the __text hash.</summary>
 public sealed record NativeImageIdentity(string BuildId, string CodeHash)
 {
-    public static NativeImageIdentity Read(string path, string platform)
+    public static NativeImageIdentity Read(string path, string platform, string? architecture = null)
     {
         using FileStream file = File.OpenRead(path);
         if (file.Length is < 64 or > 256 * 1024 * 1024)
             throw new InvalidDataException("Invalid native image size.");
         byte[] image = new byte[checked((int)file.Length)];
         file.ReadExactly(image);
-        return Read(image, platform);
+        return Read(image, platform, architecture);
     }
 
-    public static NativeImageIdentity Read(byte[] image, string platform)
+    public static NativeImageIdentity Read(byte[] image, string platform, string? architecture = null)
     {
         try
         {
             return platform switch
             {
-                "iOSSimulator" => MachO(image, 7),
-                "iOSDevice" => MachO(image, 2),
-                "MacOSNativeHost" => MachO(image, 1),
-                "Android" or "LinuxNativeHost" => Elf(image),
+                "iOSSimulator" => MachO(image, 7, architecture),
+                "iOSDevice" => MachO(image, 2, architecture ?? "Arm64"),
+                "MacOSNativeHost" => MachO(image, 1, architecture),
+                "Android" or "LinuxNativeHost" => Elf(image, architecture),
                 _ => throw new InvalidDataException("Unsupported native image platform."),
             };
         }
@@ -35,10 +35,12 @@ public sealed record NativeImageIdentity(string BuildId, string CodeHash)
         }
     }
 
-    private static NativeImageIdentity MachO(byte[] b, uint platform)
+    private static NativeImageIdentity MachO(byte[] b, uint platform, string? architecture)
     {
-        if (U32(b, 0) != 0xfeedfacf || U32(b, 4) != 0x0100000c)
-            throw new InvalidDataException("Expected thin arm64 Mach-O.");
+        string? cpu = U32(b, 4) switch { 0x0100000c => "Arm64", 0x01000007 => "X64", _ => null };
+        if (U32(b, 0) != 0xfeedfacf || cpu == null || architecture != null && cpu != architecture ||
+            platform == 2 && cpu != "Arm64")
+            throw new InvalidDataException("Expected thin Mach-O matching the explicit target architecture.");
         int commands = checked((int)U32(b, 16)), commandEnd = checked(32 + (int)U32(b, 20)), offset = 32;
         if (commands > 4096 || commandEnd > b.Length)
             throw new InvalidDataException("Invalid Mach-O commands.");
@@ -75,11 +77,14 @@ public sealed record NativeImageIdentity(string BuildId, string CodeHash)
             ? new(uuid, hash) : throw new InvalidDataException("Missing expected platform, UUID or executable code.");
     }
 
-    private static NativeImageIdentity Elf(byte[] b)
+    private static NativeImageIdentity Elf(byte[] b, string? architecture)
     {
         if (!b.AsSpan(0, 6).SequenceEqual(new byte[] { 0x7f, (byte)'E', (byte)'L', (byte)'F', 2, 1 }) ||
             BinaryPrimitives.ReadUInt16LittleEndian(b.AsSpan(18)) is not (183 or 62))
             throw new InvalidDataException("Expected a little-endian 64-bit ELF for the explicit target platform.");
+        string cpu = BinaryPrimitives.ReadUInt16LittleEndian(b.AsSpan(18)) == 183 ? "Arm64" : "X64";
+        if (architecture != null && cpu != architecture)
+            throw new InvalidDataException("ELF CPU differs from the explicit target architecture.");
         int table = checked((int)U64(b, 32));
         int stride = BinaryPrimitives.ReadUInt16LittleEndian(b.AsSpan(54));
         int count = BinaryPrimitives.ReadUInt16LittleEndian(b.AsSpan(56));

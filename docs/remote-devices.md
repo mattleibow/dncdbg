@@ -11,10 +11,12 @@ Architecture: [remote-architecture.md](remote-architecture.md).
 |---|---|---|---|
 | Linux x64 | `nativeHost`, `commands`, `ssh` | Hosted native host + required real Docker device | Not a hardware claim |
 | Linux arm64 | Same contracts/assets | Local Docker/device proof | Not a hardware claim |
-| macOS arm64 | `nativeHost` | Local and hosted native host | Host machine |
+| macOS x64 | `nativeHost` | Hosted `macos-26-intel` native host, exact separate runtime profile | Host machine |
+| macOS arm64 | `nativeHost` | Local native host; original qualification retained | Host machine |
 | Android x64 | `android`, ADB | Hosted Ubuntu 24.04/KVM exact emulator | Emulator only |
 | Android arm64 | `android`, ADB | Local exact emulator | USB/paired-TLS route implemented; **not executed on physical hardware** |
-| iOS simulator arm64 | `appleSimulator` | Local exact simulator; hosted macOS gate | Simulator only |
+| iOS simulator x64 | `appleSimulator`, explicit `iossimulator-x64` | Hosted Intel exact simulator; same full debugger/UI/fault suite | Simulator only |
+| iOS simulator arm64 | `appleSimulator`, default `iossimulator-arm64` | Local exact simulator; original qualification retained | Simulator only |
 | iOS arm64 device | `appleDevice` + structured commands + secure tunnel | Exact SDK runtime images/DBI exports and RID agent build checked | **Not executed; signing, entitlements and real-device debugger behavior require qualification** |
 
 This matrix describes implemented routes and required proofs, not the live state
@@ -30,6 +32,15 @@ version-fragile implementation dependency. Mono, NativeAOT, arbitrary framework
 versions and unlisted OS/architecture combinations are rejected. Adding another
 image requires exact build IDs/hashes/exports plus qualification, not a manifest
 override or roll-forward switch.
+
+The hosted macOS jobs use the official `macos-26-intel` image. Their existing
+required check names are stable; desktop artifacts are honestly named
+`osx-x64`, not `osx-arm64`. The desktop/native-host/iOS simulator x64 runtime
+identities are independently measured and pinned, never copied from ARM64.
+The mobile gate explicitly selects its x64 tuple and requires the same pinned
+Xcode 26.6 / 17F113, iOS 26.5 / 23F77 and .NET 11 RC1 versions as the retained
+ARM64 tuple. A host/tuple mismatch fails before provisioning; there is no
+architecture fallback or change to physical-device support claims.
 
 ## Common launch settings
 

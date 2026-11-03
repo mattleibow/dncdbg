@@ -92,6 +92,16 @@ internal static class PrivateBootstrapChecks
         NativeImageIdentity x64 = NativeImageIdentity.Read(image, "iOSSimulator");
         check(x64.BuildId == valid.BuildId && x64.CodeHash == valid.CodeHash,
             "inspect thin x64 simulator Mach-O metadata without loading ARM code");
+        bool rejectedArchitecture = false;
+        try { _ = NativeImageIdentity.Read(image, "iOSSimulator", "Arm64"); }
+        catch (InvalidDataException) { rejectedArchitecture = true; }
+        check(rejectedArchitecture, "reject x64 image when ARM architecture is requested");
+        try
+        {
+            _ = NativeImageIdentity.Read(image, "iOSDevice");
+            throw new InvalidOperationException("Simulator x64 image accepted for a physical device.");
+        }
+        catch (InvalidDataException) { check(true, "reject x64 simulator image as a physical Apple device"); }
         Write(4, 0x01000012);
         RejectImage("reject unqualified Mach-O CPU before target activation");
         using var prior = new RemoteLeaseTable<int>(_ => { });

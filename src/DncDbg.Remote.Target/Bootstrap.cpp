@@ -106,11 +106,11 @@ void Report(const char* phase, HResult result = 0) {
 }
 
 bool PlatformAllowed() {
-#if defined(__aarch64__) && defined(__APPLE__) && TARGET_OS_IOS
+#if defined(__APPLE__) && TARGET_OS_IOS && (defined(__aarch64__) || (defined(__x86_64__) && TARGET_OS_SIMULATOR))
     return true;
 #elif (defined(__aarch64__) || defined(__x86_64__)) && defined(__ANDROID__)
     return true;
-#elif defined(DNCDBG_NATIVE_HOST) && defined(__APPLE__) && !TARGET_OS_IPHONE && defined(__aarch64__)
+#elif defined(DNCDBG_NATIVE_HOST) && defined(__APPLE__) && !TARGET_OS_IPHONE && (defined(__aarch64__) || defined(__x86_64__))
     return true;
 #elif defined(DNCDBG_NATIVE_HOST) && defined(__linux__) && !defined(__ANDROID__) && (defined(__aarch64__) || defined(__x86_64__))
     return true;

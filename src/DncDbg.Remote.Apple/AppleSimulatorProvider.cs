@@ -32,11 +32,11 @@ public sealed class AppleSimulatorProvider : IRemoteTargetProvider
     {
         this.options = options;
         this.installation = installation;
-        if (options.RuntimeIdentifier != "iossimulator-arm64" || !Regex.IsMatch(options.DeviceId, @"\A[A-Za-z0-9-]+\z") ||
+        if (options.RuntimeIdentifier is not ("iossimulator-arm64" or "iossimulator-x64") || !Regex.IsMatch(options.DeviceId, @"\A[A-Za-z0-9-]+\z") ||
             !Regex.IsMatch(options.ApplicationId, @"\A[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+\z") ||
             !Directory.Exists(options.AppPath) || !options.AppPath.EndsWith(".app", StringComparison.OrdinalIgnoreCase))
             throw new ArgumentException("Apple simulator targets require exact IDs and an installable app bundle.");
-        Profile = ApplicationProfiles.ForRid("iossimulator-arm64", agentManifest);
+        Profile = ApplicationProfiles.ForRid(options.RuntimeIdentifier, agentManifest);
         package = ApplicationPackagePolicy.Read(agentManifest);
     }
 

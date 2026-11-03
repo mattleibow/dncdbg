@@ -1,6 +1,10 @@
 {
   "version": "11.0.0-rc.1.26425.128",
   "archives": {
+    "osx-x64": {
+      "url": "https://builds.dotnet.microsoft.com/dotnet/Runtime/11.0.0-rc.1.26425.128/dotnet-runtime-11.0.0-rc.1.26425.128-osx-x64.tar.gz",
+      "sha512": "20583d77364642cd71b2575ea08731aa58afcf3b5979a6a7d6e434be1ddd6956521448fb259b3570156ef6fae792cc935f6ebd35d6239ac2e310fb030ea5aa59"
+    },
     "linux-arm64": {
       "url": "https://builds.dotnet.microsoft.com/dotnet/Runtime/11.0.0-rc.1.26425.128/dotnet-runtime-11.0.0-rc.1.26425.128-linux-arm64.tar.gz",
       "sha512": "f1e62a94b3b9a911833e35ccc8e2460032e2df1c936d22799630e32f61329c1b1bb90b7cedde7d37fef3d5c2d1e59c5623b2b1f6ee1c11b15c4b68e0a059c6a7"

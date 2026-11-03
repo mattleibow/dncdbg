@@ -54,7 +54,8 @@ The runner scopes the fixture's restore graph to the selected platform using
 an iOS job does not require the Android workload. Project references retain
 their own target frameworks.
 
-- **iOS:** Apple Silicon, Xcode **26.6 / 17F113**, simulator runtime
+- **iOS:** separately pinned Apple Silicon (`iossimulator-arm64`, the default)
+  and Intel (`--ios-architecture x64`, `iossimulator-x64`) tuples, Xcode **26.6 / 17F113**, simulator runtime
   **iOS 26.5 / 23F77**, device type **iPhone 17 Pro**. `DEVELOPER_DIR` is scoped;
   no global `xcode-select` change, runtime download or nearest-device fallback.
   Simulator artifacts are signed ad hoc (`CodesignKey=-`) with the Debug
@@ -199,10 +200,17 @@ remains a red gate, never a successful skip.
 `pull_request` targeting `main` and pushes to `main` (no path filters or
 `continue-on-error`):
 
-- **`Mobile iOS simulator (pinned)`** uses hosted **`macos-26`**, installs the exact
+- **`Mobile iOS simulator (pinned)`** uses hosted **`macos-26-intel`** and explicitly
+  selects `--ios-architecture x64`. It installs the exact
   SDK/workload and requires the pinned Xcode/runtime already listed by the
   [official runner image](https://github.com/actions/runner-images/blob/main/images/macos/macos-26-arm64-Readme.md).
   Image rotation/removal is a red infrastructure gate, never a silent skip.
+  The x64 CoreCLR/DBI/DAC UUIDs, code hashes and required exports are independent
+  of the retained ARM64 profile. Post-link sealing measures the final signed
+  executable with its linked x64 agent, not the intermediate static archive.
+  The complete debugger, direct app-control, strict DevFlow UI and fault/cleanup
+  sequence is identical for both tuples. Selecting the wrong host architecture
+  fails before SDK/device provisioning; there is no silent ABI fallback.
 - **`Mobile Android emulator (pinned)`** uses hosted **`ubuntu-24.04`**,
   explicitly enables/checks KVM and runs the **entire same** unified suite with
   the separate x64 pins. It does not merely cross-build an APK, run host fakes,

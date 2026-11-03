@@ -643,6 +643,10 @@ class Program
                 Context.GetAndCheckValue(@"__FILE__:__LINE__", frameId, "\"slash\\\\n\"", "string", "@\"slash\\n\"");
                 Context.GetAndCheckValue(@"__FILE__:__LINE__", frameId, "\"utf8\"", "string", "@\"utf8\"u8");
                 Context.GetAndCheckValue(@"__FILE__:__LINE__", frameId, "\"utf8\"", "string", "@\"utf8\"U8");
+                Context.GetAndCheckValue(@"__FILE__:__LINE__", frameId, "\"text\\\"text\"", "string", "@\"text\"\"text\"");
+                Context.GetAndCheckValue(@"__FILE__:__LINE__", frameId, "\"text\\\\n\"", "string", "@\"text\\n\"");
+                Context.GetAndCheckValue(@"__FILE__:__LINE__", frameId, "\"text\"", "string", "@\"text\"u8");
+                Context.GetAndCheckValue(@"__FILE__:__LINE__", frameId, "\"text\"", "string", "@\"text\"U8");
                 Context.CheckErrorAtRequest(@"__FILE__:__LINE__", frameId, "1UL + 1", "error");
                 Context.CheckErrorAtRequest(@"__FILE__:__LINE__", frameId, "true + 1", "error");
                 Context.CheckErrorAtRequest(@"__FILE__:__LINE__", frameId, "1 + not_var", "error");

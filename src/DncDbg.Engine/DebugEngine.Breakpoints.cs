@@ -501,7 +501,7 @@ public sealed partial class DebugEngine
     // "{expression}" is replaced by its value; "{{" and "}}" are literal braces
     /// <param name="quoteStrings">false for log messages, true for [DebuggerDisplay] (where ",nq" removes the quotes).</param>
     private static string FormatLogMessage(string template, Evaluator evaluator, bool quoteStrings = false,
-        IReadOnlyDictionary<string, string>? logpointTokens = null)
+        IReadOnlyDictionary<string, Lazy<string>>? logpointTokens = null)
     {
         var sb = new System.Text.StringBuilder();
         for (int i = 0; i < template.Length; i++)
@@ -535,9 +535,11 @@ public sealed partial class DebugEngine
                 try
                 {
                     bool hasTokens = logpointTokens != null && logpointTokens.Keys.Any(expression.Contains);
+                    bool hasNameTokens = hasTokens && (expression.Contains("$FUNCTION", StringComparison.Ordinal)
+                        || expression.Contains("$TNAME", StringComparison.Ordinal));
                     if (hasTokens)
                         expression = ExpandLogpointTokens(expression, logpointTokens!);
-                    sb.Append(evaluator.EvaluateToText(expression, quoteStrings || hasTokens));
+                    sb.Append(evaluator.EvaluateToText(expression, quoteStrings || hasTokens, escapeUnquotedStrings: hasNameTokens));
                 }
                 catch (DebuggerException e)
                 {
@@ -556,7 +558,7 @@ public sealed partial class DebugEngine
         return sb.ToString();
     }
 
-    private IReadOnlyDictionary<string, string> CreateLogpointTokens(UserBreakpoint breakpoint, FrameRef frame)
+    private IReadOnlyDictionary<string, Lazy<string>> CreateLogpointTokens(UserBreakpoint breakpoint, FrameRef frame)
     {
         ulong address = 0;
         string path = breakpoint.Path!;
@@ -582,19 +584,57 @@ public sealed partial class DebugEngine
         {
             Log?.Invoke("Logpoint source/native address unavailable: " + error.Message);
         }
-        return new Dictionary<string, string>(StringComparer.Ordinal)
+        return new Dictionary<string, Lazy<string>>(StringComparer.Ordinal)
         {
-            ["$FILEPOS"] = VerbatimLiteral(path + ":" + line.ToString(System.Globalization.CultureInfo.InvariantCulture)),
-            ["$ADDRESS"] = VerbatimLiteral("0x" + address.ToString("x16", System.Globalization.CultureInfo.InvariantCulture)),
-            ["$TID"] = "$tid",
-            ["$PID"] = "$pid",
-            ["$HITCOUNT"] = breakpoint.HitCount.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            ["$FILEPOS"] = new(() => VerbatimLiteral(path + ":" + line.ToString(System.Globalization.CultureInfo.InvariantCulture))),
+            ["$FUNCTION"] = new(() => VerbatimLiteral(GetLogpointFunctionName(frame))),
+            ["$ADDRESS"] = new(() => VerbatimLiteral("0x" + address.ToString("x16", System.Globalization.CultureInfo.InvariantCulture))),
+            ["$TID"] = new(() => "$tid"),
+            ["$PID"] = new(() => "$pid"),
+            ["$TNAME"] = new(() => VerbatimLiteral(GetLogpointThreadName(frame.ThreadId))),
+            ["$HITCOUNT"] = new(() => breakpoint.HitCount.ToString(System.Globalization.CultureInfo.InvariantCulture)),
         };
+    }
+
+    private string GetLogpointFunctionName(FrameRef frame)
+    {
+        try
+        {
+            CorDebugILFrame current = RequireILFrame(frame);
+            ModuleMetadata? metadata = GetMetadata(current.Function.Module);
+            if (metadata != null)
+            {
+                int token = (int)current.Function.Token.Value;
+                List<string?>? typeArguments = GetTypeArgumentNames(current);
+                return metadata.GetMethodName(token, typeArguments)
+                    + metadata.GetParameterDisplay(token, typeArguments, GetArgumentTypeNames(current, metadata, token));
+            }
+            Log?.Invoke("Logpoint function name unavailable: method metadata not found.");
+        }
+        catch (Exception error) when (error is COMException or DebuggerException)
+        {
+            Log?.Invoke("Logpoint function name unavailable: " + error.Message);
+        }
+        return "[Unnamed managed method in optimized code]";
+    }
+
+    private string GetLogpointThreadName(int threadId)
+    {
+        try
+        {
+            return ReadThreadName(RequireThread(threadId))
+                ?? (!_isAttach && threadId == _firstThreadId ? "Main Thread" : "<No name>");
+        }
+        catch (Exception error) when (error is COMException or DebuggerException)
+        {
+            Log?.Invoke("Logpoint thread name unavailable: " + error.Message);
+            return "<No name>";
+        }
     }
 
     private static string VerbatimLiteral(string text) => "@\"" + text.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
 
-    private static string ExpandLogpointTokens(string expression, IReadOnlyDictionary<string, string> values)
+    private static string ExpandLogpointTokens(string expression, IReadOnlyDictionary<string, Lazy<string>> values)
     {
         var result = new System.Text.StringBuilder();
         int position = 0;
@@ -614,7 +654,7 @@ public sealed partial class DebugEngine
             result.Append(expression, position, next - position);
             if (match == null)
                 break;
-            result.Append(values[match]);
+            result.Append(values[match].Value);
             position = next + match.Length;
         }
         return result.ToString();

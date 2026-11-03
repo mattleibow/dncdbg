@@ -121,10 +121,13 @@ public sealed partial class DebugEngine
         public object? EvaluateToHost(string expression) => ToHost(Run(expression));
 
         /// <summary>Display text of the value; <paramref name="quoteStrings"/> is what ",nq" would turn off anyway.</summary>
-        public string EvaluateToText(string expression, bool quoteStrings)
+        public string EvaluateToText(string expression, bool quoteStrings, bool escapeUnquotedStrings = false)
         {
             (string code, DisplayOptions options) = SplitFormatSpecifiers(expression, new DisplayOptions(NoQuotes: !quoteStrings));
-            return ToVariable(expression, Run(code), options).Value;
+            bool escapedNoQuotes = escapeUnquotedStrings && options.NoQuotes;
+            VariableInfo result = ToVariable(expression, Run(code), escapedNoQuotes ? options with { NoQuotes = false } : options);
+            return escapedNoQuotes && result.Type == "string" && result.Value.StartsWith('"') && result.Value.EndsWith('"')
+                ? result.Value[1..^1] : result.Value;
         }
 
         // "expression,h" / ",nq" / ",raw" / ",d": the debugger's format specifiers, which are not C#

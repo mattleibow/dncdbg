@@ -72,7 +72,7 @@ class FixtureApp:
         self.journal("command-start", executable=name)
         try:
             result = run_owned(*command, check=False, input=input, timeout=timeout, cwd=ROOT, env=env or os.environ,
-                               log=self.args.output / log if log else None)
+                               log=self.args.output / log if log else None, journal=self.journal)
         except BaseException as error:
             self.journal("command-error", executable=name, error=type(error).__name__)
             raise

@@ -62,9 +62,24 @@ class FixtureApp:
         self.installed = False
         self.container = None
 
+    def journal(self, phase, **values):
+        with (self.args.output / "ownership.jsonl").open("a") as stream:
+            stream.write(json.dumps({"phase": phase, "controllerPid": os.getpid(),
+                                     "time": time.monotonic(), **values}) + "\n")
+
     def run(self, *command, check=True, input=None, timeout=60, log=None, env=None):
-        return run_owned(*command, check=check, input=input, timeout=timeout, cwd=ROOT, env=env or os.environ,
-                         log=self.args.output / log if log else None)
+        name = Path(str(command[0])).name
+        self.journal("command-start", executable=name)
+        try:
+            result = run_owned(*command, check=False, input=input, timeout=timeout, cwd=ROOT, env=env or os.environ,
+                               log=self.args.output / log if log else None)
+        except BaseException as error:
+            self.journal("command-error", executable=name, error=type(error).__name__)
+            raise
+        self.journal("command-exit", executable=name, exitCode=result.returncode)
+        if check and result.returncode:
+            raise RuntimeError(f"{name} failed ({result.returncode}): {(result.stdout + result.stderr)[-4000:]}")
+        return result
 
     def device(self, *command, **kwargs):
         return self.run(*self.serial, *command, **kwargs)
@@ -153,8 +168,83 @@ class FixtureApp:
             matches = [p for p in phases if p["Phase"] == phase]
             assert len(matches) == 1 and matches[0]["HResult"] == "0x00000000", phase
 
+    def capture(self, phase):
+        destination = self.args.output / phase
+        destination.mkdir(exist_ok=True)
+        limit = 256 * 1024
+        secrets, errors = [], []
+
+        def redacted(value):
+            if isinstance(value, dict):
+                result = {}
+                for key, item in value.items():
+                    if any(part in key.lower() for part in ("token", "password", "secret", "authorization")):
+                        if isinstance(item, str) and item:
+                            secrets.append(item)
+                    else:
+                        result[key] = redacted(item)
+                return result
+            if isinstance(value, list):
+                return [redacted(item) for item in value]
+            return value
+
+        def save(name, text):
+            for secret in secrets:
+                text = text.replace(secret, "<redacted>")
+            (destination / name).write_bytes(text.encode()[-limit:])
+
+        def collect(name, action):
+            try:
+                save(name, action())
+            except Exception as error:
+                errors.append({"file": name, "error": type(error).__name__})
+
+        def read(name):
+            if self.serial:
+                result = self.device("shell", "-T", "run-as", APP, "tail", "-c", str(limit),
+                                     "files/" + name, check=False, timeout=10)
+                if result.returncode:
+                    raise RuntimeError("Target diagnostic unavailable")
+                return result.stdout
+            path = self.container / "Library" / name
+            with path.open("rb") as stream:
+                stream.seek(max(0, path.stat().st_size - limit))
+                return stream.read(limit).decode(errors="replace")
+
+        for name in ("dncdbg-remote.json", "dncdbg-fixture-control.json"):
+            collect(name, lambda name=name: json.dumps(redacted(json.loads(read(name))), indent=2))
+        collect("native-report.jsonl", lambda: read("dncdbg-startup.jsonl"))
+        if self.serial:
+            commands = {
+                "process.log": ("shell", "pidof", APP),
+                "forwards.log": ("forward", "--list"),
+                "reverse.log": ("reverse", "--list"),
+            }
+            descriptor = destination / "dncdbg-remote.json"
+            pid = json.loads(descriptor.read_text())["Process"]["Id"] if descriptor.exists() else None
+            if isinstance(pid, int) and pid > 0:
+                commands |= {
+                    "target-state.log": ("shell", "ps", "-p", str(pid), "-o", "PID,PPID,STAT,NAME"),
+                    "logcat.log": ("logcat", "-d", "-t", "800", "--pid=" + str(pid)),
+                    "crash.log": ("logcat", "-b", "crash", "-d", "-t", "200", "--pid=" + str(pid)),
+                }
+            for name, command in commands.items():
+                def snapshot(command=command):
+                    result = self.device(*command, check=False, timeout=10)
+                    return f"exitCode={result.returncode}\n{result.stdout}{result.stderr}"
+                collect(name, snapshot)
+        save("state.json", json.dumps({"phase": phase, "controllerPid": os.getpid(),
+             "controllerGroup": os.getpgrp(), "device": self.args.device, "installed": self.installed,
+             "forwards": self.forwards, "reverse": self.reverse, "errors": errors}, indent=2))
+        self.journal("capture", snapshot=phase, errors=errors)
+        if errors:
+            raise RuntimeError("Incomplete diagnostic capture: " + json.dumps(errors))
+
     def close(self):
         failures = []
+        if self.installed:
+            try: self.capture("before-cleanup")
+            except Exception as error: failures.append(str(error))
         def cleanup(*command, allow_failure=False):
             try: self.run(*command, check=not allow_failure)
             except Exception as error: failures.append(str(error))
@@ -175,6 +265,7 @@ class FixtureApp:
             if any(f" tcp:{port} " in " " + mappings.replace("\n", " ") + " " for port in self.forwards):
                 failures.append("Owned debugger/control forwarding remains")
         if self.reverse: cleanup(*self.serial, "reverse", "--remove", "tcp:19223")
+        self.journal("cleanup-finished", installed=self.installed, forwards=self.forwards, errors=failures)
         for name in ("endpoint.json", "fixture.json"):
             (self.args.output / "assets" / name).unlink(missing_ok=True)
         if failures: raise RuntimeError("Independent fixture cleanup failed: " + "; ".join(failures))

@@ -16,7 +16,8 @@ internal static class MobileBreakpointProof
             .Single(x => x.text.Contains("// MOBILE_BREAKPOINT", StringComparison.Ordinal)).index + 1;
         RemoteManagedLocation location = ReadLocation(source, line, assembly, pdbPath);
         RemoteEndpoint endpoint = JsonSerializer.Deserialize(File.ReadAllText(descriptor), RemoteJson.Default.RemoteEndpoint)!;
-        await using RemoteDebugClient client = await RemoteDebugClient.ConnectAsync(endpoint, token);
+        long sequence = 0;
+        await using RemoteDebugClient client = await Rpc(RemoteOperation.Hello, () => RemoteDebugClient.ConnectAsync(endpoint, token));
         Require(client.Capabilities.ManagedDebugging && client.Capabilities.Bootstrap == PrivateBootstrapPolicy.Bootstrap &&
             client.Capabilities.SupportedBuild is { } supported &&
             PrivateBootstrapPolicy.Validate(supported, ["DllMain", "CoreCLRCreateCordbObject3"]) == null, "exact pinned private capability");
@@ -26,31 +27,32 @@ internal static class MobileBreakpointProof
             "fixture control belongs to the exact debugger process/generation");
         Require(!fixture.BrokerRequired, "independent debugger fixture has no registered DevFlow transport");
         var control = new FixtureControlClient(fixture);
-        await client.SetBreakpointsAsync(new(source, [line], location), token);
+        await Rpc(RemoteOperation.SetBreakpoints, () => client.SetBreakpointsAsync(new(source, [line], location), token));
         Require(await control.CommandAsync("reset", token) == new FixtureState(0, "Count: 0", "Result: not run"),
             "app-local deterministic reset needs no UI automation broker");
-        await client.StartAsync(token);
-        Task<RemoteStop> waiting = client.WaitForStopAsync(token);
+        await Rpc(RemoteOperation.Start, () => client.StartAsync(token));
+        Task<RemoteStop> waiting = Rpc(RemoteOperation.WaitForStop, () => client.WaitForStopAsync(token));
         Task<FixtureState> run = control.CommandAsync("run", token);
         RemoteStop stop = await waiting;
         Require(stop.Reason == "breakpoint", "real target-native managed breakpoint callback");
-        RemoteFrame[] stack = await client.StackAsync(stop.Id, token);
+        RemoteFrame[] stack = await Rpc(RemoteOperation.Stack, () => client.StackAsync(stop.Id, token));
         Require(stack.Length > 0 && stack[0].Name == location.Method && stack[0].Source == source &&
             stack[0].Line == line, "exact MOBILE_BREAKPOINT stack/source/line");
-        string input = (await client.EvaluateAsync(stack[0].Handle, "input", token)).Value;
-        string answer = (await client.EvaluateAsync(stack[0].Handle, "answer", token)).Value;
-        string expression = (await client.EvaluateAsync(stack[0].Handle, "answer + 1", token)).Value;
+        string input = (await Rpc(RemoteOperation.Evaluate, () => client.EvaluateAsync(stack[0].Handle, "input", token))).Value;
+        string answer = (await Rpc(RemoteOperation.Evaluate, () => client.EvaluateAsync(stack[0].Handle, "answer", token))).Value;
+        string expression = (await Rpc(RemoteOperation.Evaluate, () => client.EvaluateAsync(stack[0].Handle, "answer + 1", token))).Value;
         Require(input == "1" && answer == "42" && expression == "43", "target ICorDebug argument/local/int32 expression: 1/42/43");
         Console.WriteLine(JsonSerializer.Serialize(new { Stop = stop, Stack = stack, Input = input, Answer = answer, Expression = expression }));
+        Console.WriteLine(JsonSerializer.Serialize(new { Phase = "transport-close-or-continue", DisconnectStopped = disconnect }));
         if (disconnect)
             await client.DisposeAsync();
         else
         {
-            await client.ReleaseAsync([stack[0].Handle], token);
-            await Invalid(() => client.EvaluateAsync(stack[0].Handle, "answer", token));
-            await client.ContinueAsync(stop.Id, token);
-            await Invalid(() => client.ContinueAsync(stop.Id, token));
-            await Invalid(() => client.EvaluateAsync(stack[^1].Handle, "answer", token));
+            await Rpc(RemoteOperation.Release, () => client.ReleaseAsync([stack[0].Handle], token));
+            await Invalid(() => Rpc(RemoteOperation.Evaluate, () => client.EvaluateAsync(stack[0].Handle, "answer", token)));
+            await Rpc(RemoteOperation.Continue, () => client.ContinueAsync(stop.Id, token));
+            await Invalid(() => Rpc(RemoteOperation.Continue, () => client.ContinueAsync(stop.Id, token)));
+            await Invalid(() => Rpc(RemoteOperation.Evaluate, () => client.EvaluateAsync(stack[^1].Handle, "answer", token)));
             await client.DisposeAsync();
         }
         Require(await run.WaitAsync(token) == new FixtureState(1, "Count: 1", "Result: 42"), "continued fixture state is exactly 1/42");
@@ -60,6 +62,25 @@ internal static class MobileBreakpointProof
             "detached scenario still executes normally without the debugger or broker");
         Console.WriteLine(disconnect ? "PASS: mobile disconnect relinquishes the callback stop; scenario completed normally"
             : "PASS: mobile continue completed normally; duplicate continue and stale handles rejected");
+        async Task<T> Rpc<T>(RemoteOperation operation, Func<Task<T>> action)
+        {
+            long id = ++sequence;
+            Trace("request");
+            try
+            {
+                T result = await action();
+                Trace("response");
+                return result;
+            }
+            catch (Exception error)
+            {
+                Trace(error.GetType().Name);
+                throw;
+            }
+            void Trace(string phase) => Console.WriteLine(JsonSerializer.Serialize(
+                new { Protocol = "DNC1", Sequence = id, Operation = (int)operation, Phase = phase,
+                    Time = DateTimeOffset.UtcNow }));
+        }
         async Task Invalid(Func<Task> action)
         {
             try { await action(); }

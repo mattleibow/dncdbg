@@ -224,6 +224,12 @@ arm64 admission. No permanently queued self-hosted job remains.
 Hosted capacity cancellation is infrastructure red, not a successful skip.
 Generic desktop CI/fakes and historical local evidence **do not make mobile green**.
 
+The portable DAP contracts use two independent process batches on both host
+architectures. Every discovered case runs once, either failure makes the command
+fail, and children remain in the owned process group for timeout cleanup.
+The existing 180-second aggregate budget and individual protocol/fault deadlines
+are unchanged; no mobile device proof is replaced by these portable contracts.
+
 Require **both named mobile jobs** in branch protection alongside all existing
 Debugger Windows/Linux/macOS, Docker and VS Code checks. Workflow triggers create
 checks but do not themselves configure repository branch protection. Never merge

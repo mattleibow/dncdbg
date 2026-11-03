@@ -1116,4 +1116,22 @@ daemon(state, sys.argv[2])
 if __name__ == "__tool__":
     tool()
 elif __name__ == "__main__":
+    if sys.argv[1:] == ["--parallel"]:
+        # Every case owns UUID-scoped files, ports and tool environments.
+        names = ["MobileDapTests." + name for name in unittest.defaultTestLoader.getTestCaseNames(MobileDapTests)]
+        children = []
+        try:
+            for shard in range(2):
+                children.append(subprocess.Popen([sys.executable, str(Path(__file__).resolve()), *names[shard::2]]))
+            failed = any([child.wait() != 0 for child in children])
+        finally:
+            for child in children:
+                if child.poll() is None:
+                    child.terminate()
+                    try:
+                        child.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        child.kill()
+                        child.wait()
+        raise SystemExit(1 if failed else 0)
     unittest.main()

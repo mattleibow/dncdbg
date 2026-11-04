@@ -122,6 +122,23 @@ class MobileRunnerTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "verified SDK environment"):
                 self.suite.preflight()
 
+    def test_ios_preserves_runner_native_temporary_environment_for_system_services(self):
+        for architecture, host in (("arm64", "arm64"), ("x64", "x86_64")):
+            output = self.output / architecture
+            suite = Suite(Namespace(platform="ios", output=output, xcode_dir=None, ios_architecture=architecture))
+            native = dict(os.environ) | {"TMPDIR": "/runner/native-user-temp/"}
+            def verify(*args, **kwargs):
+                self.assertEqual(suite.env["TMPDIR"], native["TMPDIR"])
+                self.assertEqual(suite.env["DOTNET_CLI_USE_MSBUILD_SERVER"], "false")
+                raise RuntimeError("native environment verified")
+            with self.subTest(architecture=architecture), \
+                    patch("run_suite.platform.system", return_value="Darwin"), \
+                    patch("run_suite.platform.machine", return_value=host), \
+                    patch("run_suite.tool_environment", return_value=native), \
+                    patch.object(suite, "run", side_effect=verify):
+                with self.assertRaisesRegex(RuntimeError, "native environment verified"):
+                    suite.preflight()
+
     def test_simulator_signing_does_not_require_a_developer_identity_or_device_profile(self):
         project = ET.parse(ROOT / "tests/DncDbg.MauiTestApp/DncDbg.MauiTestApp.csproj").getroot()
         groups = [group for group in project.findall("PropertyGroup")

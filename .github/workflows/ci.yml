@@ -57,12 +57,15 @@ jobs:
         id: python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: "3.13.15"
 
       - name: Install portable contract dependencies
         if: runner.os != 'Windows'
         shell: bash
-        run: '"${{ steps.python.outputs.python-path }}" -m pip install --disable-pip-version-check -r tests/DncDbg.RemoteTests/requirements.txt'
+        run: |
+          "${{ steps.python.outputs.python-path }}" -m venv build/contract-python
+          build/contract-python/bin/python -m pip install --disable-pip-version-check --require-hashes --no-deps --only-binary=:all: -r tests/DncDbg.RemoteTests/requirements.txt
+          build/contract-python/bin/python -m pip check
 
       - name: Verify native runner matches the artifact RID
         shell: pwsh
@@ -102,7 +105,7 @@ jobs:
       - name: Check native target ownership contracts (no mobile runtime)
         if: runner.os != 'Windows'
         env:
-          DNCDBG_PYTHON: ${{ steps.python.outputs.python-path }}
+          DNCDBG_PYTHON: ${{ github.workspace }}/build/contract-python/bin/python
         run: dotnet run --project tests/DncDbg.MobileTests --configuration Release --no-build -- --platform contracts --output build/validation/mobile-contracts
 
       - name: Upload portable mobile contract evidence

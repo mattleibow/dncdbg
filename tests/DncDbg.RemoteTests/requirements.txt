@@ -1,1 +1,15 @@
-jsonschema==4.25.1
+# CPython 3.13: Linux glibc x64/arm64 and macOS x64/arm64.
+# Install the complete closure with --require-hashes --no-deps --only-binary=:all:.
+attrs==26.1.0 \
+    --hash=sha256:c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309
+jsonschema==4.25.1 \
+    --hash=sha256:3fba0169e345c7175110351d456342c364814cfcf3b964ba4587f22915230a63
+jsonschema-specifications==2025.9.1 \
+    --hash=sha256:98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe
+referencing==0.37.0 \
+    --hash=sha256:381329a9f99628c9069361716891d34ad94af76e461dcb0335825aecc7692231
+rpds-py==2026.9.1 \
+    --hash=sha256:a36b70596407634ca82d4b989a3729074a008537a0522e4c8046a67c729103e9 \
+    --hash=sha256:eba5d173f7d5708b22a93815017a4611873ed54db9f268077c0dd1ed99cfc858 \
+    --hash=sha256:7868b85224291c6cb6759f9b5adb9745f486d226f62b16a614dd5a2a5ab2b35b \
+    --hash=sha256:457866b85daf5034296666168b84a69e0b2e89dc4f1af102b46f6448a60b9063

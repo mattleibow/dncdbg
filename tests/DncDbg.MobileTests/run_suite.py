@@ -517,6 +517,7 @@ class Suite:
 
 
 def contracts(suite):
+    suite.run(sys.executable, "-m", "pip", "list", "--format=json")
     suite.run("dotnet", "tests/DncDbg.RemoteTests/bin/Release/net10.0/DncDbg.RemoteTests.dll", "--fixture-control-contracts")
     for path in ("src/DncDbg.Remote/generate_contract.py", "tests/DncDbg.RemoteTests/test_dap.py",
                  "tests/DncDbg.RemoteTests/test_mobile_processes.py", "tests/DncDbg.RemoteTests/test_mobile_runner.py",

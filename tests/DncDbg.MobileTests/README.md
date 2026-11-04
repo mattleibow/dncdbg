@@ -239,17 +239,20 @@ architectures. Every discovered case runs once, either failure makes the command
 fail, and children remain in the owned process group for timeout cleanup.
 The existing 180-second aggregate budget and individual protocol/fault deadlines
 are unchanged; no mobile device proof is replaced by these portable contracts.
-Desktop CI selects Python 3.13 explicitly through the existing `DNCDBG_PYTHON`
+Desktop CI selects Python 3.13.15 explicitly through the existing `DNCDBG_PYTHON`
 facade override rather than using Xcode's bundled interpreter for every fake
 device-tool process. This does not change application SDK/runtime pins.
 The portable suite validates complete launch configurations against the public
-Draft 2020-12 schema using the test-only dependency in
-`tests/DncDbg.RemoteTests/requirements.txt`. For local contracts, install it in
-an isolated environment and select that interpreter, for example:
+Draft 2020-12 schema using the fully version/hash-locked test-only closure in
+`tests/DncDbg.RemoteTests/requirements.txt`. Binary hashes cover CPython 3.13 on
+Linux glibc x64/arm64 and macOS x64/arm64; Windows CI does not run the POSIX
+portable suite. The suite records and verifies its exact installed package
+inventory, excluding only bootstrap installer tools. For local contracts, use
+CPython 3.13 in an isolated environment and select that interpreter, for example:
 
 ```sh
 python3 -m venv build/contract-python
-build/contract-python/bin/python -m pip install -r tests/DncDbg.RemoteTests/requirements.txt
+build/contract-python/bin/python -m pip install --require-hashes --no-deps --only-binary=:all: -r tests/DncDbg.RemoteTests/requirements.txt
 DNCDBG_PYTHON="$PWD/build/contract-python/bin/python" dotnet run --project tests/DncDbg.MobileTests -c Release -- --platform contracts
 ```
 

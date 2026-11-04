@@ -23,6 +23,7 @@ RID = "iossimulator-x64"
 BOOT_SECONDS = 240
 CLEANUP_SECONDS = 30
 DIAGNOSTIC_SECONDS = 180
+RAW_DIAGNOSE_BYTES = 512 * 1024 * 1024
 PR20_SHA = "499dcda91fa8b933b43c7ecb6f928834d099c1bc"
 ENV_KEYS = ("DEVELOPER_DIR", "HOME", "CFFIXED_USER_HOME", "TMPDIR", "PATH", "LANG", "LC_ALL", "LC_CTYPE",
             "SIMULATOR_DEVICE_SET_PATH", "DOTNET_CLI_USE_MSBUILD_SERVER", "MSBUILDUSESERVER",
@@ -128,11 +129,12 @@ class Probe:
     def save(self):
         (self.output / "state.json").write_text(json.dumps(self.state, indent=2))
 
-    def run(self, label, command, timeout=30, check=True, environment=None):
+    def run(self, label, command, timeout=30, check=True, environment=None, payload_path=None):
         started, stamp = time.monotonic(), utc()
         raw = self.private / (label + ".raw")
         timed_out = False
         oversized = False
+        payload_oversized = False
         with raw.open("wb") as stream:
             process = subprocess.Popen(command, env=self.env if environment is None else environment,
                                        stdin=subprocess.DEVNULL, stdout=stream, stderr=subprocess.STDOUT,
@@ -141,7 +143,10 @@ class Probe:
                 while process.poll() is None:
                     remaining = timeout - (time.monotonic() - started)
                     oversized = raw.stat().st_size > self.evidence.limit
-                    if remaining <= 0 or oversized:
+                    if payload_path is not None and payload_path.exists():
+                        payload_oversized = sum(p.stat().st_size for p in payload_path.rglob("*")
+                                                if p.is_file() and not p.is_symlink()) > RAW_DIAGNOSE_BYTES
+                    if remaining <= 0 or oversized or payload_oversized:
                         timed_out = remaining <= 0
                         if self.mode == "harness":
                             os.killpg(process.pid, signal.SIGKILL)
@@ -162,14 +167,15 @@ class Probe:
         status = {"command": command, "startedUtc": stamp, "finishedUtc": utc(),
                   "seconds": time.monotonic() - started, "timeoutSeconds": timeout,
                   "timedOut": timed_out, "outputLimitExceeded": oversized, "exitCode": process.returncode,
-                  "passed": process.returncode == 0 and not timed_out and not oversized}
+                  "rawDiagnoseLimitExceeded": payload_oversized,
+                  "passed": process.returncode == 0 and not timed_out and not oversized and not payload_oversized}
         self.evidence.write(label + ".log", text)
         self.evidence.report(label + ".status.json", status)
         print(f"{label}: exit={process.returncode}, seconds={status['seconds']:.3f}, "
               f"timeout={timed_out}, outputLimit={oversized}", flush=True)
         if timed_out:
             raise TimeoutError(f"{label} exceeded {timeout:.3f}s; partial output preserved.")
-        if oversized:
+        if oversized or payload_oversized:
             raise RuntimeError(f"{label} exceeded the bounded output limit; partial output preserved.")
         if check:
             require(process.returncode == 0, f"{label} exited {process.returncode}; see bounded evidence.")
@@ -222,6 +228,7 @@ class Probe:
         self.run("xcode-help", ["xcodebuild", "-help"], check=False)
         self.run("license-preferences", ["defaults", "read", "/Library/Preferences/com.apple.dt.Xcode"],
                  check=False)
+        self.run("coresimulator-package", ["pkgutil", "--pkg-info=com.apple.pkg.CoreSimulator"], check=False)
         self.host_snapshot("before")
         runtimes = {}
         for name, env in (("native", native), ("harness", harness)):
@@ -248,6 +255,8 @@ class Probe:
                        maximum_files=20)
         self.copy_text("user-core-simulator", Path(self.native["HOME"]) / "Library/Preferences",
                        maximum_files=20, pattern="*CoreSimulator*.plist")
+        self.copy_text("user-cache", Path(self.native["HOME"]) / "Library/Caches/com.apple.CoreSimulator",
+                       maximum_files=20)
         self.save()
 
     def owned_plist(self):
@@ -295,6 +304,10 @@ class Probe:
             remaining = BOOT_SECONDS - (time.monotonic() - started)
             require(remaining > 0, "simctl boot consumed the complete 240s readiness budget.")
             self.run("bootstatus", ["xcrun", "simctl", "bootstatus", device, "-b"], timeout=remaining)
+            booted = self.owned_plist()
+            require(booted.get("state") == 3, "bootstatus exited but owned device is not independently Booted.")
+            require(time.monotonic() - started <= BOOT_SECONDS, "Readiness observation exceeded 240s.")
+            self.evidence.report("booted-device.json", booted)
             self.state["systemAppReady"] = True
         finally:
             self.state["bootSeconds"] = time.monotonic() - started
@@ -364,7 +377,8 @@ class Probe:
                 errors.append(label + ": diagnostic aggregate deadline reached")
                 break
             try:
-                result = self.run(label, command, timeout=min(limit, remaining), check=False)
+                result = self.run(label, command, timeout=min(limit, remaining), check=False,
+                                  payload_path=self.private / "diagnose" if label == "diagnose" else None)
                 if result.returncode:
                     errors.append(f"{label}: exit {result.returncode}")
             except (OSError, TimeoutError, RuntimeError) as error:

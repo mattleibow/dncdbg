@@ -23,6 +23,7 @@ class FakeProbe(probe.Probe):
         self.fail_boot = False
         self.fail_cleanup = False
         self.bad_identity = False
+        self.booted_state = 3
         self.now = 0
 
     def run(self, label, command, timeout=30, check=True, environment=None):
@@ -45,6 +46,9 @@ class FakeProbe(probe.Probe):
             if self.fail_boot:
                 self.now += 240
                 raise TimeoutError("WaitingOnSystemApp exceeded 240s")
+            folder = self.device_set / self.state["device"]
+            value = plistlib.loads((folder / "device.plist").read_bytes()) | {"state": self.booted_state}
+            (folder / "device.plist").write_bytes(plistlib.dumps(value))
             text = "Status=4294967295, isTerminal=YES\nFinished\n"
         elif command[:3] == ["xcrun", "simctl", "shutdown"]:
             self.now += 19
@@ -147,6 +151,22 @@ class BootProbeTests(unittest.TestCase):
         count = len(p.calls)
         p.cleanup()
         self.assertEqual(len(p.calls), count)
+
+    def test_zero_bootstatus_exit_requires_independent_booted_state(self):
+        p = FakeProbe(self.root / "probe")
+        p.booted_state = 1
+        with self.assertRaises(RuntimeError):
+            p.boot()
+        self.assertFalse(p.state["systemAppReady"])
+
+    def test_diagnostics_do_not_make_late_boot_readiness_green(self):
+        p = FakeProbe(self.root / "probe")
+        p.fail_boot = True
+        def diagnose():
+            p.state["systemAppReady"] = True
+        p.diagnostics = diagnose
+        self.assertEqual(p.execute(), 1)
+        self.assertFalse(p.state["passed"])
 
     def test_cleanup_failure_cannot_be_green_or_lose_ownership(self):
         p = FakeProbe(self.root / "probe")

@@ -168,6 +168,64 @@ class BootProbeTests(unittest.TestCase):
         self.assertEqual(p.execute(), 1)
         self.assertFalse(p.state["passed"])
 
+    def test_full_success_requires_boot_cleanup_and_preserves_manifest_hashes(self):
+        p = FakeProbe(self.root / "probe")
+        self.assertEqual(p.execute(), 0)
+        self.assertTrue(p.state["systemAppReady"])
+        self.assertTrue(p.state["cleanupDone"])
+        self.assertTrue(p.state["passed"])
+        manifest = json.loads((p.evidence.path / "manifest.json").read_text())
+        for name, digest in manifest["files"].items():
+            self.assertEqual(probe.hashlib.sha256((p.evidence.path / name).read_bytes()).hexdigest(), digest)
+
+    def test_workflow_is_isolated_exact_two_fresh_vms_without_app_installation(self):
+        root = Path(__file__).resolve().parents[2]
+        workflow = (root / ".github/workflows/intel-ios-boot.yml").read_text()
+        self.assertIn("branches: [mattleibow-intel-boot-diagnostics]", workflow)
+        self.assertIn("runs-on: macos-26-intel", workflow)
+        self.assertIn("mode: [native, harness]", workflow)
+        self.assertIn("fail-fast: false", workflow)
+        self.assertIn("ref: ${{ github.sha }}", workflow)
+        self.assertIn("persist-credentials: false", workflow)
+        self.assertIn("if: always()", workflow)
+        self.assertIn("path: build/intel-ios-${{ matrix.mode }}/evidence/", workflow)
+        for forbidden in ("setup-dotnet", "workload install", "continue-on-error", "Simulator.app",
+                          "killall", "erase all", "--all-logs", "--data-container"):
+            self.assertNotIn(forbidden, workflow)
+
+    def test_scoped_diagnose_has_external_and_internal_bounds_without_data_containers(self):
+        p = FakeProbe(self.root / "probe")
+        p.boot()
+        p.host_snapshot = lambda _: None
+        p.copy_text = lambda *args, **kwargs: None
+        calls = []
+        def command(label, argv, **kwargs):
+            calls.append((label, argv, kwargs))
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        p.run = command
+        probe.Probe.diagnostics(p)
+        _, argv, options = next(c for c in calls if c[0] == "diagnose")
+        self.assertIn("--udid=" + p.state["device"], argv)
+        self.assertIn("--timeout=60", argv)
+        self.assertIn("--no-archive", argv)
+        self.assertIn("-b", argv)
+        self.assertLessEqual(options["timeout"], 75)
+        self.assertEqual(options["payload_path"], p.private / "diagnose")
+        for forbidden in ("--all-logs", "--data-container", "-X"):
+            self.assertNotIn(forbidden, argv)
+
+    def test_raw_diagnose_growth_is_stopped_and_recorded(self):
+        p = probe.Probe(self.root / "probe", "harness", dict(os.environ))
+        payload = p.private / "diagnose"
+        payload.mkdir()
+        (payload / "diagnostic.log").write_text("a" * 100)
+        with patch.object(probe, "RAW_DIAGNOSE_BYTES", 32), self.assertRaises(RuntimeError):
+            p.run("payload", [sys.executable, "-c", "import threading; threading.Event().wait(20)"],
+                  timeout=2, payload_path=payload)
+        status = json.loads((p.evidence.path / "payload.status.json").read_text())
+        self.assertTrue(status["rawDiagnoseLimitExceeded"])
+        self.assertFalse(status["passed"])
+
     def test_cleanup_failure_cannot_be_green_or_lose_ownership(self):
         p = FakeProbe(self.root / "probe")
         p.boot()

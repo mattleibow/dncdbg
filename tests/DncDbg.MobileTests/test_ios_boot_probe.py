@@ -220,7 +220,7 @@ class BootProbeTests(unittest.TestCase):
     def test_scoped_diagnose_has_external_and_internal_bounds_without_data_containers(self):
         p = FakeProbe(self.root / "probe")
         p.boot()
-        p.host_snapshot = lambda _: None
+        p.host_snapshot = lambda *args, **kwargs: None
         p.copy_text = lambda *args, **kwargs: None
         calls = []
         def command(label, argv, **kwargs):
@@ -235,6 +235,7 @@ class BootProbeTests(unittest.TestCase):
         self.assertIn("-b", argv)
         self.assertLessEqual(options["timeout"], 75)
         self.assertEqual(options["payload_path"], p.private / "diagnose")
+        self.assertEqual(options["input"], b"\n")
         for forbidden in ("--all-logs", "--data-container", "-X"):
             self.assertNotIn(forbidden, argv)
 
@@ -254,13 +255,14 @@ class BootProbeTests(unittest.TestCase):
         p = FakeProbe(self.root / "probe")
         p.boot()
         actions = []
-        p.host_snapshot = lambda _: None
+        p.host_snapshot = lambda *args, **kwargs: actions.append("host-snapshot")
         p.copy_text = lambda prefix, *args, **kwargs: actions.append(prefix)
         def command(label, argv, **kwargs):
             actions.append(label)
             return subprocess.CompletedProcess(argv, 0, "", "")
         p.run = command
         probe.Probe.diagnostics(p)
+        self.assertLess(actions.index("diagnose"), actions.index("host-snapshot"))
         self.assertLess(actions.index("diagnose"), actions.index("device-logs"))
         self.assertLess(actions.index("diagnose"), actions.index("user-crashes"))
 
@@ -274,6 +276,28 @@ class BootProbeTests(unittest.TestCase):
         except subprocess.TimeoutExpired:
             self.fail("Redaction exceeded 2s for 100KB non-email text; diagnostics can starve before diagnose.")
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_late_zero_exit_is_not_a_success_after_parent_descheduling(self):
+        p = probe.Probe(self.root / "probe", "native", dict(os.environ))
+        from unittest.mock import Mock
+        child = Mock(returncode=0)
+        child.poll.return_value = 0
+        with patch.object(probe.subprocess, "Popen", return_value=child), \
+                patch.object(probe.time, "monotonic", side_effect=[0, 2]), self.assertRaises(TimeoutError):
+            p.run("late", ["test-owned-child"], timeout=1)
+        status = json.loads((p.evidence.path / "late.status.json").read_text())
+        self.assertTrue(status["timedOut"])
+        self.assertFalse(status["passed"])
+
+    def test_diagnose_zero_exit_without_files_is_explicitly_incomplete(self):
+        p = FakeProbe(self.root / "probe")
+        p.boot()
+        p.host_snapshot = lambda *args, **kwargs: None
+        p.copy_text = lambda *args, **kwargs: None
+        p.run = lambda label, argv, **kwargs: subprocess.CompletedProcess(argv, 0, "", "")
+        probe.Probe.diagnostics(p)
+        self.assertFalse(p.state["diagnosticsComplete"])
+        self.assertTrue(any("no files" in error for error in p.state["diagnosticErrors"]))
 
     def test_cleanup_failure_cannot_be_green_or_lose_ownership(self):
         p = FakeProbe(self.root / "probe")

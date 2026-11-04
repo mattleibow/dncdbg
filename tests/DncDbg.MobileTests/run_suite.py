@@ -33,7 +33,10 @@ def build_environment(environment):
             if not any(part in key.upper() for part in sensitive)}
 
 def sdk_environment(environment):
-    return dict(environment) | {"DOTNET_CLI_USE_MSBUILD_SERVER": "false", "MSBUILDUSESERVER": "0"}
+    clean = {key: value for key, value in environment.items()
+             if not key.upper().startswith("PYTHON") and key.upper() not in {"__PYVENV_LAUNCHER__", "DNCDBG_PYTHON"}}
+    return clean | {"DOTNET_CLI_USE_MSBUILD_SERVER": "false", "MSBUILDUSESERVER": "0",
+                    "PYTHONNOUSERSITE": "1", "PYTHONUTF8": "1"}
 
 
 def require(condition, message):
@@ -518,6 +521,7 @@ class Suite:
 
 def contracts(suite):
     suite.run(sys.executable, "-m", "pip", "list", "--format=json")
+    suite.run(sys.executable, "tests/DncDbg.RemoteTests/python_environment.py")
     suite.run("dotnet", "tests/DncDbg.RemoteTests/bin/Release/net10.0/DncDbg.RemoteTests.dll", "--fixture-control-contracts")
     for path in ("src/DncDbg.Remote/generate_contract.py", "tests/DncDbg.RemoteTests/test_dap.py",
                  "tests/DncDbg.RemoteTests/test_mobile_processes.py", "tests/DncDbg.RemoteTests/test_mobile_runner.py",

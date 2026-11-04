@@ -373,7 +373,7 @@ class MobileRunnerTests(unittest.TestCase):
         install = source.split("name: Install portable contract dependencies", 1)[1].split("\n      - ", 1)[0]
         self.assertIn("-m venv build/contract-python", install)
         self.assertIn("--require-hashes --no-deps --only-binary=:all:", install)
-        self.assertIn("build/contract-python/bin/python -m pip", install)
+        self.assertIn("build/contract-python/bin/python -I -m pip", install)
         lock = (ROOT / "tests/DncDbg.RemoteTests/requirements.txt").read_text()
         expected = {"attrs", "jsonschema", "jsonschema-specifications", "referencing", "rpds-py"}
         import re
@@ -389,9 +389,10 @@ class MobileRunnerTests(unittest.TestCase):
             self.assertTrue(hashes, name)
             self.assertTrue(all(len(digest) == 64 for digest in hashes), name)
         self.assertEqual(set(pinned), expected)
-        from importlib.metadata import distributions
-        installed = {d.metadata["Name"].lower().replace("_", "-"): d.version for d in distributions()
-                     if d.metadata["Name"].lower().replace("_", "-") not in {"pip", "setuptools", "wheel"}}
+        from python_environment import verify_environment
+        report = verify_environment(ROOT / "tests/DncDbg.RemoteTests/requirements.txt")
+        installed = {d["name"]: d["version"] for d in report["distributions"]
+                     if d["name"] not in {"pip", "setuptools", "wheel"}}
         self.assertEqual(installed, pinned, "Portable test packages must be the exact locked closure, never global extras.")
 
     def test_fake_tool_processes_do_not_reload_the_entire_unittest_driver(self):

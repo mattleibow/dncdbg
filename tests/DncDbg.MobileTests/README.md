@@ -256,6 +256,14 @@ build/contract-python/bin/python -m pip install --require-hashes --no-deps --onl
 DNCDBG_PYTHON="$PWD/build/contract-python/bin/python" dotnet run --project tests/DncDbg.MobileTests -c Release -- --platform contracts
 ```
 
+The test facade removes ambient Python overrides before starting the selected
+interpreter, disables user-site imports, and does not propagate the selector
+to unrelated child processes. SDK/worker environments repeat that cleanup.
+Dependency verification rejects duplicate distribution names and paths outside
+the venv, checks module files against their installed wheel records before
+importing them, and records the actual JSON-schema/RPDS import provenance.
+Foreign `PYTHONPATH` packages are failures, never accepted as locked metadata.
+
 Fixture device/package commands load the small `fake_mobile_tools.py` CLI,
 not the complete unittest driver and its fake-server dependencies on each
 invocation. Command transcripts, package mutation negatives and delay barriers

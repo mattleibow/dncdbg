@@ -63,9 +63,11 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          "${{ steps.python.outputs.python-path }}" -m venv build/contract-python
-          build/contract-python/bin/python -m pip install --disable-pip-version-check --require-hashes --no-deps --only-binary=:all: -r tests/DncDbg.RemoteTests/requirements.txt
-          build/contract-python/bin/python -m pip check
+          unset PYTHONPATH PYTHONHOME PYTHONUSERBASE PYTHONSTARTUP PYTHONINSPECT PYTHONOPTIMIZE PYTHONWARNINGS PYTHONEXECUTABLE __PYVENV_LAUNCHER__
+          export PYTHONNOUSERSITE=1 PYTHONUTF8=1
+          "${{ steps.python.outputs.python-path }}" -I -m venv build/contract-python
+          build/contract-python/bin/python -I -m pip install --disable-pip-version-check --require-hashes --no-deps --only-binary=:all: -r tests/DncDbg.RemoteTests/requirements.txt
+          build/contract-python/bin/python -I -m pip check
 
       - name: Verify native runner matches the artifact RID
         shell: pwsh

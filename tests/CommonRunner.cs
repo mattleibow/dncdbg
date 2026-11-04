@@ -18,7 +18,12 @@ internal static class SuiteRunner
             WorkingDirectory = root.FullName,
             UseShellExecute = false
         };
-        start.Environment.Remove("PYTHONOPTIMIZE");
+        foreach (string key in start.Environment.Keys.Where(key => key.StartsWith("PYTHON", StringComparison.OrdinalIgnoreCase)).ToArray())
+            start.Environment.Remove(key);
+        start.Environment.Remove("__PYVENV_LAUNCHER__");
+        start.Environment.Remove("DNCDBG_PYTHON");
+        start.Environment["PYTHONNOUSERSITE"] = "1";
+        start.Environment["PYTHONUTF8"] = "1";
         start.ArgumentList.Add(Path.Combine(root.FullName, "tests", script));
         foreach (string argument in arguments) start.ArgumentList.Add(argument);
         try

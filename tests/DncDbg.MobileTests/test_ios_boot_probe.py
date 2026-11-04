@@ -189,9 +189,33 @@ class BootProbeTests(unittest.TestCase):
         self.assertIn("persist-credentials: false", workflow)
         self.assertIn("if: always()", workflow)
         self.assertIn("path: build/intel-ios-${{ matrix.mode }}/evidence/", workflow)
-        for forbidden in ("setup-dotnet", "workload install", "continue-on-error", "Simulator.app",
+        for forbidden in ("continue-on-error", "Simulator.app",
                           "killall", "erase all", "--all-logs", "--data-container"):
             self.assertNotIn(forbidden, workflow)
+
+    def test_tool_install_boundary_is_harness_only_and_preserves_pr20_exact_order(self):
+        root = Path(__file__).resolve().parents[2]
+        workflow = (root / ".github/workflows/intel-ios-boot.yml").read_text()
+        setup = workflow.index("uses: actions/setup-dotnet@v4")
+        inventory = workflow.index("--inventory-only")
+        install = workflow.index("dotnet workload install maui-ios")
+        boot = workflow.index("name: Reproduce exact cold boot")
+        self.assertLess(setup, inventory)
+        self.assertLess(inventory, install)
+        self.assertLess(install, boot)
+        self.assertEqual(workflow.count("if: matrix.mode == 'harness'"), 3)
+        self.assertIn("10.0.401", workflow)
+        self.assertIn("11.0.100-rc.1.26425.128", workflow)
+        self.assertIn("Microsoft.Maui.Cli --version 0.1.0-preview.12.26421.1", workflow)
+
+    def test_inventory_only_never_boots_and_does_not_claim_readiness_success(self):
+        p = FakeProbe(self.root / "probe")
+        self.assertEqual(p.execute(inventory_only=True), 0)
+        self.assertTrue(p.state["inventoryPassed"])
+        self.assertFalse(p.state["systemAppReady"])
+        self.assertFalse(p.state["passed"])
+        self.assertNotIn("device", p.state)
+        self.assertFalse(any(label == "create" for label, _, _ in p.calls))
 
     def test_scoped_diagnose_has_external_and_internal_bounds_without_data_containers(self):
         p = FakeProbe(self.root / "probe")

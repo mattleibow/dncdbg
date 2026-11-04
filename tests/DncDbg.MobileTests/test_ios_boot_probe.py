@@ -188,7 +188,7 @@ class BootProbeTests(unittest.TestCase):
         self.assertIn("ref: ${{ github.sha }}", workflow)
         self.assertIn("persist-credentials: false", workflow)
         self.assertIn("if: always()", workflow)
-        self.assertIn("path: build/intel-ios-${{ matrix.mode }}/evidence/", workflow)
+        self.assertIn("build/intel-ios-${{ matrix.mode }}/evidence/", workflow)
         for forbidden in ("continue-on-error", "Simulator.app",
                           "killall", "erase all", "--all-logs", "--data-container"):
             self.assertNotIn(forbidden, workflow)

@@ -25,6 +25,9 @@ jobs:
     needs: contracts
     runs-on: macos-26-intel
     timeout-minutes: 18
+    env:
+      DOTNET_INSTALL_DIR: ${{ github.workspace }}/build/mobile-sdk
+      DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE: "true"
     strategy:
       fail-fast: false
       matrix:
@@ -34,6 +37,28 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        if: matrix.mode == 'harness'
+        with:
+          dotnet-version: |
+            10.0.401
+            11.0.100-rc.1.26425.128
+      - name: Record exact pre-workload inventory as in PR20
+        if: matrix.mode == 'harness'
+        run: >-
+          /usr/bin/python3 -u tests/DncDbg.MobileTests/probe_ios_boot.py
+          --mode native --inventory-only --output build/intel-ios-pre-workload
+      - name: Reproduce exact SDK/workload/CLI provisioning boundary without building an app
+        if: matrix.mode == 'harness'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/mobile-tools build/workload-scratch
+          cd tests/DncDbg.MauiTestApp
+          dotnet workload install maui-ios --temp-dir ../../build/workload-scratch
+          cd ../..
+          dotnet tool install Microsoft.Maui.Cli --version 0.1.0-preview.12.26421.1 --tool-path build/mobile-tools
+          echo "$PWD/build/mobile-tools" >> "$GITHUB_PATH"
       - name: Reproduce exact cold boot without DNCDbg, dotnet or MAUI
         run: >-
           /usr/bin/python3 -u tests/DncDbg.MobileTests/probe_ios_boot.py
@@ -43,7 +68,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: intel-ios-boot-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.mode }}
-          path: build/intel-ios-${{ matrix.mode }}/evidence/
+          path: |
+            build/intel-ios-${{ matrix.mode }}/evidence/
+            build/intel-ios-pre-workload/evidence/
           if-no-files-found: error
           retention-days: 7
           compression-level: 6

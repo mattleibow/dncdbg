@@ -74,7 +74,7 @@ class Redactor:
                       r"\1<REDACTED>", text)
         text = re.sub(r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]+)\b", "<REDACTED>", text)
         text = re.sub(r"(?i)(https?://[^\s?\"']+)\?[^\s\"']+", r"\1?<REDACTED>", text)
-        text = re.sub(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", "<EMAIL>", text)
+        text = re.sub(r"\b[\w.+-]{1,64}@[\w.-]{1,255}\.[A-Za-z]{2,63}\b", "<EMAIL>", text)
         text = re.sub(r"(?i)((?:token|password|secret|credential|api[_-]?key)[\"']?\s*[:=]\s*[\"']?)"
                       r"[^\s,\"'}]+", r"\1<REDACTED>", text)
         return text
@@ -355,22 +355,14 @@ class Probe:
         self.state["diagnosticsStartedUtc"] = utc()
         self.host_snapshot("after")
         device = self.state.get("device")
-        if device:
-            self.copy_text("device-logs", self.device_set / device / "data/Library/Logs", deadline=deadline)
-            self.copy_text("device-migration", self.device_set / device / "data/Library/DataMigration",
-                           deadline=deadline)
-        for prefix, root, pattern in (
-                ("core-service-logs", Path(self.native["HOME"]) / "Library/Logs/CoreSimulator", "**/*"),
-                ("user-crashes", Path(self.native["HOME"]) / "Library/Logs/DiagnosticReports", "**/*"),
-                ("system-crashes", Path("/Library/Logs/DiagnosticReports"), "**/*")):
-            self.copy_text(prefix, root, pattern=pattern, deadline=deadline)
-        commands = [("system-log", ["/usr/bin/log", "show", "--last", "10m", "--style", "ndjson",
-                                    "--info", "--debug", "--predicate", LOG_PREDICATE], 30)]
+        commands = []
         if device:
             commands += [
-                ("device-launchd", ["xcrun", "simctl", "spawn", device, "launchctl", "print", "system"], 10),
                 ("diagnose", ["xcrun", "simctl", "diagnose", "-b", "--timeout=60", "--no-archive",
-                              "--output=" + str(self.private / "diagnose"), "--udid=" + device], 75)]
+                              "--output=" + str(self.private / "diagnose"), "--udid=" + device], 75),
+                ("device-launchd", ["xcrun", "simctl", "spawn", device, "launchctl", "print", "system"], 10)]
+        commands += [("system-log", ["/usr/bin/log", "show", "--last", "10m", "--style", "ndjson",
+                                     "--info", "--debug", "--predicate", LOG_PREDICATE], 30)]
         for label, command, limit in commands:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -383,6 +375,15 @@ class Probe:
                     errors.append(f"{label}: exit {result.returncode}")
             except (OSError, TimeoutError, RuntimeError) as error:
                 errors.append(str(error))
+        if device:
+            self.copy_text("device-logs", self.device_set / device / "data/Library/Logs", deadline=deadline)
+            self.copy_text("device-migration", self.device_set / device / "data/Library/DataMigration",
+                           deadline=deadline)
+        for prefix, root in (
+                ("core-service-logs", Path(self.native["HOME"]) / "Library/Logs/CoreSimulator"),
+                ("user-crashes", Path(self.native["HOME"]) / "Library/Logs/DiagnosticReports"),
+                ("system-crashes", Path("/Library/Logs/DiagnosticReports"))):
+            self.copy_text(prefix, root, deadline=deadline)
         self.copy_text("diagnose-text", self.private / "diagnose", maximum_files=160, deadline=deadline)
         self.state["diagnosticsSeconds"] = time.monotonic() - started
         self.state["diagnosticsFinishedUtc"] = utc()
@@ -428,15 +429,19 @@ class Probe:
             self.state["cleanupSeconds"] = time.monotonic() - started
             self.save()
 
-    def execute(self):
+    def execute(self, inventory_only=False):
+        self.state["inventoryOnly"] = inventory_only
         try:
             self.preflight()
-            self.boot()
+            if inventory_only:
+                self.state["inventoryPassed"] = True
+            else:
+                self.boot()
         except Exception as error:
             self.state["error"] = str(error)
         finally:
             try:
-                if self.host_verified:
+                if self.host_verified and not inventory_only:
                     self.diagnostics()
             except Exception as error:
                 self.state.setdefault("diagnosticErrors", []).append(str(error))
@@ -454,18 +459,20 @@ class Probe:
                     p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in self.evidence.path.iterdir()
                     if p.name != "manifest.json"}, "omissions": self.evidence.omissions,
                 "fileLimitBytes": self.evidence.limit, "runLimitBytes": self.evidence.total_limit})
-        return 0 if self.state["passed"] else 1
+        return 0 if self.state["passed"] or self.state.get("inventoryPassed", False) else 1
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("native", "harness"), required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--inventory-only", action="store_true",
+                        help="Record the exact pre-workload inventory; never create a simulator or claim boot proof.")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
     require(args.output.resolve().is_relative_to((root / "build").resolve()),
             "Probe output must be under this checkout's build directory.")
-    return Probe(args.output, args.mode).execute()
+    return Probe(args.output, args.mode).execute(inventory_only=args.inventory_only)
 
 
 if __name__ == "__main__":

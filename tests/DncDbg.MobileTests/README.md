@@ -223,15 +223,19 @@ dispatchable, app-free diagnostic workflow on the isolated
 `mattleibow-intel-boot-diagnostics` branch. It does not change the mobile workflow,
 the ARM default, or PR #20. Its two jobs use separate fresh `macos-26-intel` VMs
 and the exact **Xcode 26.6 / 17F113**, **iOS 26.5 / 23F77**, **iPhone 17 Pro**
-tuple, with **iossimulator-x64** recorded as the intended RID. No app, SDK,
-workload, agent or DevFlow broker is installed or executed.
+tuple, with **iossimulator-x64** recorded as the intended RID. No app, native
+agent or DevFlow broker is built or executed. The native job installs no SDK or
+workload. Following the first two successful app-free runs, the harness job now
+installs the exact PR #20 SDKs, checks the pre-workload inventory, and installs
+the pinned workload/CLI before the same native cold boot. This tests the tool
+installation boundary, not app functionality; it is not a provisioning fix.
 
-The native invocation and command-only PR #20 harness equivalent differ only in
-the recorded environment flags/process-session behavior. HOME, native TMPDIR,
+The original native invocation and command-only PR #20 harness equivalent differ
+only in the recorded environment flags/process-session behavior. HOME, native TMPDIR,
 PATH, locale, default device set, selected tool paths and exact runtime inventories
 are recorded for comparison. This is not an assertion that a VM without workload
 installation has identical tool caches/PATH to the preserved PR #20 VM.
-The probe makes no first-launch, component, service, device-profile or GUI
+The probe makes no first-launch, component, device-profile or GUI
 provisioning mutation. Installed Apple CLI help, first-launch status, license
 preferences, profiles/framework metadata, process trees, disk/memory, device plist
 state transitions, migration/device/service/crash logs, filtered unified logs,
@@ -245,6 +249,16 @@ timestamps/status, exact source SHA and runner image metadata remain explicit.
 Only redacted text/plist exports, at most **8 MiB/file and 100 MiB/run**, are uploaded
 with SHA-256 manifests and seven-day retention; raw diagnose output/data containers
 are not uploaded. A readiness/cleanup failure stays red.
+
+The initial run at `35253087536ab9c0f395336e800bf66b0be72147`
+([41754615286](https://github.com/mattleibow/dncdbg/actions/runs/41754615286))
+passed two fresh bare-VM boots in **232.547s / 233.635s**, with owned cleanup in
+**23.291s / 15.669s**. Both first-launch checks returned 0; no setup mutation was
+applied. This leaves only about seven seconds of readiness margin and does not
+reproduce or fix the post-tool-install PR #20 failure. Original diagnostic
+exports exhausted their separate 180s budget before scoped diagnose; that
+collector failure is preserved. Test-first corrections prioritize scoped diagnose
+and bound redaction of long non-email text without extending any deadline.
 
 Portable diagnostic contracts (not hosted qualification):
 

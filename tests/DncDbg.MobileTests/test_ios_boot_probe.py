@@ -226,6 +226,31 @@ class BootProbeTests(unittest.TestCase):
         self.assertTrue(status["rawDiagnoseLimitExceeded"])
         self.assertFalse(status["passed"])
 
+    def test_scoped_diagnose_runs_before_potentially_slow_text_exports(self):
+        p = FakeProbe(self.root / "probe")
+        p.boot()
+        actions = []
+        p.host_snapshot = lambda _: None
+        p.copy_text = lambda prefix, *args, **kwargs: actions.append(prefix)
+        def command(label, argv, **kwargs):
+            actions.append(label)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        p.run = command
+        probe.Probe.diagnostics(p)
+        self.assertLess(actions.index("diagnose"), actions.index("device-logs"))
+        self.assertLess(actions.index("diagnose"), actions.index("user-crashes"))
+
+    def test_redaction_long_non_email_text_is_bounded(self):
+        program = ("import importlib.util; "
+                   f"s=importlib.util.spec_from_file_location('probe', {str(SPEC.origin)!r}); "
+                   "p=importlib.util.module_from_spec(s); s.loader.exec_module(p); "
+                   "r=p.Redactor({}); assert r('a'*100000 + ' user@example.test').endswith('<EMAIL>')")
+        try:
+            result = subprocess.run([sys.executable, "-c", program], capture_output=True, text=True, timeout=2)
+        except subprocess.TimeoutExpired:
+            self.fail("Redaction exceeded 2s for 100KB non-email text; diagnostics can starve before diagnose.")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_cleanup_failure_cannot_be_green_or_lose_ownership(self):
         p = FakeProbe(self.root / "probe")
         p.boot()

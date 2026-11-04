@@ -150,7 +150,9 @@ class Suite:
         self.env = sdk_environment(tool_environment(self.args.platform))
         scratch = self.output / "work/scratch"
         scratch.mkdir(parents=True)
-        self.env["TMPDIR"] = str(scratch) + "/"
+        # CoreSimulator is a per-user service; preserve its native temporary environment.
+        if self.args.platform != "ios":
+            self.env["TMPDIR"] = str(scratch) + "/"
         sdk = self.run("dotnet", "--version", cwd=FIXTURE).stdout.strip()
         require(sdk == PIN["sdk"], f"Expected SDK {PIN['sdk']}, got {sdk}.")
         workload = self.run("dotnet", "workload", "--version", cwd=FIXTURE).stdout.strip()

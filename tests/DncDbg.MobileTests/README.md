@@ -211,6 +211,10 @@ remains a red gate, never a successful skip.
   The complete debugger, direct app-control, strict DevFlow UI and fault/cleanup
   sequence is identical for both tuples. Selecting the wrong host architecture
   fails before SDK/device provisioning; there is no silent ABI fallback.
+  Apple host tools retain the runner's native per-user temporary environment
+  for CoreSimulator coordination. The selected simulator, work/evidence paths
+  and ownership journal remain run-owned; no global simulator reset is used.
+  Boot and cleanup deadlines are unchanged.
 - **`Mobile Android emulator (pinned)`** uses hosted **`ubuntu-24.04`**,
   explicitly enables/checks KVM and runs the **entire same** unified suite with
   the separate x64 pins. It does not merely cross-build an APK, run host fakes,
@@ -238,6 +242,17 @@ are unchanged; no mobile device proof is replaced by these portable contracts.
 Desktop CI selects Python 3.13 explicitly through the existing `DNCDBG_PYTHON`
 facade override rather than using Xcode's bundled interpreter for every fake
 device-tool process. This does not change application SDK/runtime pins.
+The portable suite validates complete launch configurations against the public
+Draft 2020-12 schema using the test-only dependency in
+`tests/DncDbg.RemoteTests/requirements.txt`. For local contracts, install it in
+an isolated environment and select that interpreter, for example:
+
+```sh
+python3 -m venv build/contract-python
+build/contract-python/bin/python -m pip install -r tests/DncDbg.RemoteTests/requirements.txt
+DNCDBG_PYTHON="$PWD/build/contract-python/bin/python" dotnet run --project tests/DncDbg.MobileTests -c Release -- --platform contracts
+```
+
 Fixture device/package commands load the small `fake_mobile_tools.py` CLI,
 not the complete unittest driver and its fake-server dependencies on each
 invocation. Command transcripts, package mutation negatives and delay barriers

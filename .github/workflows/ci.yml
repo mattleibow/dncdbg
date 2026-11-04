@@ -59,6 +59,11 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Install portable contract dependencies
+        if: runner.os != 'Windows'
+        shell: bash
+        run: '"${{ steps.python.outputs.python-path }}" -m pip install --disable-pip-version-check -r tests/DncDbg.RemoteTests/requirements.txt'
+
       - name: Verify native runner matches the artifact RID
         shell: pwsh
         run: |

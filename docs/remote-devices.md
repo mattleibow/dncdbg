@@ -312,6 +312,11 @@ Simulator target:
 }
 ```
 
+On Intel, select `"runtimeIdentifier": "iossimulator-x64"` with the matching
+sealed x64 application. The public launch schema admits both qualified simulator
+RIDs, retains the ARM64 default when omitted, and rejects other target RIDs.
+Architecture is never selected silently from the host.
+
 Physical Apple targets use `provider: "appleDevice"` with a `commands` member.
 The vendor's signed development application embeds the `ios-arm64` target agent,
 exact CoreCLR/DBI/DAC and generation-bound manifest. Supply structured commands

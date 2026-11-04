@@ -115,7 +115,7 @@
       "type": "object", "additionalProperties": false, "required": ["applicationId", "deviceId", "appPath"],
       "properties": {
         "applicationId": { "type": "string" }, "deviceId": { "type": "string" }, "appPath": { "type": "string" },
-        "runtimeIdentifier": { "const": "iossimulator-arm64", "default": "iossimulator-arm64" },
+        "runtimeIdentifier": { "enum": ["iossimulator-arm64", "iossimulator-x64"], "default": "iossimulator-arm64" },
         "replaceExisting": { "type": "boolean", "default": false },
         "uninstallOnDisconnect": { "type": "boolean", "default": false }
       }

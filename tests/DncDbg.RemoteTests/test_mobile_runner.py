@@ -109,6 +109,70 @@ class MobileRunnerTests(unittest.TestCase):
         self.assertEqual(self.suite.env.get("DOTNET_CLI_USE_MSBUILD_SERVER"), "false")
         self.assertEqual(self.suite.env.get("MSBUILDUSESERVER"), "0")
 
+    def test_suite_environment_removes_python_injection_overrides(self):
+        from run_suite import sdk_environment
+        injected = {"PATH": "/tools", "TMPDIR": "/native-temp/", "DNCDBG_PYTHON": "/selected/python",
+                    "PYTHONPATH": "/foreign", "PYTHONHOME": "/foreign", "PYTHONUSERBASE": "/foreign",
+                    "PYTHONSTARTUP": "/foreign/start.py", "PYTHONINSPECT": "1", "PYTHONOPTIMIZE": "2",
+                    "__PYVENV_LAUNCHER__": "/foreign/python"}
+        clean = sdk_environment(injected)
+        for key in injected.keys() - {"PATH", "TMPDIR"}:
+            self.assertNotIn(key, clean)
+        self.assertEqual(clean["TMPDIR"], injected["TMPDIR"])
+        self.assertEqual(clean["PYTHONNOUSERSITE"], "1")
+        self.assertEqual(clean["PYTHONUTF8"], "1")
+
+    @unittest.skipUnless(os.name == "posix", "Test-only executable selector")
+    def test_common_facade_scrubs_overrides_before_starting_the_selected_python(self):
+        foreign = self.output / "foreign"
+        foreign.mkdir()
+        marker = foreign / "imported"
+        (foreign / "jsonschema.py").write_text(f"from pathlib import Path\nPath({str(marker)!r}).touch()\n")
+        interpreter = self.output / "selected-python"
+        interpreter.write_text("#!" + sys.executable + "\nimport os,json,sys,jsonschema,rpds\n"
+                               "keys=['PYTHONPATH','PYTHONHOME','PYTHONUSERBASE','PYTHONSTARTUP','PYTHONINSPECT',"
+                               "'PYTHONOPTIMIZE','__PYVENV_LAUNCHER__','DNCDBG_PYTHON']\n"
+                               "print(json.dumps({'env':{k:os.environ.get(k) for k in keys},"
+                               "'schema':jsonschema.__file__,'rpds':rpds.__file__,'prefix':sys.prefix}))\n")
+        interpreter.chmod(0o700)
+        environment = dict(os.environ) | {"DNCDBG_PYTHON": str(interpreter), "PYTHONPATH": str(foreign),
+                                          "PYTHONHOME": str(foreign), "PYTHONUSERBASE": str(foreign),
+                                          "PYTHONSTARTUP": str(foreign / "start.py"), "PYTHONINSPECT": "1",
+                                          "PYTHONOPTIMIZE": "2", "__PYVENV_LAUNCHER__": str(foreign / "python")}
+        result = subprocess.run(["dotnet", str(ROOT / "tests/DncDbg.MobileTests/bin/Release/net10.0/DncDbg.MobileTests.dll"),
+                                 "--platform", "contracts"], env=environment, capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertTrue(all(value is None for value in report["env"].values()), report)
+        self.assertFalse(marker.exists(), "Foreign code must not execute before provenance checks.")
+        for name in ("schema", "rpds"):
+            self.assertTrue(Path(report[name]).resolve().is_relative_to(Path(report["prefix"]).resolve()), report)
+
+    def test_package_provenance_rejects_duplicate_distribution_names(self):
+        import python_environment
+        actual = list(python_environment.metadata.distributions())
+        from types import SimpleNamespace
+        duplicate = SimpleNamespace(metadata={"Name": "jsonschema"}, version="999",
+                                    locate_file=lambda _: self.output / "foreign")
+        with patch("python_environment.metadata.distributions", return_value=actual + [duplicate]), \
+                self.assertRaisesRegex(RuntimeError, "Duplicate.*jsonschema"):
+            python_environment.verify_environment(ROOT / "tests/DncDbg.RemoteTests/requirements.txt")
+
+    def test_package_provenance_rejects_foreign_pythonpath_before_import(self):
+        helper = ROOT / "tests/DncDbg.RemoteTests/python_environment.py"
+        self.assertTrue(helper.is_file())
+        foreign = self.output / "foreign-package"
+        foreign.mkdir()
+        marker = foreign / "imported"
+        (foreign / "jsonschema.py").write_text(f"from pathlib import Path\nPath({str(marker)!r}).touch()\n")
+        environment = dict(os.environ) | {"PYTHONPATH": str(foreign)}
+        result = subprocess.run([sys.executable, str(helper)], env=environment,
+                                capture_output=True, text=True, timeout=15)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("jsonschema", result.stderr)
+        self.assertIn("outside", result.stderr)
+        self.assertFalse(marker.exists())
+
     def test_preflight_preserves_sdk_isolation_after_platform_environment_refresh(self):
         def sdk(*args, **kwargs):
             self.assertEqual(self.suite.env["DOTNET_CLI_USE_MSBUILD_SERVER"], "false")

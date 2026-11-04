@@ -297,6 +297,26 @@ class MobileRunnerTests(unittest.TestCase):
         self.assertNotIn("unittest", namespace)
         self.assertNotIn("FakeAdbDaemon", namespace)
 
+    def test_public_launch_schema_accepts_both_simulator_rids_and_rejects_unknown(self):
+        from jsonschema import Draft202012Validator
+        schema = json.loads((ROOT / "docs/remote-launch.schema.json").read_text())
+        Draft202012Validator.check_schema(schema)
+        validate = Draft202012Validator(schema)
+        for rid in ("iossimulator-arm64", "iossimulator-x64"):
+            options = {"assetsPath": "/fixture/symbols", "outputPath": "/fixture/run",
+                       "target": {"provider": "appleSimulator", "apple": {
+                           "applicationId": "com.dncdbg.mobiletests", "deviceId": "owned-simulator",
+                           "appPath": "/fixture/Fixture.app", "runtimeIdentifier": rid}}}
+            with self.subTest(rid=rid):
+                validate.validate(options)
+            for unknown in ("iossimulator-x86", "iossimulator-unknown", "ios-arm64", "android-x64", "", None, 42):
+                options["target"]["apple"]["runtimeIdentifier"] = unknown
+                with self.subTest(unknown=unknown):
+                    self.assertFalse(validate.is_valid(options))
+            del options["target"]["apple"]["runtimeIdentifier"]
+            validate.validate(options)
+        self.assertEqual(schema["$defs"]["apple"]["properties"]["runtimeIdentifier"]["default"], "iossimulator-arm64")
+
     def test_android_reclaims_only_unused_hosted_payloads_before_pinned_install(self):
         source = (ROOT / ".github/workflows/mobile.yml").read_text()
         start = source.index("name: Reclaim unused hosted SDK payloads")

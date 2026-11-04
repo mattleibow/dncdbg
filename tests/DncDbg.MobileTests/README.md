@@ -260,6 +260,23 @@ exports exhausted their separate 180s budget before scoped diagnose; that
 collector failure is preserved. Test-first corrections prioritize scoped diagnose
 and bound redaction of long non-email text without extending any deadline.
 
+The next run at `8a132a11b4847342a7f743a2419875472b2dbac8`
+([41756452002](https://github.com/mattleibow/dncdbg/actions/runs/41756452002))
+reproduced DataMigration timeout on **both** the bare native control and the
+post-tool-install harness. Nominal 240s readiness deadlines failed; delayed
+command/parent observation yielded actual boot totals **414.363s / 347.802s**,
+not successful bounded boots. A 10s `ps` probe returned after **12.961s / 24.352s**.
+Cleanup after diagnostics completed in **17.968s / 17.219s**. The pre-workload
+inventory and first-launch checks passed; no missing component or incompatible
+iPhone profile was demonstrated. Earlier green runs are not a reliable setup fix.
+
+This run also exposed a separate collector failure: `simctl diagnose` can return
+0 at its ENTER confirmation on EOF without collecting files. The probe now sends
+the confirmation on its private stdin, prioritizes diagnose before other system
+commands, and rejects empty collections and zero-exit results observed after
+their deadline. The original prompt-only/partial diagnostics remain preserved.
+These corrections do not resolve or relax the cold-boot gate.
+
 Portable diagnostic contracts (not hosted qualification):
 
 ```sh

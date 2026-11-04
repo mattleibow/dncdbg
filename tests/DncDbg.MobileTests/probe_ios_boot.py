@@ -129,7 +129,7 @@ class Probe:
     def save(self):
         (self.output / "state.json").write_text(json.dumps(self.state, indent=2))
 
-    def run(self, label, command, timeout=30, check=True, environment=None, payload_path=None):
+    def run(self, label, command, timeout=30, check=True, environment=None, payload_path=None, input=None):
         started, stamp = time.monotonic(), utc()
         raw = self.private / (label + ".raw")
         timed_out = False
@@ -137,9 +137,13 @@ class Probe:
         payload_oversized = False
         with raw.open("wb") as stream:
             process = subprocess.Popen(command, env=self.env if environment is None else environment,
-                                       stdin=subprocess.DEVNULL, stdout=stream, stderr=subprocess.STDOUT,
+                                       stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
+                                       stdout=stream, stderr=subprocess.STDOUT,
                                        start_new_session=self.mode == "harness")
             try:
+                if input is not None:
+                    process.stdin.write(input)
+                    process.stdin.close()
                 while process.poll() is None:
                     remaining = timeout - (time.monotonic() - started)
                     oversized = raw.stat().st_size > self.evidence.limit
@@ -164,9 +168,12 @@ class Probe:
         with raw.open("rb") as stream:
             text = stream.read(self.evidence.limit).decode("utf-8", errors="replace")
         raw.unlink()
+        elapsed = time.monotonic() - started
+        timed_out = timed_out or elapsed > timeout
         status = {"command": command, "startedUtc": stamp, "finishedUtc": utc(),
-                  "seconds": time.monotonic() - started, "timeoutSeconds": timeout,
+                  "seconds": elapsed, "timeoutSeconds": timeout,
                   "timedOut": timed_out, "outputLimitExceeded": oversized, "exitCode": process.returncode,
+                  "deadlineOvershootSeconds": max(0, elapsed - timeout), "stdinProvided": input is not None,
                   "rawDiagnoseLimitExceeded": payload_oversized,
                   "passed": process.returncode == 0 and not timed_out and not oversized and not payload_oversized}
         self.evidence.write(label + ".log", text)
@@ -181,7 +188,7 @@ class Probe:
             require(process.returncode == 0, f"{label} exited {process.returncode}; see bounded evidence.")
         return subprocess.CompletedProcess(command, process.returncode, text, "")
 
-    def host_snapshot(self, prefix):
+    def host_snapshot(self, prefix, deadline=None):
         for label, command in (
                 ("process-tree", ["ps", "-axo", "pid,ppid,pgid,stat,etime,pcpu,pmem,comm"]),
                 ("disk", ["df", "-h"]),
@@ -191,7 +198,9 @@ class Probe:
                                           f"gui/{os.getuid()}/com.apple.CoreSimulator.CoreSimulatorService"]),
                 ("windowserver-launchd", ["launchctl", "print", "system/com.apple.WindowServer"])):
             try:
-                self.run(prefix + "-" + label, command, timeout=10, check=False)
+                remaining = 10 if deadline is None else min(10, deadline - time.monotonic())
+                require(remaining > 0, prefix + "-" + label + ": diagnostic aggregate deadline reached")
+                self.run(prefix + "-" + label, command, timeout=remaining, check=False)
             except (TimeoutError, RuntimeError) as error:
                 self.state.setdefault("diagnosticErrors", []).append(str(error))
 
@@ -353,7 +362,6 @@ class Probe:
         deadline = started + DIAGNOSTIC_SECONDS
         errors = []
         self.state["diagnosticsStartedUtc"] = utc()
-        self.host_snapshot("after")
         device = self.state.get("device")
         commands = []
         if device:
@@ -370,11 +378,16 @@ class Probe:
                 break
             try:
                 result = self.run(label, command, timeout=min(limit, remaining), check=False,
-                                  payload_path=self.private / "diagnose" if label == "diagnose" else None)
+                                  payload_path=self.private / "diagnose" if label == "diagnose" else None,
+                                  input=b"\n" if label == "diagnose" else None)
                 if result.returncode:
                     errors.append(f"{label}: exit {result.returncode}")
+                if label == "diagnose" and not any(p.is_file() and not p.is_symlink()
+                                                   for p in (self.private / "diagnose").rglob("*")):
+                    errors.append("diagnose produced no files; a zero exit is not collection success")
             except (OSError, TimeoutError, RuntimeError) as error:
                 errors.append(str(error))
+        self.host_snapshot("after", deadline=deadline)
         if device:
             self.copy_text("device-logs", self.device_set / device / "data/Library/Logs", deadline=deadline)
             self.copy_text("device-migration", self.device_set / device / "data/Library/DataMigration",

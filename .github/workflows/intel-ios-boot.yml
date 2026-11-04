@@ -1,0 +1,49 @@
+name: Intel iOS cold boot diagnostics
+
+on:
+  push:
+    branches: [mattleibow-intel-boot-diagnostics]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    name: App-free boot diagnostic contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - run: python3 -m unittest discover -s tests/DncDbg.MobileTests -p test_ios_boot_probe.py -v
+
+  cold-boot:
+    name: Fresh Intel cold boot (${{ matrix.mode }})
+    needs: contracts
+    runs-on: macos-26-intel
+    timeout-minutes: 18
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [native, harness]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Reproduce exact cold boot without DNCDbg, dotnet or MAUI
+        run: >-
+          /usr/bin/python3 -u tests/DncDbg.MobileTests/probe_ios_boot.py
+          --mode ${{ matrix.mode }} --output build/intel-ios-${{ matrix.mode }}
+      - name: Preserve bounded redacted evidence collected before owned cleanup
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: intel-ios-boot-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.mode }}
+          path: build/intel-ios-${{ matrix.mode }}/evidence/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 6

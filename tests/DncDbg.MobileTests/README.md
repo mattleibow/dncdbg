@@ -216,6 +216,46 @@ arm64 admission. No permanently queued self-hosted job remains.
 Hosted capacity cancellation is infrastructure red, not a successful skip.
 Generic desktop CI/fakes and historical local evidence **do not make mobile green**.
 
+### Independent Intel cold-boot investigation
+
+[`intel-ios-boot.yml`](../../.github/workflows/intel-ios-boot.yml) is a manually
+dispatchable, app-free diagnostic workflow on the isolated
+`mattleibow-intel-boot-diagnostics` branch. It does not change the mobile workflow,
+the ARM default, or PR #20. Its two jobs use separate fresh `macos-26-intel` VMs
+and the exact **Xcode 26.6 / 17F113**, **iOS 26.5 / 23F77**, **iPhone 17 Pro**
+tuple, with **iossimulator-x64** recorded as the intended RID. No app, SDK,
+workload, agent or DevFlow broker is installed or executed.
+
+The native invocation and command-only PR #20 harness equivalent differ only in
+the recorded environment flags/process-session behavior. HOME, native TMPDIR,
+PATH, locale, default device set, selected tool paths and exact runtime inventories
+are recorded for comparison. This is not an assertion that a VM without workload
+installation has identical tool caches/PATH to the preserved PR #20 VM.
+The probe makes no first-launch, component, service, device-profile or GUI
+provisioning mutation. Installed Apple CLI help, first-launch status, license
+preferences, profiles/framework metadata, process trees, disk/memory, device plist
+state transitions, migration/device/service/crash logs, filtered unified logs,
+launchd state and scoped `simctl diagnose --udid` text are captured before cleanup.
+
+Each probe creates its own UUID-named simulator. Boot plus `bootstatus -b` share a
+**240-second readiness bound**; all identity-checked owned cleanup commands share a
+**30-second aggregate bound**. Diagnostic collection has a separate **180-second
+bound**, never an extension of readiness. Partial logs, errors, omissions, command
+timestamps/status, exact source SHA and runner image metadata remain explicit.
+Only redacted text/plist exports, at most **8 MiB/file and 100 MiB/run**, are uploaded
+with SHA-256 manifests and seven-day retention; raw diagnose output/data containers
+are not uploaded. A readiness/cleanup failure stays red.
+
+Portable diagnostic contracts (not hosted qualification):
+
+```sh
+python3 -m unittest discover -s tests/DncDbg.MobileTests -p test_ios_boot_probe.py -v
+```
+
+No Intel provisioning fix is established until a supported, evidenced setup passes
+two fresh hosted boot/cleanup runs and the unchanged full real iOS suite. Physical
+hardware remains outside this proof.
+
 Require **both named mobile jobs** in branch protection alongside all existing
 Debugger Windows/Linux/macOS, Docker and VS Code checks. Workflow triggers create
 checks but do not themselves configure repository branch protection. Never merge

@@ -61,6 +61,7 @@ class FakeProbe(probe.Probe):
         self.state["diagnosticsComplete"] = True
 
     def preflight(self):
+        self.host_verified = True
         self.calls.append(("preflight", [], 30))
 
     def observe(self, stop):
@@ -203,6 +204,14 @@ class BootProbeTests(unittest.TestCase):
         self.assertTrue(status["timedOut"])
         self.assertFalse(status["passed"])
         self.assertLess(status["seconds"], 3)
+
+    def test_unqualified_host_never_reads_host_logs(self):
+        p = probe.Probe(self.root / "probe", "native", dict(os.environ))
+        with patch.object(probe.platform, "machine", return_value="arm64"), \
+                patch.object(p, "diagnostics") as diagnostics:
+            self.assertEqual(p.execute(), 1)
+        diagnostics.assert_not_called()
+        self.assertFalse(p.state["passed"])
 
 
 if __name__ == "__main__":

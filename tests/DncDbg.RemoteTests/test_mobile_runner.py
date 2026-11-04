@@ -297,12 +297,38 @@ class MobileRunnerTests(unittest.TestCase):
     def test_desktop_contract_facade_uses_explicit_python_instead_of_xcode_python(self):
         source = (ROOT / ".github/workflows/ci.yml").read_text().split("\n  docker:", 1)[0]
         self.assertIn("uses: actions/setup-python@v5", source)
-        self.assertIn('python-version: "3.13"', source)
+        self.assertIn('python-version: "3.13.15"', source)
         contracts = source.split("name: Check native target ownership contracts (no mobile runtime)", 1)[1]
         contracts = contracts.split("\n      - ", 1)[0]
-        self.assertIn("DNCDBG_PYTHON: ${{ steps.python.outputs.python-path }}", contracts)
+        self.assertIn("DNCDBG_PYTHON: ${{ github.workspace }}/build/contract-python/bin/python", contracts)
         facade = (ROOT / "tests/CommonRunner.cs").read_text()
         self.assertIn('Environment.GetEnvironmentVariable("DNCDBG_PYTHON")', facade)
+
+    def test_portable_dependencies_are_hash_locked_in_an_isolated_environment(self):
+        source = (ROOT / ".github/workflows/ci.yml").read_text().split("\n  docker:", 1)[0]
+        install = source.split("name: Install portable contract dependencies", 1)[1].split("\n      - ", 1)[0]
+        self.assertIn("-m venv build/contract-python", install)
+        self.assertIn("--require-hashes --no-deps --only-binary=:all:", install)
+        self.assertIn("build/contract-python/bin/python -m pip", install)
+        lock = (ROOT / "tests/DncDbg.RemoteTests/requirements.txt").read_text()
+        expected = {"attrs", "jsonschema", "jsonschema-specifications", "referencing", "rpds-py"}
+        import re
+        entries = re.split(r"(?m)^(?=[a-z][a-z0-9-]*==)", lock)
+        pinned = {}
+        for entry in entries:
+            if not re.match(r"[a-z][a-z0-9-]*==", entry):
+                continue
+            name, version = entry.splitlines()[0].split()[0].split("==")
+            self.assertNotIn(name, pinned)
+            pinned[name] = version
+            hashes = re.findall(r"--hash=sha256:([a-f0-9]+)", entry)
+            self.assertTrue(hashes, name)
+            self.assertTrue(all(len(digest) == 64 for digest in hashes), name)
+        self.assertEqual(set(pinned), expected)
+        from importlib.metadata import distributions
+        installed = {d.metadata["Name"].lower().replace("_", "-"): d.version for d in distributions()
+                     if d.metadata["Name"].lower().replace("_", "-") not in {"pip", "setuptools", "wheel"}}
+        self.assertEqual(installed, pinned, "Portable test packages must be the exact locked closure, never global extras.")
 
     def test_fake_tool_processes_do_not_reload_the_entire_unittest_driver(self):
         helper = ROOT / "tests/DncDbg.RemoteTests/fake_mobile_tools.py"

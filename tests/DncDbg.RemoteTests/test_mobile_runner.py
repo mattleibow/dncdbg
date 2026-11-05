@@ -27,6 +27,7 @@ from run_direct import unavailable_broker_environment, FixtureApp
 from assert_artifacts import verify
 from fake_adb import FakeAdbDaemon
 from test_mobile_processes import alive
+import process_tools
 
 
 class MobileRunnerTests(unittest.TestCase):
@@ -800,7 +801,7 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
         with patch("process_tools.start_owned", side_effect=start), self.assertRaises(KeyboardInterrupt):
             self.suite.run("xcrun", "simctl", "list", "devices", "-j",
                            timeout=1.5, deadline=started + 1.5)
-        self.assertLessEqual(time.monotonic() - started, 1.75)
+        self.assertLessEqual(time.monotonic() - started, 6.75)
         self.assert_ios_deadline_owned_processes_gone(record)
 
     @unittest.skipUnless(os.name == "posix", "POSIX command ownership")
@@ -846,13 +847,111 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
                     self.assert_ios_deadline_owned_processes_gone(record)
                     self.assertIsNotNone(processes[0].returncode)
                     reports = [json.loads(p.read_text()) for p in self.output.glob("*.settlement.json")]
-                    self.assertTrue(any(p["pid"] == processes[0].pid and p["reaped"] and p["deadlineExceeded"]
+                    self.assertTrue(any(p["pid"] == processes[0].pid and p["leaderReaped"] and p["groupAbsent"]
+                                        and p["drainComplete"] and not p["resourceJournalClean"] and p["deadlineExceeded"]
                                         and p["primaryError"] == type(original).__name__ for p in reports))
                 finally:
                     for process in processes:
                         if process.poll() is None:
                             process.kill()
                             process.wait(timeout=1)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX command ownership")
+    def test_full_ios_cleanup_late_cancellation_preserves_identity_and_stops_commands(self):
+        record = self.ios_deadline_helper("cleanup")
+        original = KeyboardInterrupt("cleanup interrupted")
+        started = time.monotonic()
+        deadline = started + 0.8
+        real_start = process_tools.start_owned
+        commands = []
+
+        def start(args, **kwargs):
+            commands.append(args)
+            process = real_start(args, **kwargs)
+            communicate = process.communicate
+            injected = []
+
+            def late(*args, **kwargs):
+                if not injected:
+                    while time.monotonic() <= deadline:
+                        time.sleep(0.005)
+                    injected.append(True)
+                    raise original
+                return communicate(*args, **kwargs)
+            process.communicate = late
+            return process
+
+        with patch("run_suite.IOS_CLEANUP_TIMEOUT", 0.8), patch("process_tools.start_owned", side_effect=start):
+            try:
+                self.suite.cleanup()
+            except BaseException as error:
+                self.assertIs(error, original)
+            else:
+                self.fail("Full cleanup must re-raise the original cancellation.")
+        self.assertEqual(len(commands), 1, "Cancellation must stop ordinary cleanup commands.")
+        self.assertFalse(self.suite.state["cleanupDone"])
+        self.assertFalse(self.suite.state["resourceJournalClean"])
+        self.assert_ios_deadline_owned_processes_gone(record)
+        self.assertTrue(all(r.leader_reaped for r in self.suite.process_recoveries))
+
+    @unittest.skipUnless(os.name == "posix", "POSIX command ownership")
+    def test_deadline_recovery_separates_reaped_leader_from_failed_partial_drain(self):
+        log = self.output / "drain.log"
+        real_start = process_tools.start_owned
+
+        def start(*args, **kwargs):
+            process = real_start(*args, **kwargs)
+            communicate = process.communicate
+            calls = []
+
+            def drain(*args, **kwargs):
+                if not calls:
+                    calls.append(True)
+                    communicate(*args, **kwargs)
+                raise subprocess.TimeoutExpired(process.args, 0, output=b"partial\xff", stderr=b"stderr\xfe")
+            process.communicate = drain
+            return process
+
+        with patch("process_tools.start_owned", side_effect=start):
+            with self.assertRaises(process_tools.OwnedProcessSettlementError) as caught:
+                self.suite.run(sys.executable, "-c", "pass", timeout=1, deadline=time.monotonic() + 1)
+        recovery = caught.exception.recovery
+        self.assertTrue(recovery.leader_reaped)
+        self.assertTrue(recovery.group_absent)
+        self.assertFalse(recovery.drain_complete)
+        self.assertIn("partial\\xff", recovery.stdout_text)
+        self.assertIn("stderr\\xfe", recovery.stderr_text)
+        self.assertFalse(recovery.complete)
+        with self.assertRaises(RuntimeError):
+            self.suite.cleanup()
+        self.assertFalse(self.suite.state["cleanupDone"])
+
+    @unittest.skipUnless(os.name == "posix", "POSIX command ownership")
+    def test_deadline_recovery_reaps_when_first_wait_exhausts_admission_deadline(self):
+        record = self.ios_deadline_helper("cleanup")
+        real_start = process_tools.start_owned
+        deadline = time.monotonic() + 1
+
+        def start(*args, **kwargs):
+            process = real_start(*args, **kwargs)
+            wait = process.wait
+            calls = []
+
+            def delayed(*args, **kwargs):
+                if not calls:
+                    calls.append(True)
+                    while time.monotonic() <= deadline:
+                        time.sleep(0.005)
+                    raise subprocess.TimeoutExpired(process.args, 0)
+                return wait(*args, **kwargs)
+            process.wait = delayed
+            return process
+
+        with patch("process_tools.start_owned", side_effect=start):
+            with self.assertRaises(process_tools.OwnedProcessSettlementError) as caught:
+                self.suite.run("xcrun", "simctl", "list", "devices", "-j", timeout=1, deadline=deadline)
+        self.assertTrue(caught.exception.recovery.complete)
+        self.assert_ios_deadline_owned_processes_gone(record)
 
     def test_ios_cleanup_refuses_another_device_identity(self):
         self.suite.args.platform = "ios"

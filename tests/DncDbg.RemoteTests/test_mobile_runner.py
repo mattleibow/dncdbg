@@ -845,6 +845,9 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
                     self.assertLessEqual(time.monotonic() - started, 1.75)
                     self.assert_ios_deadline_owned_processes_gone(record)
                     self.assertIsNotNone(processes[0].returncode)
+                    reports = [json.loads(p.read_text()) for p in self.output.glob("*.settlement.json")]
+                    self.assertTrue(any(p["pid"] == processes[0].pid and p["reaped"] and p["deadlineExceeded"]
+                                        and p["primaryError"] == type(original).__name__ for p in reports))
                 finally:
                     for process in processes:
                         if process.poll() is None:

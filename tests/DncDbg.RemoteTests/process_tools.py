@@ -1,5 +1,6 @@
 """Owned POSIX commands shared by remote/native/mobile test entrypoints."""
 import os
+import json
 import signal
 import socket
 import subprocess
@@ -7,6 +8,10 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+class OwnedProcessSettlementError(RuntimeError):
+    """The operation failed and its owner needed emergency settlement past its deadline."""
 
 
 def start_owned(*args, **kwargs):
@@ -102,9 +107,32 @@ def run_owned(*args, env=None, check=True, input=None, timeout=180, log=None, cw
                     stderr = stderr.decode(errors="replace") if isinstance(stderr, bytes) else stderr
             finally:
                 remaining = max(0, deadline - time.monotonic())
-                stop_owned(process, grace_period=min(0.25, remaining / 2),
-                           settle_timeout=remaining, deadline=deadline)
-                stdout, stderr = process.communicate(timeout=max(0, deadline - time.monotonic()))
+                try:
+                    if not remaining:
+                        raise subprocess.TimeoutExpired(args, timeout)
+                    stop_owned(process, grace_period=min(0.25, remaining / 2),
+                               settle_timeout=remaining, deadline=deadline)
+                    stdout, stderr = process.communicate(timeout=max(0, deadline - time.monotonic()))
+                except BaseException as settlement:
+                    original = failure if failure is not None else settlement
+                    # Failure-only reaper, within the documented scheduler epsilon; never success.
+                    reap_deadline = time.monotonic() + 0.2
+                    reaped = False
+                    try:
+                        stop_owned(process, grace_period=0.05, settle_timeout=0.2, deadline=reap_deadline)
+                        stdout, stderr = process.communicate(timeout=max(0, reap_deadline - time.monotonic()))
+                        reaped = process.returncode is not None
+                    except BaseException as emergency:
+                        settlement = emergency
+                    if log:
+                        Path(log).with_suffix(".settlement.json").write_text(json.dumps({
+                            "pid": process.pid, "processGroup": process.pid, "reaped": reaped,
+                            "returnCode": process.returncode, "primaryError": type(original).__name__,
+                            "settlementError": type(settlement).__name__, "deadlineExceeded": time.monotonic() > deadline,
+                        }, indent=2))
+                    raise OwnedProcessSettlementError(
+                        f"Owned process {process.pid}/group {process.pid} required emergency settlement; "
+                        f"reaped={reaped}, returncode={process.returncode}; see {log}.") from original
         finally:
             for stream in (process.stdin, process.stdout, process.stderr):
                 if stream is not None:

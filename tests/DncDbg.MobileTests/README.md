@@ -231,6 +231,11 @@ remains a red gate, never a successful skip.
   post-deadline waits. Real parent/child tests require completion within a
   1.5-second test budget plus only 250 ms of scheduler tolerance, captured
   output, no surviving listener/PID and cancellation settlement.
+  If cancellation or another error arrives after the deadline, a synchronous
+  failure-only owner gets at most 200 ms within that scheduler tolerance to
+  terminate, drain and reap the exact group. This never admits success: an
+  `OwnedProcessSettlementError` chains the original error and records PID/group,
+  reaping/exit state and error types in bounded `.settlement.json` evidence.
 - **`Mobile Android emulator (pinned)`** uses hosted **`ubuntu-24.04`**,
   explicitly enables/checks KVM and runs the **entire same** unified suite with
   the separate x64 pins. It does not merely cross-build an APK, run host fakes,

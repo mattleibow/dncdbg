@@ -1709,6 +1709,82 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
                            timeout=0.5)
         self.assertIn("before timeout", next(self.output.glob("*.log")).read_text())
 
+    def run_ios_phase_contract(self, failure=None):
+        destination = self.output / "phase-contract"
+        suite = Suite(Namespace(platform="ios", output=destination, xcode_dir=None))
+        calls = []
+
+        def build(configuration="Debug", faults=False):
+            calls.append(("build", configuration, faults))
+            if configuration == "Release" and failure == "release":
+                raise TimeoutError("controlled Release timeout")
+            return Path(configuration + "-app"), Path(configuration + "-assets")
+
+        def fixture(app, assets, proof, name, disconnect=False):
+            calls.append(("fixture", name, str(app), str(assets), disconnect))
+            if name == "debugger-dap-broker-unavailable" and failure == "first-dap":
+                raise RuntimeError("controlled first DAP failure")
+
+        def cleanup():
+            calls.append(("cleanup",))
+            suite.state["cleanupDone"] = True
+            suite.save()
+
+        previous = signal.getsignal(signal.SIGTERM)
+        try:
+            with patch.object(sys, "argv", ["run_suite.py", "--platform", "ios", "--output", str(destination)]), \
+                    patch("run_suite.Suite", return_value=suite), patch.object(suite, "preflight"), \
+                    patch.object(suite, "boot"), patch.object(suite, "broker"), \
+                    patch.object(suite, "build", side_effect=build), patch.object(suite, "fixture_proof", side_effect=fixture), \
+                    patch.object(suite, "proof", side_effect=lambda helper, *a: calls.append(("proof", helper))), \
+                    patch.object(suite, "cleanup", side_effect=cleanup):
+                result = run_suite.main()
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+        manifest = json.loads((destination / "evidence/manifest.json").read_text())
+        return result, calls, manifest
+
+    def test_ios_first_dap_precedes_release_but_every_original_phase_remains_required(self):
+        result, calls, manifest = self.run_ios_phase_contract()
+        self.assertEqual(result, 0)
+        self.assertEqual(calls[:3], [
+            ("build", "Debug", False),
+            ("fixture", "debugger-dap-broker-unavailable", "Debug-app", "Debug-assets", False),
+            ("build", "Release", True)])
+        self.assertIn(("fixture", "direct-continue", "Debug-app", "Debug-assets", False), calls)
+        self.assertIn(("fixture", "direct-disconnect", "Debug-app", "Debug-assets", True), calls)
+        self.assertIn(("fixture", "devflow-only", "Debug-app", "Debug-assets", False), calls)
+        self.assertIn(("proof", "run_device.py"), calls)
+        self.assertIn(("proof", "run_faults.py"), calls)
+        self.assertEqual([call for call in calls if call[0] == "build"], [
+            ("build", "Debug", False), ("build", "Release", True),
+            ("build", "Debug", True), ("build", "Debug", False)])
+        self.assertEqual(calls[-1], ("cleanup",))
+        self.assertTrue(manifest["passed"] and manifest["cleanup"] and manifest["phases"]["complete"])
+        self.assertEqual(manifest["phases"]["completed"], manifest["phases"]["required"])
+        self.assertEqual(manifest["phases"]["completed"][:5], [
+            "tuple-admission", "device-boot", "debug-build", "broker-independent-dap", "release-isolation"])
+
+    def test_ios_release_failure_after_first_dap_never_qualifies_the_suite(self):
+        result, calls, manifest = self.run_ios_phase_contract("release")
+        self.assertEqual(result, 1)
+        self.assertEqual([call[:2] for call in calls], [
+            ("build", "Debug"), ("fixture", "debugger-dap-broker-unavailable"), ("build", "Release"), ("cleanup",)])
+        self.assertFalse(manifest["passed"] or manifest["phases"]["complete"])
+        self.assertTrue(manifest["cleanup"])
+        self.assertIn("controlled Release timeout", manifest["error"])
+        self.assertEqual(manifest["phases"]["completed"][-1], "broker-independent-dap")
+
+    def test_ios_first_dap_failure_stops_later_builds_but_retains_cleanup_and_evidence(self):
+        result, calls, manifest = self.run_ios_phase_contract("first-dap")
+        self.assertEqual(result, 1)
+        self.assertEqual([call[:2] for call in calls], [
+            ("build", "Debug"), ("fixture", "debugger-dap-broker-unavailable"), ("cleanup",)])
+        self.assertFalse(manifest["passed"] or manifest["phases"]["complete"])
+        self.assertTrue(manifest["cleanup"])
+        self.assertIn("controlled first DAP failure", manifest["error"])
+        self.assertEqual(manifest["phases"]["completed"][-1], "debug-build")
+
     def test_fault_failure_still_restores_ordinary_native_helper(self):
         builds = []
 

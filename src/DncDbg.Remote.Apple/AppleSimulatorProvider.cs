@@ -123,7 +123,8 @@ public sealed class AppleSimulatorProvider : IRemoteTargetProvider
             string destination = name;
             if (name == "dncdbg-remote.json")
             {
-                JsonNode descriptor = JsonNode.Parse(content) ?? throw new InvalidDataException("Empty Apple descriptor.");
+                JsonNode descriptor = JsonNode.Parse(content, new JsonNodeOptions { PropertyNameCaseInsensitive = true })
+                    ?? throw new InvalidDataException("Empty Apple descriptor.");
                 descriptor["Endpoint"]?.AsObject().Remove("Token");
                 content = descriptor.ToJsonString();
                 destination = "descriptor.json";

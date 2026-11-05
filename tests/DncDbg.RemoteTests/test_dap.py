@@ -596,6 +596,22 @@ class MobileDapTests(unittest.TestCase):
                     factory.return_value.close.assert_called_once_with()
                     pool.return_value.shutdown.assert_called_once_with(wait=True, cancel_futures=True)
 
+    def test_primary_cancellation_skips_optional_collection_but_keeps_owned_cleanup(self):
+        sys.path.insert(0, str(ROOT / "tests/DncDbg.MobileTests"))
+        from run_direct import dap_proof
+        for primary in (KeyboardInterrupt("cancelled"), SystemExit(7)):
+            with self.subTest(primary=type(primary).__name__):
+                with patch("run_direct.Dap") as factory, patch("run_direct.ThreadPoolExecutor") as pool, \
+                        patch("run_direct.collect_ios_failure") as collect:
+                    factory.return_value.request.side_effect = primary
+                    factory.return_value.transcript = []
+                    with self.assertRaises(type(primary)) as raised:
+                        dap_proof(Namespace(serial=None), Namespace(output=self.state), self.state / "assets", self.env)
+                    self.assertIs(raised.exception, primary)
+                    collect.assert_not_called()
+                    factory.return_value.close.assert_called_once_with()
+                    pool.return_value.shutdown.assert_called_once_with(wait=True, cancel_futures=True)
+
     def test_ios_replacement_removes_stale_descriptor_before_delayed_publication(self):
         self.remote = Remote(self.state, "iOS")
         (self.state / "installed").touch()

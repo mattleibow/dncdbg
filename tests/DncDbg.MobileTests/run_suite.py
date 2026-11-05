@@ -17,7 +17,8 @@ import uuid
 
 from mobile_tools import ROOT, adb_path, android_sdk, tool_environment
 
-from process_tools import OwnedProcessRecovery, OwnedProcessSettlementError, original_cancellation, run_owned, start_owned, stop_owned
+from process_tools import (OwnedProcessRecovery, OwnedProcessSettlementError, ProcessGroupOwnership,
+                           original_cancellation, run_owned, start_owned, stop_owned)
 
 PIN = json.loads(Path(__file__).with_name("tuple.json").read_text())
 FIXTURE = ROOT / "tests/DncDbg.MauiTestApp"
@@ -78,11 +79,24 @@ class Suite:
     def save(self):
         self.state_path.write_text(json.dumps(self.state, indent=2))
 
+    def recovery_state(self):
+        return [{
+            "pid": r.process.pid, "processGroup": r.process.pid,
+            "leaderReaped": r.leader_reaped, "groupAbsent": r.group_absent, "drainComplete": r.drain_complete,
+            "isBuild": getattr(r, "is_build", False),
+            "originalIdentity": r.group_ownership.original if r.group_ownership is not None else None,
+        } for r in self.owned_recoveries()]
+
     def run(self, *command, cwd=ROOT, timeout=180, check=True, input=None, grouped=True,
             progress=False, progress_interval=30, environment=None, deadline=None):
+        require(not any(not r.complete for r in self.owned_recoveries()) and
+                not (self.state.get("commandRecoveryRequired", False) and not any(self.owned_recoveries())),
+                "Unverified owned command recovery forbids another ordinary command.")
         if progress:
             require(grouped, "Build diagnostics require owned process groups.")
             return self.run_progress(command, cwd, timeout, check, input, progress_interval, environment)
+        if grouped and deadline is None:
+            return self.run_progress(command, cwd, timeout, check, input, None, environment)
         self.number += 1
         print("RUN:", " ".join(str(c) for c in command), flush=True)
         if deadline is not None:
@@ -98,10 +112,7 @@ class Suite:
                 first_error, first_cause = error, error.__cause__
                 try:
                     try:
-                        self.state["processRecovery"] = [{
-                            "pid": r.process.pid, "processGroup": r.process.pid,
-                            "leaderReaped": r.leader_reaped, "groupAbsent": r.group_absent, "drainComplete": r.drain_complete,
-                        } for r in self.owned_recoveries()]
+                        self.state["processRecovery"] = self.recovery_state()
                         self.save()
                     except BaseException as recording_failure:
                         first_error.recovery.record_failure = recording_failure
@@ -145,39 +156,132 @@ class Suite:
         log = self.output / f"{self.number:03d}-{Path(str(command[0])).name}.log"
         started = time.monotonic()
         timed_out = False
+        owner = OwnedProcessRecovery(None, log, started + timeout)
+        owner.file_output = True
+        owner.is_build = interval is not None
+        owner.group_ownership = ProcessGroupOwnership(owner)
+        self.recovery_fallback = owner
         print("RUN:", " ".join(str(c) for c in command), flush=True)
-        with log.open("w") as stream:
-            process = start_owned([str(c) for c in command], cwd=cwd,
-                                  env=build_environment(self.env if environment is None else environment),
-                                  text=True, stdin=subprocess.PIPE, stdout=stream, stderr=subprocess.STDOUT)
-            first = True
-            try:
-                while True:
-                    remaining = timeout - (time.monotonic() - started)
-                    if remaining <= 0:
+        process = None
+        try:
+            self.state["commandRecoveryRequired"] = True
+            self.state["cleanupDone"] = False
+            if owner.is_build:
+                self.state["buildGroupSettled"] = False
+            self.save()
+            with log.open("wb") as stream:
+                try:
+                    command_environment = self.env if environment is None else environment
+                    process = start_owned([str(c) for c in command], owner=owner, cwd=cwd,
+                                          env=build_environment(command_environment) if interval is not None else command_environment,
+                                          text=False, stdin=subprocess.PIPE, stdout=stream, stderr=subprocess.STDOUT)
+                    owner.group_ownership.capture()
+                    self.state["processRecovery"] = self.recovery_state()
+                    self.save()
+                    self.process_recoveries.append(owner)
+                    owner.await_exec(command, owner.deadline)
+                    first = True
+                    while True:
+                        remaining = owner.deadline - time.monotonic()
+                        if remaining <= 0:
+                            timed_out = True
+                            raise TimeoutError(f"{command[0]} exceeded {timeout}s; partial output: {log.relative_to(ROOT)}")
+                        try:
+                            process.communicate(
+                                input.encode() if first and isinstance(input, str) else input if first else None,
+                                timeout=min(interval, remaining) if interval is not None else remaining)
+                            break
+                        except subprocess.TimeoutExpired as error:
+                            first = False
+                            if time.monotonic() >= owner.deadline:
+                                timed_out = True
+                                raise TimeoutError(
+                                    f"{command[0]} exceeded {timeout}s; partial output: {log.relative_to(ROOT)}") from error
+                            if interval is not None:
+                                lines = log.read_text(errors="replace").splitlines()
+                                print(f"BUILD still running: {time.monotonic() - started:.1f}/{timeout}s; "
+                                      f"last output: {lines[-1] if lines else '<none yet>'}; log: {log.relative_to(ROOT)}", flush=True)
+                    if time.monotonic() > owner.deadline:
                         timed_out = True
-                        stop_owned(process)
-                        break
+                        raise TimeoutError(f"{command[0]} exceeded {timeout}s; partial output: {log.relative_to(ROOT)}")
+                    if check and process.returncode:
+                        raise RuntimeError(f"{command[0]} exited {process.returncode}; see {log.relative_to(ROOT)}\n"
+                                           + log.read_text(errors="replace")[-4000:])
+                except subprocess.TimeoutExpired as error:
+                    timed_out = True
+                    primary = TimeoutError(f"{command[0]} exceeded {timeout}s; partial output: {log.relative_to(ROOT)}")
+                    primary.__cause__ = error
+                    owner.preserve_error(primary)
+                except BaseException as error:
+                    owner.preserve_error(error)
+                finally:
+                    process = owner.process
+                    if process is not None:
+                        try:
+                            if owner.primary_error is None and not owner.settle(owner.deadline):
+                                owner.preserve_error(RuntimeError("Command completed but its owned group did not settle."))
+                            if isinstance(owner.primary_error, subprocess.TimeoutExpired):
+                                timed_out = True
+                                primary = TimeoutError(
+                                    f"{command[0]} exceeded {timeout}s; partial output: {log.relative_to(ROOT)}")
+                                primary.__cause__ = owner.primary_error
+                                owner.preserve_error(primary)
+                            if not owner.complete:
+                                owner.finish()
+                        except BaseException as error:
+                            owner.preserve_error(error)
+                        finally:
+                            try:
+                                owner.safe_record()
+                            finally:
+                                if owner.complete:
+                                    for pipe in (process.stdin, process.stdout, process.stderr):
+                                        if pipe is not None:
+                                            pipe.close()
+        except BaseException as error:
+            owner.preserve_error(error)
+        finally:
+            if owner.process is not None:
+                try:
+                    builds = [r for r in self.owned_recoveries() if getattr(r, "is_build", False)]
+                    if builds:
+                        self.state["buildGroupSettled"] = all(r.complete for r in builds)
+                    else:
+                        self.state.setdefault("buildGroupSettled", True)
+                    self.state["processRecovery"] = self.recovery_state()
+                    self.state["commandRecoveryRequired"] = any(not r.complete for r in self.owned_recoveries())
+                    log.with_suffix(".status.json").write_text(json.dumps({
+                        "command": Path(str(command[0])).name, "argumentCount": len(command) - 1,
+                        "seconds": time.monotonic() - started,
+                        "timeoutSeconds": timeout, "timedOut": timed_out, "exitCode": owner.process.returncode,
+                        "primaryError": type(owner.primary_error).__name__ if owner.primary_error else None,
+                        "buildGroupSettled": owner.complete, "recoveryErrors": owner.errors,
+                        "leaderReaped": owner.leader_reaped, "groupAbsent": owner.group_absent,
+                        "drainComplete": owner.drain_complete,
+                        **owner.group_ownership.report(),
+                    }, indent=2))
+                    self.save()
+                except BaseException as error:
+                    owner.record_failure = error
+                    owner.preserve_error(error)
                     try:
-                        process.communicate(input if first else None, timeout=min(interval, remaining))
-                        break
-                    except subprocess.TimeoutExpired:
-                        first = False
-                        lines = log.read_text(errors="replace").splitlines()
-                        print(f"BUILD still running: {time.monotonic() - started:.1f}/{timeout}s; "
-                              f"last output: {lines[-1] if lines else '<none yet>'}; log: {log.relative_to(ROOT)}", flush=True)
-            finally:
-                stop_owned(process)
-                log.with_suffix(".status.json").write_text(json.dumps({
-                    "command": [str(c) for c in command], "seconds": time.monotonic() - started,
-                    "timeoutSeconds": timeout, "timedOut": timed_out, "exitCode": process.returncode,
-                }, indent=2))
-        text = log.read_text()
-        if timed_out:
-            raise TimeoutError(f"{command[0]} exceeded {timeout}s; partial output: {log.relative_to(ROOT)}")
-        if check and process.returncode:
-            raise RuntimeError(f"{command[0]} exited {process.returncode}; see {log.relative_to(ROOT)}\n{text[-4000:]}")
-        return subprocess.CompletedProcess(command, process.returncode, text, "")
+                        owner.record_errors.append(type(error).__name__)
+                    except BaseException:
+                        pass
+            else:
+                try:
+                    self.state["commandRecoveryRequired"] = any(not r.complete for r in self.owned_recoveries())
+                    if owner.is_build:
+                        self.state["buildGroupSettled"] = all(
+                            r.complete for r in self.owned_recoveries() if getattr(r, "is_build", False))
+                    self.save()
+                except BaseException as error:
+                    owner.preserve_error(error)
+        if owner.primary_error is not None:
+            raise owner.primary_error
+        if owner.process is None or not owner.complete:
+            raise owner.failure_exception
+        return subprocess.CompletedProcess(command, owner.process.returncode, log.read_text(errors="backslashreplace"), "")
 
     def json(self, *command, **kwargs):
         return json.loads(self.run(*command, **kwargs).stdout)
@@ -248,11 +352,8 @@ class Suite:
             self.state["uiPort"] = reserve.getsockname()[1] if self.args.platform == "ios" else 9223
         self.save()
         if self.args.platform == "ios":
-            device = self.run("xcrun", "simctl", "create", name, self.ios["deviceType"],
-                              self.ios["runtime"]).stdout.strip()
-            self.state["device"] = device
-            self.save()
             started = time.monotonic()
+            device = None
             ready = False
 
             def remaining():
@@ -263,6 +364,10 @@ class Suite:
 
             try:
                 deadline = started + IOS_BOOT_TIMEOUT
+                device = self.run("xcrun", "simctl", "create", name, self.ios["deviceType"], self.ios["runtime"],
+                                  timeout=min(180, remaining()), deadline=deadline).stdout.strip()
+                self.state["device"] = device
+                self.save()
                 self.run("xcrun", "simctl", "boot", device, timeout=remaining(), deadline=deadline)
                 self.run("xcrun", "simctl", "bootstatus", device, "-b", timeout=remaining(), deadline=deadline)
                 devices = self.json("xcrun", "simctl", "list", "devices", "-j", timeout=remaining(), deadline=deadline)
@@ -437,7 +542,8 @@ class Suite:
             self.phase_completed("faults")
         finally:
             # Faults must not leave the ordinary helper/package in a poisoned build state.
-            app, assets = self.build()
+            if original_cancellation(sys.exc_info()[1]) is None and not any(not r.complete for r in self.owned_recoveries()):
+                app, assets = self.build()
         self.phase_completed("ordinary-debug-restored")
         self.proof("run_device.py", app, assets, "restored-dap")
         self.phase_completed("restored-dap")
@@ -492,6 +598,9 @@ class Suite:
         errors = []
         cancellation = None
         ios_deadline = time.monotonic() + IOS_CLEANUP_TIMEOUT if self.args.platform == "ios" else None
+        unverified_command = self.state.get("commandRecoveryRequired", False) and not any(self.owned_recoveries())
+        if unverified_command:
+            errors.append("Unverified owned command launch/recovery journal from an unavailable original owner.")
         if not self.process_recoveries and self.recovery_fallback is None and any(not all(r.get(key, False) for key in
                 ("leaderReaped", "groupAbsent", "drainComplete")) for r in self.state.get("processRecovery", [])):
             errors.append("Unverified process recovery journal from an unavailable original owner; refusing completion.")
@@ -517,7 +626,7 @@ class Suite:
 
         def clean(*command, **kwargs):
             nonlocal cancellation
-            if cancellation is not None or any(not r.complete for r in self.owned_recoveries()):
+            if unverified_command or cancellation is not None or any(not r.complete for r in self.owned_recoveries()):
                 return None
             try:
                 timeout = 30
@@ -652,13 +761,22 @@ class Suite:
             shutil.rmtree(self.output / "work", ignore_errors=True)
         finish_recoveries()
         if self.process_recoveries or self.recovery_fallback is not None:
-            self.state["processRecovery"] = [{
-                "pid": r.process.pid, "processGroup": r.process.pid,
-                "leaderReaped": r.leader_reaped, "groupAbsent": r.group_absent, "drainComplete": r.drain_complete,
-            } for r in self.owned_recoveries()]
+            self.state["processRecovery"] = self.recovery_state()
+            self.state["commandRecoveryRequired"] = any(not r.complete for r in self.owned_recoveries())
         self.state["cleanupErrors"] = errors
-        self.state["resourceJournalClean"] = not errors
-        self.state["cleanupDone"] = not errors
+        builds = [r for r in self.owned_recoveries() if getattr(r, "is_build", False)]
+        if builds:
+            self.state["buildGroupSettled"] = all(r.complete for r in builds)
+        else:
+            self.state.setdefault("buildGroupSettled", not any(r.get("isBuild") and not all(r.get(key, False) for key in
+                ("leaderReaped", "groupAbsent", "drainComplete")) for r in self.state.get("processRecovery", [])))
+        resource_clean = not errors
+        if not self.state["buildGroupSettled"]:
+            errors.append("Build process-group settlement remains unverified.")
+        if self.args.platform == "ios":
+            self.state["simulatorJournalClean"] = resource_clean
+        self.state["resourceJournalClean"] = resource_clean
+        self.state["cleanupDone"] = resource_clean and self.state["buildGroupSettled"]
         try:
             self.save()
         except BaseException as write_error:
@@ -682,6 +800,8 @@ class Suite:
                                "completed": self.state.get("completedPhases", []),
                                "complete": self.state.get("phasesComplete", False)},
                     "cleanup": self.state.get("cleanupDone", False),
+                    "buildGroupSettled": self.state.get("buildGroupSettled", True),
+                    "simulatorJournalClean": self.state.get("simulatorJournalClean", False),
                     "resourceJournalClean": self.state.get("resourceJournalClean", self.state.get("cleanupDone", False)),
                     "cleanupErrors": self.state.get("cleanupErrors", []), "files": {}}
         if self.args.platform in ("ios", "android"):
@@ -795,7 +915,7 @@ def main():
                 except BaseException as failure:
                     remember(failure)
 
-        if passed and not suite.state.get("cleanupDone", False):
+        if (passed or args.cleanup) and not suite.state.get("cleanupDone", False):
             remember(RuntimeError("Owned cleanup remains unverified after the required mobile phases."))
         # All rich reporting/bookkeeping is inside the outer non-escaping perimeter.
         error = repr(primary) if primary is not None else None

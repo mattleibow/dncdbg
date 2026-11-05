@@ -210,6 +210,23 @@ hash inventories also require Release to leave the previously proven Debug
 app, agent/package metadata and DLL/PDB assets unchanged. Android retains its
 Release-first order.
 
+Build and ordinary grouped commands retain their actual process owner before
+launch. A build timeout remains the primary failure through signal, drain,
+status and evidence errors. Status/settlement evidence separates
+`buildGroupSettled`, `simulatorJournalClean` and overall `cleanup`; a clean
+simulator journal cannot qualify an unverified build group. There is no second
+unconditional finalizer or repeated nonzero signal.
+
+Prospective ownership records use the original PID/PGID/session, effective
+UID and public kernel birth identity (Linux `/proc`, macOS public `libproc`),
+Popen poll/return state, scoped group probes and each signal's pre/post
+identities and errno. Different/reused identities, foreign UIDs/sessions and
+malformed probe rows refuse signals or absence claims. After the leader is
+reaped, only an exact previously journaled member can authorize its original
+group. No process command lines/environment, global ancestry scan or inferred
+shared-service kill is used. iOS creation shares the same existing 600-second
+provisioning clock rather than starting an extra budget before boot.
+
 Build budgets are separate from debugger/RPC and fault deadlines. The first
 hosted iOS attempt exceeded 600 seconds in a cold Release build with no useful
 quiet output. Release packaging now has a **20-minute build-only bound**;

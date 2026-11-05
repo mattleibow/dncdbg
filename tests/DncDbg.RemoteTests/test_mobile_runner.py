@@ -1756,6 +1756,10 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
             self.assertFalse(status["buildGroupSettled"])
             self.assertIn("PermissionError", status["recoveryErrors"])
             self.assertIn("build ready", next(self.output.glob("*.log")).read_text())
+            with patch("run_suite.start_owned", side_effect=AssertionError("Unverified owner must not launch again")) as launch:
+                with self.assertRaisesRegex(RuntimeError, "Unverified.*ordinary"):
+                    self.suite.run("must-not-run")
+            launch.assert_not_called()
             with patch.object(self.suite, "run", side_effect=AssertionError("No ordinary cleanup after an unverified build")) as ordinary, \
                     patch("process_tools.stop_owned", side_effect=PermissionError(errno.EPERM, "controlled signal denial")):
                 with self.assertRaises(RuntimeError):

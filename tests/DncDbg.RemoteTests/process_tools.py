@@ -1,5 +1,7 @@
 """Owned POSIX commands shared by remote/native/mobile test entrypoints."""
 import os
+import ctypes
+import errno
 import json
 import selectors
 import signal
@@ -10,6 +12,154 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def process_identity(pid):
+    """Public kernel birth identity, never an ancestry or executable-name inference."""
+    try:
+        if sys.platform == "darwin":
+            class BsdInfo(ctypes.Structure):
+                _fields_ = [(name, ctypes.c_uint32) for name in (
+                    "flags", "status", "xstatus", "pid", "ppid", "uid", "gid", "ruid", "rgid",
+                    "svuid", "svgid", "reserved")] + [
+                    ("comm", ctypes.c_char * 16), ("name", ctypes.c_char * 32),
+                    ("nfiles", ctypes.c_uint32), ("pgid", ctypes.c_uint32), ("jobc", ctypes.c_uint32),
+                    ("tdev", ctypes.c_uint32), ("tpgid", ctypes.c_uint32), ("nice", ctypes.c_int32),
+                    ("start_seconds", ctypes.c_uint64), ("start_microseconds", ctypes.c_uint64)]
+            library = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+            query = library.proc_pidinfo
+            query.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
+            query.restype = ctypes.c_int
+            info = BsdInfo()
+            size = query(pid, 3, 0, ctypes.byref(info), ctypes.sizeof(info))
+            if size != ctypes.sizeof(info):
+                code = ctypes.get_errno()
+                if size == 0 and code in (errno.ESRCH, errno.ENOENT):
+                    return None
+                raise OSError(code or errno.EIO, "Cannot read the exact proc_pidinfo birth identity.")
+            if info.pid != pid:
+                raise RuntimeError("Kernel process identity returned a mismatched PID.")
+            return {"pid": pid, "ppid": info.ppid, "pgid": info.pgid, "sid": os.getsid(pid),
+                    "uid": info.uid, "state": info.status,
+                    "startIdentity": f"{info.start_seconds}:{info.start_microseconds}"}
+        if sys.platform.startswith("linux"):
+            directory = Path("/proc") / str(pid)
+            stat = (directory / "stat").read_text()
+            fields = stat[stat.rfind(")") + 2:].split()
+            uid = next(line.split()[2] for line in (directory / "status").read_text().splitlines()
+                       if line.startswith("Uid:"))
+            return {"pid": pid, "ppid": int(fields[1]), "pgid": int(fields[2]), "sid": int(fields[3]),
+                    "uid": int(uid), "state": fields[0], "startIdentity": fields[19]}
+        raise RuntimeError("Exact process birth identities require Linux /proc or macOS public libproc.")
+    except (FileNotFoundError, ProcessLookupError):
+        return None
+
+
+class ProcessGroupOwnership:
+    """Authorize only the retained original session/group and journaled kernel identities."""
+
+    def __init__(self, recovery):
+        self.recovery = recovery
+        self.original = None
+        self.members = {}
+        self.observations = []
+        self.signals = []
+        self.uid, self.euid = os.getuid(), os.geteuid()
+        self.created = time.monotonic()
+
+    @staticmethod
+    def same(left, right):
+        return all(left[key] == right[key] for key in ("pid", "pgid", "sid", "uid", "startIdentity"))
+
+    def capture(self):
+        identity = process_identity(self.recovery.process.pid)
+        if identity is not None:
+            if identity["pgid"] != identity["pid"] or identity["sid"] != identity["pid"] or identity["uid"] != self.euid:
+                raise RuntimeError("Launched process does not own the expected exact group/session/UID.")
+            self.original = identity
+            self.members[identity["pid"]] = identity
+
+    def observe(self, deadline, retry=True):
+        process = self.recovery.process
+        polled = process.poll()
+        group = process.pid
+        remaining = deadline - time.monotonic() if deadline is not None else 2
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(["ps", "-g", str(group)], 0)
+        argv = ["ps", "-g", str(group), "-o", "pid="]
+        probe = subprocess.run(argv, check=False, capture_output=True, text=True, timeout=min(2, remaining))
+        snapshot = {"at": time.monotonic(), "argv": argv, "returnCode": probe.returncode,
+                    "stderr": probe.stderr[:1000], "popenPollResult": polled,
+                    "popenReturnCode": process.returncode, "pidOutput": probe.stdout[:4000], "rows": []}
+        if len(self.observations) >= 128:
+            raise RuntimeError("Owned group observation bound exhausted.")
+        self.observations.append(snapshot)
+        fields = probe.stdout.split()
+        if (probe.returncode not in (0, 1) or probe.stderr.strip() or
+                probe.returncode == 1 and fields or any(not value.isdecimal() or int(value) <= 0 for value in fields) or
+                len(fields) > 1024 or len(fields) != len(set(fields))):
+            raise RuntimeError("Cannot verify the exact owned process group observation.")
+        for value in fields:
+            identity = process_identity(int(value))
+            if identity is None:
+                if retry:
+                    return self.observe(deadline, retry=False)
+                raise RuntimeError("Owned group identity changed during observation; absence is unverified.")
+            snapshot["rows"].append(identity)
+        rows = snapshot["rows"]
+        if not rows:
+            return rows
+        if self.original is None:
+            raise RuntimeError("A live group has no retained original process identity.")
+        leader = process_identity(group)
+        if leader is not None and not self.same(leader, self.original):
+            raise RuntimeError("Original process birth/session/UID identity changed; refusing a signal.")
+        if any(row["pgid"] != group or row["sid"] != self.original["sid"] or row["uid"] != self.original["uid"]
+               for row in rows):
+            raise RuntimeError("Scoped group observation contains a different group/session/UID.")
+        if not any(row["pid"] in self.members and self.same(row, self.members[row["pid"]]) for row in rows):
+            raise RuntimeError("No exact original or journaled member identity authorizes the group.")
+        self.members.update((row["pid"], row) for row in rows)
+        return rows
+
+    def send(self, value, deadline):
+        group = self.recovery.process.pid
+        if value and any(attempt["signal"] == int(value) for attempt in self.signals):
+            return self.exists(deadline)
+        before = self.observe(deadline)
+        if not before:
+            return False
+        attempt = {"at": time.monotonic(), "signal": int(value), "before": before,
+                   "after": None, "errno": None, "returnCodeBefore": self.recovery.process.returncode}
+        self.signals.append(attempt)
+        try:
+            os.killpg(group, value)
+        except ProcessLookupError:
+            attempt["errno"], attempt["after"] = errno.ESRCH, []
+            return False
+        except PermissionError as error:
+            attempt["errno"] = error.errno
+            attempt["after"] = self.observe(deadline)
+            if not attempt["after"]:
+                return False
+            raise
+        except OSError as error:
+            attempt["errno"] = error.errno
+            raise
+        attempt["after"] = self.observe(deadline)
+        return bool(attempt["after"])
+
+    def exists(self, deadline):
+        return self.send(0, deadline)
+
+    def report(self):
+        process = self.recovery.process
+        return {"platform": sys.platform, "ownerUid": self.uid, "ownerEuid": self.euid,
+                "ownerCreatedMonotonic": self.created, "originalIdentity": self.original,
+                "memberIdentities": list(self.members.values()), "groupObservations": self.observations,
+                "signalAttempts": self.signals, "popenReturnCode": process.returncode if process else None,
+                "operationDeadlineMonotonic": self.recovery.deadline,
+                "recoveryDeadlineMonotonic": self.recovery.recovery_deadline}
 
 
 class OwnedProcessSettlementError(RuntimeError):
@@ -42,6 +192,8 @@ class OwnedProcessRecovery:
         self.primary_error = None
         self.failure_exception = OwnedProcessSettlementError(self)
         self.exec_error_read = self.exec_error_write = None
+        self.group_ownership = None
+        self.file_output = False
 
     @property
     def complete(self):
@@ -120,12 +272,15 @@ class OwnedProcessRecovery:
 
     def settle(self, deadline):
         try:
+            if self.group_ownership is not None and self.group_ownership.original is None:
+                self.group_ownership.capture()
             if not self.group_absent:
                 available = deadline - time.monotonic()
                 if available <= 0:
                     raise subprocess.TimeoutExpired(self.process.args, 0)
+                arguments = {"ownership": self.group_ownership} if self.group_ownership is not None else {}
                 stop_owned(self.process, grace_period=min(0.1, available / 4),
-                           settle_timeout=max(0, available / 2), deadline=deadline)
+                           settle_timeout=max(0, available / 2), deadline=deadline, **arguments)
                 self.group_absent = True
             available = deadline - time.monotonic()
             if available <= 0:
@@ -174,6 +329,8 @@ class OwnedProcessRecovery:
 
     def record(self):
         if self.log and self.process is not None:
+            if self.file_output:
+                self.capture(Path(self.log).read_bytes(), b"")
             report = {
                 "pid": self.process.pid, "processGroup": self.process.pid,
                 "ownershipScope": "leader-and-original-process-group",
@@ -187,7 +344,11 @@ class OwnedProcessRecovery:
                 "partialStdout": self.stdout_text[-4000:], "partialStderr": self.stderr_text[-4000:],
                 "stdoutBytes": len(self.stdout), "stderrBytes": len(self.stderr),
             }
+            if self.group_ownership is not None:
+                report.update(self.group_ownership.report())
             for path, is_report in ((Path(self.log), False), (Path(self.log).with_suffix(".settlement.json"), True)):
+                if self.file_output and not is_report:
+                    continue
                 try:
                     report["primaryError"] = type(self.primary_error).__name__ if self.primary_error else None
                     content = json.dumps(report, indent=2) if is_report else self.stdout_text + self.stderr_text
@@ -229,11 +390,13 @@ def start_owned(*args, owner=None, **kwargs):
             signal.pthread_sigmask(signal.SIG_SETMASK, previous)
 
 
-def stop_owned(process, grace_period=1, settle_timeout=1, deadline=None):
+def stop_owned(process, grace_period=1, settle_timeout=1, deadline=None, ownership=None):
     def remaining(limit):
         return limit if deadline is None else min(limit, max(0, deadline - time.monotonic()))
 
     def group_exists():
+        if ownership is not None:
+            return ownership.exists(deadline)
         process.poll()
         try:
             os.killpg(process.pid, 0)
@@ -247,9 +410,14 @@ def stop_owned(process, grace_period=1, settle_timeout=1, deadline=None):
                                    capture_output=True, text=True, timeout=remaining(5))
             if probe.returncode not in (0, 1) or probe.stderr.strip() or probe.returncode == 1 and probe.stdout.strip():
                 raise RuntimeError("Cannot independently verify the owned process group: " + probe.stderr.strip())
-            return str(process.pid) in probe.stdout.split()
+            rows = probe.stdout.split()
+            if any(not row.isdecimal() or int(row) != process.pid for row in rows):
+                raise RuntimeError("Owned process group probe returned malformed or mismatched group rows.")
+            return bool(rows)
 
     def signal_group(value):
+        if ownership is not None:
+            return ownership.send(value, deadline)
         if value == 0:
             return group_exists()
         try:

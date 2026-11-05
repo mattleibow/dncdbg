@@ -803,6 +803,54 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
         self.assertLessEqual(time.monotonic() - started, 1.75)
         self.assert_ios_deadline_owned_processes_gone(record)
 
+    @unittest.skipUnless(os.name == "posix", "POSIX command ownership")
+    def test_real_late_cancellation_and_error_preserve_cause_and_settle_owned_group(self):
+        from process_tools import start_owned
+        for original in (KeyboardInterrupt("late cancellation"), ValueError("late tool failure")):
+            with self.subTest(error=type(original).__name__):
+                record = self.ios_deadline_helper("cleanup")
+                record.unlink(missing_ok=True)
+                processes = []
+                injected = []
+                started = time.monotonic()
+                deadline = started + 1.5
+
+                def start(*args, **kwargs):
+                    process = start_owned(*args, **kwargs)
+                    processes.append(process)
+                    communicate = process.communicate
+
+                    def late(*args, **kwargs):
+                        if not injected:
+                            while time.monotonic() <= deadline:
+                                time.sleep(0.005)
+                            injected.append(True)
+                            raise original
+                        return communicate(*args, **kwargs)
+                    process.communicate = late
+                    return process
+
+                try:
+                    with patch("process_tools.start_owned", side_effect=start):
+                        try:
+                            self.suite.run("xcrun", "simctl", "list", "devices", "-j",
+                                           timeout=1.5, deadline=deadline)
+                        except BaseException as error:
+                            self.assertTrue(error is original or error.__cause__ is original,
+                                            "Late settlement must preserve the original error, not replace it with timeout.")
+                            if error is not original:
+                                self.assertIn("settlement", str(error).lower())
+                        else:
+                            self.fail("Late cancellation/error cannot return success.")
+                    self.assertLessEqual(time.monotonic() - started, 1.75)
+                    self.assert_ios_deadline_owned_processes_gone(record)
+                    self.assertIsNotNone(processes[0].returncode)
+                finally:
+                    for process in processes:
+                        if process.poll() is None:
+                            process.kill()
+                            process.wait(timeout=1)
+
     def test_ios_cleanup_refuses_another_device_identity(self):
         self.suite.args.platform = "ios"
         devices = {"devices": {"runtime": [{"udid": self.suite.state["device"], "name": "another-owner"}]}}

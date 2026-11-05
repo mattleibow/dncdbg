@@ -1119,6 +1119,81 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
         self.assertFalse(self.suite.state["resourceJournalClean"])
         self.assertFalse(self.suite.state["cleanupDone"])
 
+    def test_owner_callback_failure_still_reaps_and_preserves_original_cause(self):
+        for retained in (False, True):
+            for original in (ValueError("callback failed"), MemoryError("retention failed"), KeyboardInterrupt("callback cancelled")):
+                with self.subTest(retained=retained, error=type(original).__name__):
+                    record = self.ios_deadline_helper("cleanup")
+                    record.unlink(missing_ok=True)
+                    processes, owners = [], []
+
+                    def callback(owner):
+                        processes.append(owner.process)
+                        if retained:
+                            owners.append(owner)
+                        ready = time.monotonic() + 1
+                        while not record.exists() and time.monotonic() < ready:
+                            time.sleep(0.005)
+                        raise original
+
+                    try:
+                        with self.assertRaises(process_tools.OwnedProcessSettlementError) as caught:
+                            process_tools.run_owned("xcrun", "simctl", "list", "devices", "-j",
+                                env=self.suite.env, deadline=time.monotonic() + 2,
+                                owner_callback=callback, log=self.output / "callback.log")
+                        self.assertIs(caught.exception.__cause__, original)
+                        self.assertTrue(caught.exception.recovery.complete)
+                        self.assert_ios_deadline_owned_processes_gone(record)
+                    finally:
+                        for process in processes:
+                            if process.poll() is None:
+                                process_tools.stop_owned(process)
+
+    def test_final_recovery_pass_recomputes_new_cancellation_before_cleanup_result(self):
+        self.suite.run(sys.executable, "-c", "pass", deadline=time.monotonic() + 2)
+        recovery = self.suite.process_recoveries[-1]
+        recovery.drain_complete = False
+        original = SystemExit(23)
+        calls = []
+
+        def finish():
+            calls.append(True)
+            if len(calls) == 1:
+                return False
+            recovery.preserve_error(original)
+            recovery.drain_complete = True
+            return True
+
+        with patch.object(recovery, "finish", side_effect=finish), patch.object(self.suite, "run") as run:
+            with self.assertRaises(SystemExit) as caught:
+                self.suite.cleanup()
+        self.assertIs(caught.exception, original)
+        run.assert_not_called()
+        self.assertFalse(self.suite.state["cleanupDone"])
+
+    def test_main_evidence_failures_cannot_replace_the_first_cancellation(self):
+        for later in (OSError("evidence full"), KeyboardInterrupt("later interrupt"), SystemExit(29)):
+            with self.subTest(later=type(later).__name__):
+                destination = self.output / uuid.uuid4().hex
+                original = KeyboardInterrupt("first cancellation")
+                mkdir = Path.mkdir
+
+                def unavailable(path, *args, **kwargs):
+                    if path.name == "evidence":
+                        raise OSError("fallback mkdir unavailable")
+                    return mkdir(path, *args, **kwargs)
+
+                previous = signal.getsignal(signal.SIGTERM)
+                try:
+                    with patch.object(sys, "argv", ["run_suite.py", "--platform", "ios", "--output", str(destination)]), \
+                            patch.object(Suite, "execute", side_effect=original), \
+                            patch.object(Suite, "evidence", side_effect=later), patch.object(Path, "mkdir", unavailable):
+                        with self.assertRaises(KeyboardInterrupt) as caught:
+                            run_suite.main()
+                        self.assertIs(caught.exception, original)
+                finally:
+                    signal.signal(signal.SIGTERM, previous)
+
     @unittest.skipUnless(os.name == "posix", "POSIX command ownership")
     def test_real_invalid_output_bytes_are_preserved_independently_of_reaping(self):
         result = self.suite.run(sys.executable, "-c",

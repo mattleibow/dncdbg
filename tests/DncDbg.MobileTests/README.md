@@ -254,5 +254,7 @@ and sequence (up to 4096 requests), and the startup/lifetime/RPC cancellation
 states without logging bodies or credentials. The Apple provider snapshots the
 descriptor with its credential field removed and bounded native/preflight
 reports before deleting the descriptor or terminating/uninstalling the app.
-Failed direct DAP proofs also retain bounded simulator logs, process state,
-app crash reports and explicit collection errors before fixture cleanup.
+Failed direct DAP proofs also retain bounded simulator logs, process state
+and explicit collection errors before fixture cleanup. Diagnostic writer or
+snapshot failures cannot replace the original RPC/launch failure or prevent
+owned cleanup. Global crash directories are not scanned without exact ownership.

@@ -1718,10 +1718,19 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
             calls.append(("build", configuration, faults))
             if configuration == "Release" and failure == "release":
                 raise TimeoutError("controlled Release timeout")
-            return Path(configuration + "-app"), Path(configuration + "-assets")
+            app, assets = destination / (configuration + "-app"), destination / (configuration + "-assets")
+            app.mkdir(exist_ok=True)
+            assets.mkdir(exist_ok=True)
+            (app / "executable").write_bytes(b"fixture executable")
+            for name in ("DncDbg.MauiTestApp.dll", "DncDbg.MauiTestApp.pdb", "DncDbg.ReloadFixture.dll",
+                         "DncDbg.ReloadFixture.pdb", "dncdbg-agent.json", "dncdbg-package.json"):
+                (assets / name).write_bytes(b"exact fixture identity")
+            if configuration == "Release" and failure == "debug-mutated":
+                (destination / "Debug-assets/DncDbg.MauiTestApp.pdb").write_bytes(b"changed by Release")
+            return app, assets
 
         def fixture(app, assets, proof, name, disconnect=False):
-            calls.append(("fixture", name, str(app), str(assets), disconnect))
+            calls.append(("fixture", name, app.name, assets.name, disconnect))
             if name == "debugger-dap-broker-unavailable" and failure == "first-dap":
                 raise RuntimeError("controlled first DAP failure")
 
@@ -1784,6 +1793,15 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
         self.assertTrue(manifest["cleanup"])
         self.assertIn("controlled first DAP failure", manifest["error"])
         self.assertEqual(manifest["phases"]["completed"][-1], "debug-build")
+
+    def test_ios_release_cannot_silently_change_the_early_dap_debug_artifacts(self):
+        result, calls, manifest = self.run_ios_phase_contract("debug-mutated")
+        self.assertEqual(result, 1)
+        self.assertFalse(manifest["passed"] or manifest["phases"]["complete"])
+        self.assertTrue(manifest["cleanup"])
+        self.assertIn("Debug artifacts changed during Release", manifest["error"])
+        self.assertEqual([call[:2] for call in calls], [
+            ("build", "Debug"), ("fixture", "debugger-dap-broker-unavailable"), ("build", "Release"), ("cleanup",)])
 
     def test_fault_failure_still_restores_ordinary_native_helper(self):
         builds = []

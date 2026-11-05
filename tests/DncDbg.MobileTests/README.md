@@ -192,6 +192,14 @@ their existing three-second absolute operation deadline before injecting a
 signal or `SystemExit`; an independent one-second startup assumption is not
 proof that the fixture reached that fault point.
 
+The required full iOS gate retains the adapter's launch stage, elapsed time,
+completed symbol chunks and correlated DNC1 operation/sequence/cancellation
+flags. Request bodies and credentials are not logged. Owned-provider startup
+reports and a credential-redacted descriptor are captured before descriptor
+cleanup. Diagnostic collection must not replace the primary failure or skip
+mandatory process cleanup; collection errors remain separate evidence.
+Diagnostic-only experiments do not substitute for the complete pinned suite.
+
 Build budgets are separate from debugger/RPC and fault deadlines. The first
 hosted iOS attempt exceeded 600 seconds in a cold Release build with no useful
 quiet output. Release packaging now has a **20-minute build-only bound**;

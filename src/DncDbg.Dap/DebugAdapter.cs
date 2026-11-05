@@ -45,7 +45,7 @@ internal sealed class DebugAdapter : IDisposable
     public DebugAdapter(DapConnection connection, Action<string> log)
     {
         _connection = connection;
-        _log = log;
+        _log = DncDbg.Remote.RemoteDiagnostics.Safe(log);
         _engine = CreateEngine();
     }
 
@@ -192,8 +192,9 @@ internal sealed class DebugAdapter : IDisposable
             _connection.SendResponse(message, body);
             afterResponse?.Invoke();
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException error)
         {
+            _log($"Request '{message.Command}' cancelled: stopping={_stopping}; {error}");
             if (!_stopping)
                 _connection.SendErrorResponse(message, "cancelled");
         }
@@ -314,7 +315,7 @@ internal sealed class DebugAdapter : IDisposable
                         _launchArguments.SuppressJitOptimizations != null)
                         throw new DebuggerException("Remote launch requires built target assets and cannot apply desktop launch, build, environment, source-map, evaluation or JIT options.");
                     RemoteLaunchArguments options = _launchArguments.Remote;
-                    Func<RemoteLifecycle> create = RemoteProviderFactory.Create(options);
+                    Func<RemoteLifecycle> create = RemoteProviderFactory.Create(options, _log);
                     _remote = new RemoteSession(options, create, _connection, _log, LineToClient, LineFromClient);
                     try { _remote.Launch(); }
                     catch { _remote.Dispose(); _remote = null; throw; }

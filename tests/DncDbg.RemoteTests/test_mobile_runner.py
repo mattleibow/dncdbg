@@ -1736,7 +1736,7 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
 
         def cleanup():
             calls.append(("cleanup",))
-            suite.state["cleanupDone"] = True
+            suite.state["cleanupDone"] = failure != "cleanup-unverified"
             suite.save()
 
         previous = signal.getsignal(signal.SIGTERM)
@@ -1802,6 +1802,14 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
         self.assertIn("Debug artifacts changed during Release", manifest["error"])
         self.assertEqual([call[:2] for call in calls], [
             ("build", "Debug"), ("fixture", "debugger-dap-broker-unavailable"), ("build", "Release"), ("cleanup",)])
+
+    def test_completed_ios_phases_do_not_override_unverified_owned_cleanup(self):
+        result, calls, manifest = self.run_ios_phase_contract("cleanup-unverified")
+        self.assertEqual(result, 1)
+        self.assertEqual(calls[-1], ("cleanup",))
+        self.assertTrue(manifest["phases"]["complete"])
+        self.assertFalse(manifest["passed"] or manifest["cleanup"])
+        self.assertIn("cleanup", manifest["error"].lower())
 
     def test_fault_failure_still_restores_ordinary_native_helper(self):
         builds = []

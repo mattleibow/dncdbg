@@ -1264,6 +1264,109 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
                     finally:
                         signal.signal(signal.SIGTERM, previous)
 
+    @unittest.skipUnless(os.name == "posix", "POSIX publication signal mask")
+    def test_real_signal_during_launch_is_deferred_until_owner_publication(self):
+        import threading
+        record = self.ios_deadline_helper("cleanup")
+        popen = subprocess.Popen
+        processes = []
+        original = KeyboardInterrupt("signal at publication")
+
+        def interrupted(*_):
+            raise original
+
+        def launch(*args, **kwargs):
+            if processes:
+                return popen(*args, **kwargs)
+            process = popen(*args, **kwargs)
+            processes.append(process)
+            ready = time.monotonic() + 1
+            while not record.exists() and time.monotonic() < ready:
+                time.sleep(0.005)
+            main_id = threading.get_ident()
+            sender = threading.Thread(target=lambda: signal.pthread_kill(main_id, signal.SIGINT))
+            sender.start()
+            sender.join()
+            return process
+
+        previous = signal.signal(signal.SIGINT, interrupted)
+        try:
+            with patch("process_tools.subprocess.Popen", side_effect=launch):
+                with self.assertRaises(BaseException) as caught:
+                    self.suite.run("xcrun", "simctl", "list", "devices", "-j",
+                                   deadline=time.monotonic() + 3)
+            self.assertTrue(caught.exception is original or caught.exception.__cause__ is original)
+            self.assertIsNotNone(self.suite.recovery_fallback.process)
+            self.assertTrue(self.suite.recovery_fallback.complete)
+            self.assert_ios_deadline_owned_processes_gone(record)
+        finally:
+            signal.signal(signal.SIGINT, previous)
+            for process in processes:
+                if process.poll() is None:
+                    process_tools.stop_owned(process)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX publication ownership")
+    def test_system_exit_after_launch_return_keeps_published_owner_and_reaps(self):
+        record = self.ios_deadline_helper("cleanup")
+        start = process_tools.start_owned
+        processes = []
+        original = SystemExit(37)
+
+        def launched(*args, **kwargs):
+            process = start(*args, **kwargs)
+            processes.append(process)
+            ready = time.monotonic() + 1
+            while not record.exists() and time.monotonic() < ready:
+                time.sleep(0.005)
+            raise original
+
+        try:
+            with patch("process_tools.start_owned", side_effect=launched), self.assertRaises(BaseException) as caught:
+                self.suite.run("xcrun", "simctl", "list", "devices", "-j", deadline=time.monotonic() + 3)
+            self.assertTrue(caught.exception is original or caught.exception.__cause__ is original)
+            self.assertIsNotNone(self.suite.recovery_fallback.process)
+            self.assertTrue(self.suite.recovery_fallback.complete)
+            self.assert_ios_deadline_owned_processes_gone(record)
+        finally:
+            for process in processes:
+                if process.poll() is None:
+                    process_tools.stop_owned(process)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX publication signal mask")
+    def test_launch_failure_restores_mask_and_has_no_stale_owned_process(self):
+        before = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+        with patch("process_tools.subprocess.Popen", side_effect=FileNotFoundError("launch failed")):
+            with self.assertRaises(FileNotFoundError):
+                self.suite.run("missing-command", deadline=time.monotonic() + 1)
+        self.assertIsNone(self.suite.recovery_fallback.process)
+        self.assertEqual(list(self.suite.owned_recoveries()), [])
+        self.assertEqual(signal.pthread_sigmask(signal.SIG_BLOCK, set()), before)
+        with patch("process_tools.os.name", "nt"), patch("process_tools.subprocess.Popen") as popen:
+            with self.assertRaisesRegex(RuntimeError, "POSIX"):
+                process_tools.start_owned(["not-launched"])
+            popen.assert_not_called()
+
+    def test_state_handler_bookkeeping_cannot_replace_original_notification_cancellation(self):
+        original = KeyboardInterrupt("first notification cancellation")
+
+        class Notifications(list):
+            def append(self, value):
+                raise original
+
+        for later in (MemoryError("snapshot formatting"), KeyboardInterrupt("later state cancellation"), SystemExit(41)):
+            with self.subTest(later=type(later).__name__):
+                class Unformattable(OSError):
+                    def __str__(self):
+                        raise later
+
+                self.suite.process_recoveries = Notifications()
+                with patch.object(self.suite, "save", side_effect=Unformattable()), \
+                        self.assertRaises(BaseException) as caught:
+                    self.suite.run(sys.executable, "-c", "pass", deadline=time.monotonic() + 2)
+                self.assertTrue(caught.exception is original or caught.exception.__cause__ is original)
+                self.assertTrue(self.suite.recovery_fallback.complete)
+                self.assertIs(self.suite.recovery_fallback.primary_error, original)
+
     @unittest.skipUnless(os.name == "posix", "POSIX command ownership")
     def test_real_invalid_output_bytes_are_preserved_independently_of_reaping(self):
         result = self.suite.run(sys.executable, "-c",

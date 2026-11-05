@@ -214,7 +214,17 @@ remains a red gate, never a successful skip.
   Apple host tools retain the runner's native per-user temporary environment
   for CoreSimulator coordination. The selected simulator, work/evidence paths
   and ownership journal remain run-owned; no global simulator reset is used.
-  Boot and cleanup deadlines are unchanged.
+  The separately bounded iOS cold-boot provisioning budget is 600 seconds
+  across boot, bootstatus and an independent exact-UDID/name/runtime `Booted`
+  inventory check. Hosted app-free measurements reached 348-414 seconds before
+  any target build; this is not a debugger-operation timeout. Successful
+  bootstatus alone, wrong ownership, or a zero exit after the deadline fails.
+  `ios-provisioning.json` records the duration/budget and readiness with
+  `complete:false`; only the full app/debugger/UI/fault suite qualifies iOS.
+  Owned simulator cleanup has one aggregate 60-second `simctl` budget, based
+  on observed 30.23-second inventory latency. It never authorizes other devices
+  or shared service resets. Android boot/cleanup and all app, debugger, RPC,
+  fault, build and assertion deadlines remain unchanged; no retries are added.
 - **`Mobile Android emulator (pinned)`** uses hosted **`ubuntu-24.04`**,
   explicitly enables/checks KVM and runs the **entire same** unified suite with
   the separate x64 pins. It does not merely cross-build an APK, run host fakes,

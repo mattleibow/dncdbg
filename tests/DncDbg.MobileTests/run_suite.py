@@ -25,6 +25,8 @@ APP = "com.dncdbg.mobiletests"
 ANDROID_CONSOLE_PORTS = tuple(range(5554, 5586, 2))
 RELEASE_BUILD_TIMEOUT = 20 * 60
 DEBUG_BUILD_TIMEOUT = 10 * 60
+IOS_BOOT_TIMEOUT = 10 * 60
+IOS_CLEANUP_TIMEOUT = 60
 
 
 def build_environment(environment):
@@ -214,8 +216,29 @@ class Suite:
                               self.ios["runtime"]).stdout.strip()
             self.state["device"] = device
             self.save()
-            self.run("xcrun", "simctl", "boot", device)
-            self.run("xcrun", "simctl", "bootstatus", device, "-b", timeout=240)
+            started = time.monotonic()
+            ready = False
+
+            def remaining():
+                budget = IOS_BOOT_TIMEOUT - (time.monotonic() - started)
+                if budget <= 0:
+                    raise TimeoutError(f"iOS provisioning exceeded {IOS_BOOT_TIMEOUT}s.")
+                return budget
+
+            try:
+                self.run("xcrun", "simctl", "boot", device, timeout=remaining())
+                self.run("xcrun", "simctl", "bootstatus", device, "-b", timeout=remaining())
+                devices = self.json("xcrun", "simctl", "list", "devices", "-j", timeout=remaining())
+                remaining()
+                matches = [d for d in devices["devices"].get(self.ios["runtime"], [])
+                           if d["udid"] == device and d["name"] == name and d["state"] == "Booted"]
+                require(len(matches) == 1, "Exact owned simulator must independently report Booted in the pinned runtime.")
+                ready = True
+            finally:
+                (self.output / "ios-provisioning.json").write_text(json.dumps({
+                    "device": device, "name": name, "runtime": self.ios["runtime"], "ready": ready,
+                    "timeoutSeconds": IOS_BOOT_TIMEOUT, "seconds": time.monotonic() - started, "complete": False,
+                }, indent=2))
         else:
             avd = self.output / "work/avd"
             avd.mkdir()
@@ -362,10 +385,19 @@ class Suite:
 
     def cleanup(self):
         errors = []
+        ios_deadline = time.monotonic() + IOS_CLEANUP_TIMEOUT if self.args.platform == "ios" else None
 
         def clean(*command, **kwargs):
             try:
-                return self.run(*command, timeout=30, **kwargs)
+                timeout = 30
+                if ios_deadline is not None and command[:2] == ("xcrun", "simctl"):
+                    timeout = ios_deadline - time.monotonic()
+                    if timeout <= 0:
+                        raise TimeoutError(f"Owned simulator cleanup exceeded {IOS_CLEANUP_TIMEOUT}s.")
+                result = self.run(*command, timeout=timeout, **kwargs)
+                if ios_deadline is not None and command[:2] == ("xcrun", "simctl") and time.monotonic() > ios_deadline:
+                    raise TimeoutError(f"Owned simulator cleanup exceeded {IOS_CLEANUP_TIMEOUT}s.")
+                return result
             except Exception as error:
                 errors.append(str(error))
 

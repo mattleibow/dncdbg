@@ -323,8 +323,15 @@ class Suite:
                  timeout=900)
 
     def execute(self):
+        if getattr(self.args, "diagnose_launch", False):
+            self.state["scope"] = "direct-dap-diagnostics-only"
+            self.save()
         self.preflight()
         self.boot()
+        if getattr(self.args, "diagnose_launch", False):
+            app, assets = self.build()
+            self.fixture_proof(app, assets, "dap", "debugger-dap-broker-unavailable")
+            return
         self.build("Release", faults=True)
         app, assets = self.build()
         self.independent_proofs(app, assets)
@@ -510,6 +517,7 @@ class Suite:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
             manifest["files"][str(relative)] = hashlib.sha256(data).hexdigest()
+        manifest["scope"] = self.state.get("scope", "full")
         (destination / "manifest.json").write_text(json.dumps(manifest, indent=2))
 
 
@@ -530,6 +538,8 @@ def main():
     parser.add_argument("--android-abi", choices=["arm64-v8a", "x86_64"], default="arm64-v8a",
                         help="Explicit separate local Apple Silicon or hosted Linux/KVM tuple; no automatic substitution")
     parser.add_argument("--cleanup", action="store_true", help="Idempotent recovery using this run's ownership journal")
+    parser.add_argument("--diagnose-launch", action="store_true",
+                        help="Diagnostic-only first direct DAP proof, never a full mobile qualification")
     args = parser.parse_args()
     args.output = args.output or ROOT / "build/mobile-tests" / f"{args.platform}-{uuid.uuid4().hex}"
     suite = Suite(args)

@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   ios:
-    name: Mobile iOS simulator (pinned)
+    name: Intel iOS direct DAP diagnostics (not full qualification)
     runs-on: macos-26-intel
     timeout-minutes: 50
     env:
@@ -32,7 +32,7 @@ jobs:
             src/DncDbg.Dap/DebugAdapter.cs src/DncDbg.Dap/RemoteSession.cs \
             src/DncDbg.Dap/RemoteLifecycle.cs src/DncDbg.Dap/RemoteProviderFactory.cs \
             src/DncDbg.Remote/RemoteDebugClient.cs src/DncDbg.Remote.Apple/AppleSimulatorProvider.cs \
-            tests/DncDbg.MobileTests/run_direct.py > "$RUNNER_TEMP/diagnostics.patch"
+            tests/DncDbg.MobileTests/run_direct.py tests/DncDbg.MobileTests/run_suite.py > "$RUNNER_TEMP/diagnostics.patch"
           test -s "$RUNNER_TEMP/diagnostics.patch"
           git checkout --detach 306e2fa845a852d275be74ec85e0e878d9102cb1
           git apply --check "$RUNNER_TEMP/diagnostics.patch"
@@ -91,10 +91,10 @@ jobs:
           cd ../..
           dotnet tool install Microsoft.Maui.Cli --version 0.1.0-preview.12.26421.1 --tool-path build/mobile-tools
           echo "$PWD/build/mobile-tools" >> "$GITHUB_PATH"
-      - name: Build, provision and prove exact iOS simulator tuple
+      - name: Build and reproduce only the first direct DAP launch
         run: >-
           dotnet run --project tests/DncDbg.MobileTests -c Release --
-          --platform ios --ios-architecture x64 --xcode-dir /Applications/Xcode_26.6.app/Contents/Developer
+          --platform ios --ios-architecture x64 --diagnose-launch --xcode-dir /Applications/Xcode_26.6.app/Contents/Developer
           --output build/validation/mobile-ci/ios
       - name: Recover owned simulator and processes even after cancellation
         if: always() && hashFiles('build/validation/mobile-ci/ios/state.json') != ''

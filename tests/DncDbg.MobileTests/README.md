@@ -243,7 +243,11 @@ The diagnostic branch's manual Mobile workflow runs frozen PR #20 source
 main `aae6894abb5813294c95f98b7227a280ecdab28e`. `overlay.json` records both
 SHAs, the patch hash, and changed paths. This is not a clean-main or release
 qualification; the Intel profile, device/runtime pins, existing deadlines,
-assertions and full iOS proof sequence remain those of the frozen source.
+assertions remain those of the frozen source. The first attempted full sequence
+stopped at its unchanged Release-build deadline before DAP. The subsequent
+explicit `--diagnose-launch` experiment runs only the Debug build and first
+broker-independent direct DAP proof, with `scope: direct-dap-diagnostics-only`
+in its manifest. It cannot satisfy the full mobile gate.
 
 The adapter log records launch stage, completed symbol chunks, DNC1 operation
 and sequence (up to 4096 requests), and the startup/lifetime/RPC cancellation

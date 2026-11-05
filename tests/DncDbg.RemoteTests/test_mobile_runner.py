@@ -752,6 +752,16 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
             self.assertNotEqual(connection.connect_ex(("127.0.0.1", owned["port"])), 0)
         self.assertTrue(any("owned helper ready" in p.read_text() for p in self.output.glob("*.log")))
 
+    def wait_for_ios_helper_record(self, record, deadline):
+        while time.monotonic() < deadline:
+            try:
+                owned = json.loads(record.read_text())
+                self.assertEqual(set(owned), {"parent", "child", "port"})
+                return
+            except (FileNotFoundError, json.JSONDecodeError):
+                time.sleep(0.005)
+        self.fail("Real helper did not become ready within the existing operation deadline.")
+
     @unittest.skipUnless(os.name == "posix", "POSIX command ownership")
     def test_real_ios_boot_timeout_includes_term_kill_drain_and_reap(self):
         record = self.ios_deadline_helper("boot")
@@ -1320,6 +1330,7 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
         popen = subprocess.Popen
         processes = []
         original = KeyboardInterrupt("signal at publication")
+        deadline = time.monotonic() + 3
 
         def interrupted(*_):
             raise original
@@ -1329,9 +1340,7 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
                 return popen(*args, **kwargs)
             process = popen(*args, **kwargs)
             processes.append(process)
-            ready = time.monotonic() + 1
-            while not record.exists() and time.monotonic() < ready:
-                time.sleep(0.005)
+            self.wait_for_ios_helper_record(record, deadline)
             main_id = threading.get_ident()
             sender = threading.Thread(target=lambda: signal.pthread_kill(main_id, signal.SIGINT))
             sender.start()
@@ -1343,8 +1352,9 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
             with patch("process_tools.subprocess.Popen", side_effect=launch):
                 with self.assertRaises(BaseException) as caught:
                     self.suite.run("xcrun", "simctl", "list", "devices", "-j",
-                                   deadline=time.monotonic() + 3)
-            self.assertTrue(caught.exception is original or caught.exception.__cause__ is original)
+                                   deadline=deadline)
+            self.assertTrue(caught.exception is original or caught.exception.__cause__ is original,
+                            f"Expected publication cancellation, got {caught.exception!r}")
             self.assertIsNotNone(self.suite.recovery_fallback.process)
             self.assertTrue(self.suite.recovery_fallback.complete)
             self.assert_ios_deadline_owned_processes_gone(record)
@@ -1360,19 +1370,19 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
         start = process_tools.start_owned
         processes = []
         original = SystemExit(37)
+        deadline = time.monotonic() + 3
 
         def launched(*args, **kwargs):
             process = start(*args, **kwargs)
             processes.append(process)
-            ready = time.monotonic() + 1
-            while not record.exists() and time.monotonic() < ready:
-                time.sleep(0.005)
+            self.wait_for_ios_helper_record(record, deadline)
             raise original
 
         try:
             with patch("process_tools.start_owned", side_effect=launched), self.assertRaises(BaseException) as caught:
-                self.suite.run("xcrun", "simctl", "list", "devices", "-j", deadline=time.monotonic() + 3)
-            self.assertTrue(caught.exception is original or caught.exception.__cause__ is original)
+                self.suite.run("xcrun", "simctl", "list", "devices", "-j", deadline=deadline)
+            self.assertTrue(caught.exception is original or caught.exception.__cause__ is original,
+                            f"Expected publication cancellation, got {caught.exception!r}")
             self.assertIsNotNone(self.suite.recovery_fallback.process)
             self.assertTrue(self.suite.recovery_fallback.complete)
             self.assert_ios_deadline_owned_processes_gone(record)

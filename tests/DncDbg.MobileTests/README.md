@@ -187,6 +187,10 @@ Failed gates preserve evidence, not successful-looking partial results.
 Failure traceback collection supports the macOS system Python 3.9 API as well
 as the pinned portable-contract interpreter; cancellation retains its original
 exception after collection.
+Publication-fault tests wait for the real parent/child/listener record within
+their existing three-second absolute operation deadline before injecting a
+signal or `SystemExit`; an independent one-second startup assumption is not
+proof that the fixture reached that fault point.
 
 Build budgets are separate from debugger/RPC and fault deadlines. The first
 hosted iOS attempt exceeded 600 seconds in a cold Release build with no useful

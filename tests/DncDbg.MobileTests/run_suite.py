@@ -53,8 +53,30 @@ def properties(path):
 
 def atomic_json(path, value):
     pending = path.with_name(path.name + ".pending")
-    pending.write_text(json.dumps(value, indent=2))
-    pending.replace(path)
+    failure = None
+    try:
+        mode = path.stat().st_mode & 0o777 if path.exists() else 0o600
+        pending.write_text(json.dumps(value, indent=2))
+        pending.chmod(mode)
+        with pending.open("r+b") as stream:
+            stream.flush()
+            os.fsync(stream.fileno())
+        pending.replace(path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except BaseException as error:
+        failure = error
+        raise
+    finally:
+        try:
+            pending.unlink(missing_ok=True)
+        except BaseException as cleanup:
+            if failure is not None:
+                raise failure from cleanup
+            raise
 
 
 class Suite:
@@ -89,9 +111,13 @@ class Suite:
 
     def source_record(self):
         if self.source is None:
-            self.source = {
-                "head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
-                "dirty": bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True).strip())}
+            if "source" in self.state:
+                self.source = dict(self.state["source"])
+            else:
+                self.source = {
+                    "head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+                    "dirty": bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True).strip())}
+        self.state["source"] = dict(self.source)
         return self.source
 
     @staticmethod
@@ -207,6 +233,9 @@ class Suite:
                                  timeout=timeout, check=check, input=input, log=log, deadline=deadline,
                                  owner_callback=self.command_published, recovery_owner=owner)
             except OwnedProcessSettlementError as error:
+                if owner.complete and owner.recovery_deadline is None and isinstance(owner.primary_error, subprocess.TimeoutExpired):
+                    raise TimeoutError(
+                        f"{command[0]} exceeded its aggregate deadline; partial output: {log.relative_to(ROOT)}") from owner.primary_error
                 first_error, first_cause = error, error.__cause__
                 try:
                     try:
@@ -945,6 +974,7 @@ class Suite:
                     "cleanupErrors": self.state.get("cleanupErrors", []),
                     "processRecovery": self.state.get("processRecovery", []),
                     "commandRecoveryRequired": self.state.get("commandRecoveryRequired", False),
+                    "commandIntent": self.state.get("commandIntent"),
                     "recoveriesUnavailable": bool(self.state.get("commandRecoveryRequired") and not any(self.owned_recoveries())),
                     "simulatorCreate": self.state.get("simulatorCreate"),
                     "evidenceErrors": self.state.get("evidenceErrors", []), "files": {}}
@@ -1047,6 +1077,10 @@ def main():
             if not suite.state_path.exists():
                 return 0
             suite.state = json.loads(suite.state_path.read_text())
+            suite.source = dict(suite.state["source"]) if "source" in suite.state else {
+                "head": suite.state.get("commandIntent", {}).get("sourceHead") or
+                        suite.state.get("simulatorCreate", {}).get("sourceHead"),
+                "dirty": None, "sourceUnavailable": True}
             require(suite.state["platform"] == args.platform, "Cleanup platform does not match the journal.")
             if (suite.state.get("cleanupDone") and suite.state.get("buildGroupSettled", True) and
                     not suite.state.get("commandRecoveryRequired", False) and
@@ -1062,6 +1096,7 @@ def main():
             require(not suite.output.exists(), f"Evidence output already exists; choose a fresh path: {suite.output}")
             suite.output.mkdir(parents=True)
             suite.state = {"platform": args.platform, "cleanupDone": False}
+            suite.source_record()
             suite.save()
             try:
                 if args.platform == "contracts":

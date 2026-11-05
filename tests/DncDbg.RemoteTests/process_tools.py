@@ -80,6 +80,12 @@ class ProcessGroupOwnership:
             return
         identity = process_identity(self.recovery.process.pid)
         if identity is not None and identity["state"] not in ("Z", 5):
+            if self.recovery.process.poll() is not None:
+                return
+            confirmed = process_identity(self.recovery.process.pid)
+            if (confirmed is None or confirmed["state"] in ("Z", 5) or not self.same(identity, confirmed) or
+                    self.recovery.process.poll() is not None):
+                return
             if identity["pgid"] != identity["pid"] or identity["sid"] != identity["pid"] or identity["uid"] != self.euid:
                 raise RuntimeError("Launched process does not own the expected exact group/session/UID.")
             self.original = identity

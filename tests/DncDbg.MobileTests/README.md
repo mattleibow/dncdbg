@@ -228,7 +228,8 @@ shared-service kill is used. iOS creation shares the same existing 600-second
 provisioning clock rather than starting an extra budget before boot.
 
 Birth capture is immutable and happens once during protected Popen publication,
-before any wait/reap. Its state is explicitly verified, unverified or not
+with candidate/read-only birth observations and nonblocking Popen polls proving
+the retained child is still alive before publication. Its state is explicitly verified, unverified or not
 applicable; failed capture is never retried against a later numeric PID.
 Unverified birth or a restarted unverified journal cannot authorize a signal
 or overall cleanup. Operation timeouts and cancellations also remain primary
@@ -240,7 +241,10 @@ run-nonce intent. A reply is accepted only with a canonical UDID and matching
 inventory. Pending intent recovery is read-only until exactly one owned
 identity is verified, or exact absence is recorded; duplicate, mismatched or
 unavailable inventory never authorizes deletion or a clean journal.
-State and core manifest commits are atomic. A failed core manifest is written
+State and core manifest commits sync file contents before atomic replacement
+and sync the containing directory before returning. Original source head/dirty
+provenance is durable and never replaced with a later checkout during recovery.
+A failed core manifest, including the redacted pending command intent, is written
 before optional collection, retaining source/tuple/phases/recovery/resource
 truth even when optional logs, hashes, credentials checks or uploads fail.
 

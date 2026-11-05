@@ -727,6 +727,111 @@ class MobileRunnerTests(unittest.TestCase):
         self.assertFalse(report["ready"])
         self.assertEqual(report["seconds"], 601)
 
+    def simulator_intent_state(self):
+        self.suite.args.platform = "ios"
+        name = "dncdbg" + uuid.uuid4().hex
+        self.suite.state = {
+            "platform": "ios", "name": name, "cleanupDone": False,
+            "simulatorCreate": {"pending": True, "name": name, "runtime": self.suite.ios["runtime"],
+                                "deviceType": self.suite.ios["deviceType"], "sourceHead": "a" * 40,
+                                "runNonce": uuid.uuid4().hex}}
+        return {"udid": "12345678-1234-1234-1234-123456789abc", "name": name, "state": "Shutdown",
+                "deviceTypeIdentifier": self.suite.ios["deviceType"]}
+
+    def test_pending_simulator_creation_resolves_only_exact_zero_or_one_inventory(self):
+        for count in (0, 1, 2):
+            with self.subTest(count=count):
+                entry = self.simulator_intent_state()
+                commands, deleted = [], []
+
+                def run(*command, **kwargs):
+                    commands.append(command)
+                    if command[2] == "delete":
+                        deleted.append(command[3])
+                    entries = [dict(entry, udid=entry["udid"] if i == 0 else
+                                    "87654321-4321-4321-4321-cba987654321") for i in range(count)] if not deleted else []
+                    return subprocess.CompletedProcess(command, 0,
+                        json.dumps({"devices": {self.suite.ios["runtime"]: entries}}), "")
+
+                with patch.object(self.suite, "run", side_effect=run):
+                    if count == 2:
+                        with self.assertRaises(RuntimeError):
+                            self.suite.cleanup()
+                    else:
+                        self.suite.cleanup()
+                if count < 2:
+                    self.assertTrue(self.suite.state["cleanupDone"])
+                    self.assertFalse(self.suite.state["simulatorCreate"]["pending"])
+                    self.assertEqual(deleted, [] if count == 0 else [entry["udid"]])
+                    self.assertEqual(self.suite.state["simulatorCreate"]["resolution"],
+                                     "absence-verified" if count == 0 else "exact-inventory")
+                else:
+                    self.assertFalse(self.suite.state["cleanupDone"])
+                    self.assertTrue(self.suite.state["simulatorCreate"]["pending"])
+                    self.assertFalse(self.suite.state["simulatorJournalClean"])
+                    self.assertFalse(deleted)
+                    self.assertTrue(all(command[2] == "list" for command in commands))
+
+    def test_pending_simulator_creation_mismatch_or_inventory_error_never_deletes(self):
+        for failure in ("wrong-runtime", "wrong-type", "timeout"):
+            with self.subTest(failure=failure):
+                entry = self.simulator_intent_state()
+                if failure == "wrong-type":
+                    entry["deviceTypeIdentifier"] = "com.apple.CoreSimulator.SimDeviceType.other"
+                commands = []
+
+                def run(*command, **kwargs):
+                    commands.append(command)
+                    if failure == "timeout":
+                        raise TimeoutError("exact inventory unavailable")
+                    runtime = "different-runtime" if failure == "wrong-runtime" else self.suite.ios["runtime"]
+                    return subprocess.CompletedProcess(command, 0, json.dumps({"devices": {runtime: [entry]}}), "")
+
+                with patch.object(self.suite, "run", side_effect=run), self.assertRaises(RuntimeError):
+                    self.suite.cleanup()
+                self.assertTrue(self.suite.state["simulatorCreate"]["pending"])
+                self.assertFalse(self.suite.state["cleanupDone"])
+                self.assertFalse(self.suite.state["simulatorJournalClean"])
+                self.assertTrue(all(command[2] == "list" for command in commands))
+
+    def test_simulator_create_intent_is_durable_before_a_committed_reply_is_lost(self):
+        self.suite.args.platform = "ios"
+        captured = []
+
+        def create(*command, **kwargs):
+            state = json.loads(self.suite.state_path.read_text())
+            captured.append(state)
+            self.assertTrue(state["simulatorCreate"]["pending"])
+            self.assertEqual(state["simulatorCreate"]["name"], command[3])
+            self.assertEqual(state["simulatorCreate"]["deviceType"], command[4])
+            self.assertEqual(state["simulatorCreate"]["runtime"], command[5])
+            self.assertEqual(len(state["simulatorCreate"]["sourceHead"]), 40)
+            self.assertEqual(len(state["simulatorCreate"]["runNonce"]), 32)
+            raise TimeoutError("create committed but its reply was lost")
+
+        with patch.object(self.suite, "run", side_effect=create), self.assertRaisesRegex(TimeoutError, "reply was lost"):
+            self.suite.boot()
+        self.assertEqual(len(captured), 1)
+        self.assertTrue(self.suite.state["simulatorCreate"]["pending"])
+        self.assertNotIn("device", self.suite.state["simulatorCreate"])
+        self.assertFalse(self.suite.state["simulatorJournalClean"])
+
+    def test_state_commit_is_atomic_and_keeps_the_previous_pending_intent_on_write_failure(self):
+        self.suite.state = {"phase": "pending", "cleanupDone": False}
+        self.suite.save()
+        write = Path.write_text
+
+        def partial(path, *args, **kwargs):
+            if path.name.endswith(".pending"):
+                write(path, "{partial")
+                raise OSError("interrupted atomic state commit")
+            return write(path, *args, **kwargs)
+
+        self.suite.state["phase"] = "complete"
+        with patch.object(Path, "write_text", partial), self.assertRaises(OSError):
+            self.suite.save()
+        self.assertEqual(json.loads(self.suite.state_path.read_text())["phase"], "pending")
+
     def test_ios_cleanup_uses_one_owned_sixty_second_budget(self):
         self.suite.args.platform = "ios"
         clock = [100]

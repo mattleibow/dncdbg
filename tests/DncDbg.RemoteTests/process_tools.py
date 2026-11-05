@@ -123,10 +123,9 @@ class OwnedProcessRecovery:
                     report["primaryError"] = type(self.primary_error).__name__ if self.primary_error else None
                     content = json.dumps(report, indent=2) if is_report else self.stdout_text + self.stderr_text
                     path.write_text(content)
-                except OSError as error:
+                except BaseException as error:
                     self.record_errors.append(f"{path.name}: {error}")
-                    if self.primary_error is None:
-                        self.primary_error = error
+                    self.preserve_error(error)
 
 
 def start_owned(*args, **kwargs):
@@ -211,10 +210,12 @@ def run_owned(*args, env=None, check=True, input=None, timeout=180, log=None, cw
         process = start_owned(args, cwd=cwd, env=env, text=False,
                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         owner = OwnedProcessRecovery(process, log, deadline)
-        if owner_callback is not None:
-            owner_callback(owner)
+        callback_complete = owner_callback is None
         try:
             try:
+                if owner_callback is not None:
+                    owner_callback(owner)
+                    callback_complete = True
                 owner.capture(*process.communicate(input.encode() if isinstance(input, str) else input,
                     timeout=min(timeout, max(0, deadline - time.monotonic() - reserve))))
             except BaseException as error:
@@ -225,6 +226,8 @@ def run_owned(*args, env=None, check=True, input=None, timeout=180, log=None, cw
                 if owner.primary_error is None:
                     owner.primary_error = subprocess.TimeoutExpired(args, timeout)
                 owner.finish()
+                raise OwnedProcessSettlementError(owner) from owner.primary_error
+            if not callback_complete:
                 raise OwnedProcessSettlementError(owner) from owner.primary_error
         finally:
             if owner.complete:

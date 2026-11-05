@@ -65,8 +65,14 @@ class Suite:
         self.emulator_log = None
         self.broker_process = None
         self.process_recoveries = []
+        self.recovery_fallback = None
         self.android = PIN["androidX64" if getattr(args, "android_abi", "arm64-v8a") == "x86_64" else "android"]
         self.ios = PIN["iosX64" if getattr(args, "ios_architecture", "arm64") == "x64" else "ios"]
+
+    def owned_recoveries(self):
+        yield from self.process_recoveries
+        if self.recovery_fallback is not None and self.recovery_fallback not in self.process_recoveries:
+            yield self.recovery_fallback
 
     def save(self):
         self.state_path.write_text(json.dumps(self.state, indent=2))
@@ -86,15 +92,17 @@ class Suite:
                                  timeout=timeout, check=check, input=input, log=log, deadline=deadline,
                                  owner_callback=self.process_recoveries.append)
             except OwnedProcessSettlementError as error:
-                self.state["processRecovery"] = [{
-                    "pid": r.process.pid, "processGroup": r.process.pid,
-                    "leaderReaped": r.leader_reaped, "groupAbsent": r.group_absent, "drainComplete": r.drain_complete,
-                } for r in self.process_recoveries]
+                self.recovery_fallback = error.recovery
                 try:
+                    self.state["processRecovery"] = [{
+                        "pid": r.process.pid, "processGroup": r.process.pid,
+                        "leaderReaped": r.leader_reaped, "groupAbsent": r.group_absent, "drainComplete": r.drain_complete,
+                    } for r in self.owned_recoveries()]
                     self.save()
-                except OSError as write_error:
+                except BaseException as write_error:
                     error.recovery.record_errors.append(f"state.json: {write_error}")
-                raise
+                    error.recovery.preserve_error(write_error)
+                raise error from error.recovery.primary_error
             except subprocess.TimeoutExpired as error:
                 raise TimeoutError(f"{command[0]} exceeded its aggregate deadline; partial output: {log.relative_to(ROOT)}") from error
         process = subprocess.Popen([str(c) for c in command], cwd=cwd,
@@ -408,21 +416,32 @@ class Suite:
         errors = []
         cancellation = None
         ios_deadline = time.monotonic() + IOS_CLEANUP_TIMEOUT if self.args.platform == "ios" else None
-        if not self.process_recoveries and any(not all(r.get(key, False) for key in
+        if not self.process_recoveries and self.recovery_fallback is None and any(not all(r.get(key, False) for key in
                 ("leaderReaped", "groupAbsent", "drainComplete")) for r in self.state.get("processRecovery", [])):
             errors.append("Unverified process recovery journal from an unavailable original owner; refusing completion.")
-        for recovery in self.process_recoveries:
-            if not recovery.finish():
-                errors.append(f"Owned process/group {recovery.process.pid} failure recovery incomplete.")
-            if recovery.record_errors:
-                errors.extend(recovery.record_errors)
-            cancellation = cancellation or original_cancellation(recovery.primary_error)
-        if cancellation is not None:
-            errors.append("Resource cleanup interrupted; journaled resources remain unverified.")
+        def finish_recoveries():
+            nonlocal cancellation
+            for recovery in self.owned_recoveries():
+                try:
+                    if not recovery.finish():
+                        message = f"Owned process/group {recovery.process.pid} failure recovery incomplete."
+                        if message not in errors:
+                            errors.append(message)
+                except BaseException as failure:
+                    recovery.preserve_error(failure)
+                    errors.append(repr(failure))
+                errors.extend(message for message in recovery.record_errors if message not in errors)
+                cancellation = cancellation or original_cancellation(recovery.primary_error)
+            if cancellation is not None:
+                message = "Resource cleanup interrupted; journaled resources remain unverified."
+                if message not in errors:
+                    errors.append(message)
+
+        finish_recoveries()
 
         def clean(*command, **kwargs):
             nonlocal cancellation
-            if cancellation is not None or any(not r.complete for r in self.process_recoveries):
+            if cancellation is not None or any(not r.complete for r in self.owned_recoveries()):
                 return None
             try:
                 timeout = 30
@@ -555,21 +574,20 @@ class Suite:
                     errors.append("Owned DevFlow broker listener remained after shutdown.")
         if cancellation is None:
             shutil.rmtree(self.output / "work", ignore_errors=True)
-        for recovery in self.process_recoveries:
-            if not recovery.finish():
-                errors.append(f"Owned process/group {recovery.process.pid} failure recovery incomplete.")
-        if self.process_recoveries:
+        finish_recoveries()
+        if self.process_recoveries or self.recovery_fallback is not None:
             self.state["processRecovery"] = [{
                 "pid": r.process.pid, "processGroup": r.process.pid,
                 "leaderReaped": r.leader_reaped, "groupAbsent": r.group_absent, "drainComplete": r.drain_complete,
-            } for r in self.process_recoveries]
+            } for r in self.owned_recoveries()]
         self.state["cleanupErrors"] = errors
         self.state["resourceJournalClean"] = not errors
         self.state["cleanupDone"] = not errors
         try:
             self.save()
-        except OSError as write_error:
+        except BaseException as write_error:
             errors.append(f"state.json: {write_error}")
+            cancellation = cancellation or original_cancellation(write_error)
             self.state["cleanupDone"] = self.state["resourceJournalClean"] = False
         if cancellation is not None:
             raise cancellation
@@ -648,6 +666,14 @@ def main():
     suite.save()
     passed, error, cancellation = False, None, None
 
+    def report(message):
+        nonlocal cancellation
+        try:
+            print(message, file=sys.stderr, flush=True)
+        except BaseException as failure:
+            cancellation = cancellation or original_cancellation(failure)
+            suite.state.setdefault("evidenceErrors", []).append(repr(failure))
+
     def interrupted(_signal, _frame):
         raise KeyboardInterrupt("Mobile run interrupted")
 
@@ -663,9 +689,11 @@ def main():
         error = repr(failure)
         try:
             (suite.output / "failure.log").write_text(traceback.format_exc())
-        except OSError as write_error:
+        except BaseException as write_error:
+            cancellation = cancellation or original_cancellation(write_error)
+            suite.state.setdefault("evidenceErrors", []).append(repr(write_error))
             error += f"\nFailure evidence: {write_error}"
-        print(error, file=sys.stderr, flush=True)
+        report(error)
     finally:
         try:
             if args.platform != "contracts":
@@ -676,21 +704,30 @@ def main():
         except BaseException as failure:
             cancellation = cancellation or original_cancellation(failure)
             passed, error = False, f"{error or ''}\nCleanup: {failure!r}"
-            print(error, file=sys.stderr)
+            report(error)
         try:
             suite.evidence(passed, error)
-        except Exception as failure:
+        except BaseException as failure:
+            cancellation = cancellation or original_cancellation(failure)
             passed = False
             error = f"{error or ''}\nEvidence: {failure!r}"
-            destination = suite.output / "evidence"
-            destination.mkdir(exist_ok=True)
+            suite.state.setdefault("evidenceErrors", []).append(repr(failure))
             try:
+                destination = suite.output / "evidence"
+                destination.mkdir(exist_ok=True)
                 (destination / "manifest.json").write_text(json.dumps({
                     "passed": False, "error": error, "cleanup": suite.state.get("cleanupDone", False)}, indent=2))
-            except OSError as write_error:
-                print(f"Evidence failure: {write_error}", file=sys.stderr)
-            print(error, file=sys.stderr)
-    print(f"{'PASS' if passed else 'FAIL'}: {args.platform}; evidence: {suite.output.relative_to(ROOT)}/evidence")
+            except BaseException as write_error:
+                cancellation = cancellation or original_cancellation(write_error)
+                suite.state.setdefault("evidenceErrors", []).append(repr(write_error))
+                report(f"Evidence failure: {write_error}")
+            report(error)
+    try:
+        print(f"{'PASS' if passed else 'FAIL'}: {args.platform}; evidence: {suite.output.relative_to(ROOT)}/evidence")
+    except BaseException as failure:
+        cancellation = cancellation or original_cancellation(failure)
+        passed = False
+        suite.state.setdefault("evidenceErrors", []).append(repr(failure))
     if cancellation is not None:
         raise cancellation
     return 0 if passed else 1

@@ -252,6 +252,11 @@ remains a red gate, never a successful skip.
   during TERM/KILL or the final drain retain their original exception/cause;
   only timeout is an expected settlement condition; cancellation or other
   faults remain primary while mandatory owned recovery completes.
+  Registration callbacks are inside that same protected ownership path; a
+  callback failure cannot abandon a launched process. A fallback owner survives
+  partial registration. Every final recovery pass rechecks cancellation, and
+  all evidence/fallback directory writes preserve the first cancellation even
+  if later recording is interrupted or the filesystem remains unavailable.
 - **`Mobile Android emulator (pinned)`** uses hosted **`ubuntu-24.04`**,
   explicitly enables/checks KVM and runs the **entire same** unified suite with
   the separate x64 pins. It does not merely cross-build an APK, run host fakes,

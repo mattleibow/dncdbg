@@ -203,6 +203,27 @@ class GroupIdentityTests(unittest.TestCase):
         self.assertTrue(identity["startIdentity"])
         self.assertTrue(validate.ProcessGroupOwnership.same(identity, validate.process_identity(os.getpid())))
 
+    def test_failed_initial_capture_never_adopts_a_later_reused_pid(self):
+        for reaped in (False, True):
+            with self.subTest(reaped=reaped):
+                owner, foreign = self.ownership()
+                owner.original = None
+                owner.members.clear()
+                owner.capture_state = "not-applicable"
+                with patch.object(validate, "process_identity", return_value=None):
+                    owner.capture()
+                owner.recovery.process.returncode = 0 if reaped else None
+                with patch.object(validate, "process_identity", return_value=foreign), \
+                        patch.object(validate.subprocess, "run",
+                                     return_value=subprocess.CompletedProcess([], 0, "123456\n", "")), \
+                        patch.object(validate.os, "killpg") as send, patch.object(validate.os, "kill") as direct:
+                    owner.capture()
+                    with self.assertRaises(RuntimeError):
+                        owner.send(signal.SIGTERM, time.monotonic() + 1)
+                self.assertIsNone(owner.original)
+                send.assert_not_called()
+                direct.assert_not_called()
+
     def test_changed_birth_session_or_uid_never_authorizes_a_signal(self):
         for field in ("startIdentity", "sid", "uid"):
             with self.subTest(field=field):

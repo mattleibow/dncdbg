@@ -191,6 +191,7 @@ class GroupIdentityTests(unittest.TestCase):
         identity = {"pid": process.pid, "ppid": 123, "pgid": process.pid, "sid": process.pid,
                     "uid": os.geteuid(), "startIdentity": "original-birth", "state": "running"}
         owner.original = identity
+        owner.capture_state = "verified"
         owner.members[process.pid] = identity
         return owner, identity
 

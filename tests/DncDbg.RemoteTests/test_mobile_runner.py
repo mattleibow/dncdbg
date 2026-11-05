@@ -665,7 +665,8 @@ class MobileRunnerTests(unittest.TestCase):
         def run(*command, **kwargs):
             commands.append((command, kwargs))
             text = device if command[2] == "create" else json.dumps({"devices": {
-                self.suite.ios["runtime"]: [{"udid": device, "name": self.suite.state["name"], "state": "Booted"}]}})
+                self.suite.ios["runtime"]: [{"udid": device, "name": self.suite.state["name"], "state": "Booted",
+                                            "deviceTypeIdentifier": self.suite.ios["deviceType"]}]}})
             return subprocess.CompletedProcess(command, 0, text, "")
 
         with patch("run_suite.time.monotonic", return_value=100), patch.object(self.suite, "run", side_effect=run):
@@ -682,8 +683,16 @@ class MobileRunnerTests(unittest.TestCase):
         self.suite.args.platform = "ios"
         device = "12345678-1234-1234-1234-123456789abc"
         for field, value in (("state", "Shutdown"), ("name", "another-owner"), ("udid", "another-device")):
+            self.suite.state.pop("simulatorCreate", None)
+            self.suite.state.pop("simulatorIdentity", None)
+            lists = [0]
             def run(*command, **kwargs):
-                entry = {"udid": device, "name": self.suite.state["name"], "state": "Booted"} | {field: value}
+                if command[2] == "list":
+                    lists[0] += 1
+                entry = {"udid": device, "name": self.suite.state["name"], "state": "Booted",
+                         "deviceTypeIdentifier": self.suite.ios["deviceType"]}
+                if lists[0] > 1:
+                    entry[field] = value
                 text = device if command[2] == "create" else json.dumps({"devices": {self.suite.ios["runtime"]: [entry]}})
                 return subprocess.CompletedProcess(command, 0, text, "")
             with self.subTest(field=field), patch.object(self.suite, "run", side_effect=run):
@@ -694,11 +703,15 @@ class MobileRunnerTests(unittest.TestCase):
     def test_ios_boot_rejects_success_after_aggregate_provisioning_deadline(self):
         self.suite.args.platform = "ios"
         clock = [100]
+        device = "12345678-1234-1234-1234-123456789abc"
 
         def run(*command, **kwargs):
             if command[2] == "bootstatus":
                 clock[0] += 601
-            return subprocess.CompletedProcess(command, 0, "owned-device", "")
+            text = device if command[2] == "create" else json.dumps({"devices": {
+                self.suite.ios["runtime"]: [{"udid": device, "name": self.suite.state["name"], "state": "Booted",
+                                            "deviceTypeIdentifier": self.suite.ios["deviceType"]}]}})
+            return subprocess.CompletedProcess(command, 0, text, "")
 
         with patch("run_suite.time.monotonic", side_effect=lambda: clock[0]), \
                 patch.object(self.suite, "run", side_effect=run):
@@ -722,7 +735,8 @@ class MobileRunnerTests(unittest.TestCase):
             with self.assertRaisesRegex(TimeoutError, "provisioning.*600"):
                 self.suite.boot()
         self.assertEqual(len(commands), 1)
-        self.assertEqual(self.suite.state["device"], "owned-device")
+        self.assertNotIn("device", self.suite.state)
+        self.assertTrue(self.suite.state["simulatorCreate"]["pending"])
         report = json.loads((self.output / "ios-provisioning.json").read_text())
         self.assertFalse(report["ready"])
         self.assertEqual(report["seconds"], 601)
@@ -816,6 +830,68 @@ class MobileRunnerTests(unittest.TestCase):
         self.assertNotIn("device", self.suite.state["simulatorCreate"])
         self.assertFalse(self.suite.state["simulatorJournalClean"])
 
+    def test_malformed_simulator_create_reply_leaves_an_unresolved_intent(self):
+        self.suite.args.platform = "ios"
+        with patch.object(self.suite, "run", return_value=subprocess.CompletedProcess([], 0, "not-a-udid", "")) as run:
+            with self.assertRaises((ValueError, RuntimeError)):
+                self.suite.boot()
+        self.assertEqual(run.call_count, 1)
+        saved = json.loads(self.suite.state_path.read_text())
+        self.assertTrue(saved["simulatorCreate"]["pending"])
+        self.assertNotIn("device", saved)
+        self.assertFalse(saved["simulatorJournalClean"])
+
+    def test_restart_after_stable_udid_commit_before_intent_clear_revalidates_exact_inventory(self):
+        entry = self.simulator_intent_state()
+        self.suite.save()
+        save = self.suite.save
+
+        def crash_after_commit():
+            save()
+            raise KeyboardInterrupt("crash after stable identity commit")
+
+        identity = {"udid": entry["udid"], "name": entry["name"], "runtime": self.suite.ios["runtime"],
+                    "deviceType": self.suite.ios["deviceType"]}
+        with patch.object(self.suite, "save", side_effect=crash_after_commit), self.assertRaises(KeyboardInterrupt):
+            self.suite.register_simulator(identity, "create-reply-and-inventory")
+        saved = json.loads(self.suite.state_path.read_text())
+        self.assertTrue(saved["simulatorCreate"]["pending"])
+        self.assertEqual(saved["simulatorIdentity"], identity)
+        destination = self.output / "restarted-create"
+        destination.mkdir()
+        restarted = Suite(Namespace(platform="ios", output=destination, xcode_dir=None))
+        restarted.state = saved
+        deletes = []
+
+        def run(*command, **kwargs):
+            if command[2] == "delete":
+                deletes.append(command[3])
+            return subprocess.CompletedProcess(command, 0,
+                json.dumps({"devices": {self.suite.ios["runtime"]: [] if deletes else [entry]}}), "")
+
+        with patch.object(restarted, "run", side_effect=run):
+            restarted.cleanup()
+        self.assertEqual(deletes, [entry["udid"]])
+        self.assertFalse(restarted.state["simulatorCreate"]["pending"])
+        self.assertEqual(restarted.state["simulatorCreate"]["resolution"], "exact-inventory")
+        self.assertTrue(restarted.state["cleanupDone"])
+
+    def test_cleanup_entrypoint_does_not_trust_a_done_flag_with_pending_creation(self):
+        self.simulator_intent_state()
+        self.suite.state["cleanupDone"] = True
+        self.suite.save()
+        previous = signal.getsignal(signal.SIGTERM)
+        try:
+            with patch.object(sys, "argv", ["run_suite.py", "--platform", "ios", "--cleanup", "--output", str(self.output)]), \
+                    patch("run_suite.Suite", return_value=self.suite), \
+                    patch.object(self.suite, "run", side_effect=TimeoutError("creation inventory unavailable")):
+                self.assertEqual(run_suite.main(), 1)
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+        manifest = json.loads((self.output / "evidence/manifest.json").read_text())
+        self.assertFalse(manifest["passed"] or manifest["cleanup"])
+        self.assertTrue(manifest["simulatorCreate"]["pending"])
+
     def test_state_commit_is_atomic_and_keeps_the_previous_pending_intent_on_write_failure(self):
         self.suite.state = {"phase": "pending", "cleanupDone": False}
         self.suite.save()
@@ -854,13 +930,20 @@ class MobileRunnerTests(unittest.TestCase):
         helper = self.output / "xcrun"
         helper.write_text(f"""#!{sys.executable}
 import os, sys
+import json
 from pathlib import Path
 sys.path.insert(0, {str(ROOT / "tests/DncDbg.RemoteTests")!r})
 from test_mobile_processes import waiting_parent
+created = Path({str(self.output / "created-simulator.json")!r})
 if sys.argv[2] == "create":
+    created.write_text(json.dumps({{"name":sys.argv[3],"type":sys.argv[4],"runtime":sys.argv[5]}}))
     print("12345678-1234-1234-1234-123456789abc")
 elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
     waiting_parent(os.environ["DNCDBG_TEST_PROCESS_RECORD"], ignore_term=True)
+elif sys.argv[2] == "list":
+    identity = json.loads(created.read_text())
+    print(json.dumps({{"devices":{{identity["runtime"]:[{{"udid":"12345678-1234-1234-1234-123456789abc",
+        "name":identity["name"],"state":"Booted","deviceTypeIdentifier":identity["type"]}}]}}}}))
 """)
         helper.chmod(0o700)
         self.suite.args.platform = "ios"
@@ -1200,6 +1283,14 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
     def test_evidence_write_failure_never_loses_owner_or_original_cancellation(self):
         original = KeyboardInterrupt("cancel with full disk")
         real_start = process_tools.start_owned
+        write = Path.write_text
+        journals = [0]
+
+        def full_disk(path, *args, **kwargs):
+            if path.name == "state.json.pending" and journals[0] < 2:
+                journals[0] += 1
+                return write(path, *args, **kwargs)
+            raise OSError("evidence disk full")
 
         def start(*args, **kwargs):
             process = real_start(*args, **kwargs)
@@ -1215,7 +1306,7 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
             return process
 
         with patch("process_tools.start_owned", side_effect=start), \
-                patch.object(Path, "write_text", side_effect=OSError("evidence disk full")):
+                patch.object(Path, "write_text", full_disk):
             try:
                 self.suite.run(sys.executable, "-c", "print('output before cancellation')",
                                deadline=time.monotonic() + 2)
@@ -1234,6 +1325,14 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
 
     def test_incomplete_recovery_owner_survives_unwritable_logs_and_state(self):
         real_start = process_tools.start_owned
+        write = Path.write_text
+        journals = [0]
+
+        def unwritable(path, *args, **kwargs):
+            if path.name == "state.json.pending" and journals[0] < 2:
+                journals[0] += 1
+                return write(path, *args, **kwargs)
+            raise OSError("unwritable evidence")
 
         def start(*args, **kwargs):
             process = real_start(*args, **kwargs)
@@ -1249,7 +1348,7 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
             return process
 
         with patch("process_tools.start_owned", side_effect=start), \
-                patch.object(Path, "write_text", side_effect=OSError("unwritable evidence")):
+                patch.object(Path, "write_text", unwritable):
             with self.assertRaises(process_tools.OwnedProcessSettlementError) as caught:
                 self.suite.run(sys.executable, "-c", "pass", deadline=time.monotonic() + 1)
             self.assertIn(caught.exception.recovery, self.suite.process_recoveries)
@@ -1462,7 +1561,7 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
             raise original
 
         def launch(*args, **kwargs):
-            if processes:
+            if processes or "--restore-signal-mask" not in args[0]:
                 return popen(*args, **kwargs)
             process = popen(*args, **kwargs)
             processes.append(process)
@@ -1541,9 +1640,12 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
 
     def test_state_handler_bookkeeping_cannot_replace_original_notification_cancellation(self):
         original = KeyboardInterrupt("first notification cancellation")
+        notified = []
+        save = self.suite.save
 
         class Notifications(list):
             def append(self, value):
+                notified.append(True)
                 raise original
 
         for later in (MemoryError("snapshot formatting"), KeyboardInterrupt("later state cancellation"), SystemExit(41)):
@@ -1553,7 +1655,14 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
                         raise later
 
                 self.suite.process_recoveries = Notifications()
-                with patch.object(self.suite, "save", side_effect=Unformattable()), \
+                notified.clear()
+
+                def save_after_notification():
+                    if notified:
+                        raise Unformattable()
+                    save()
+
+                with patch.object(self.suite, "save", side_effect=save_after_notification), \
                         self.assertRaises(BaseException) as caught:
                     self.suite.run(sys.executable, "-c", "pass", deadline=time.monotonic() + 2)
                 self.assertTrue(caught.exception is original or caught.exception.__cause__ is original)

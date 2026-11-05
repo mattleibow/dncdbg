@@ -389,21 +389,83 @@ class Suite:
                  timeout=900)
 
     def execute(self):
+        prefix = ["tuple-admission", "device-boot"]
+        if self.args.platform == "ios":
+            prefix += ["debug-build", "broker-independent-dap", "release-isolation"]
+        else:
+            prefix += ["release-isolation", "debug-build", "broker-independent-dap"]
+        self.state["requiredPhases"] = prefix + [
+            "direct-continue", "direct-disconnect", "broker-admission", "devflow-only",
+            "dap", "fault-build", "faults", "ordinary-debug-restored", "restored-dap"]
+        self.state["completedPhases"] = []
+        self.state["phasesComplete"] = False
+        self.save()
         self.preflight()
+        self.phase_completed("tuple-admission")
         self.boot()
-        self.build("Release", faults=True)
-        app, assets = self.build()
-        self.independent_proofs(app, assets)
+        self.phase_completed("device-boot")
+        if self.args.platform == "ios":
+            app, assets = self.build()
+            self.phase_completed("debug-build")
+            self.fixture_proof(app, assets, "dap", "debugger-dap-broker-unavailable")
+            self.phase_completed("broker-independent-dap")
+            before = self.debug_identity(app, assets)
+            identity_path = self.output / "debug-release-integrity.json"
+            identity_path.write_text(json.dumps({"before": before, "after": None, "unchanged": False}, indent=2))
+            self.build("Release", faults=True)
+            after = self.debug_identity(app, assets)
+            identity_path.write_text(json.dumps({"before": before, "after": after, "unchanged": before == after}, indent=2))
+            require(before == after, "Debug artifacts changed during Release isolation build.")
+            self.phase_completed("release-isolation")
+            self.independent_client_proofs(app, assets)
+        else:
+            self.build("Release", faults=True)
+            self.phase_completed("release-isolation")
+            app, assets = self.build()
+            self.phase_completed("debug-build")
+            self.independent_proofs(app, assets)
         self.broker()
+        self.phase_completed("broker-admission")
         self.fixture_proof(app, assets, "ui", "devflow-only")
+        self.phase_completed("devflow-only")
         self.proof("run_device.py", app, assets, "dap")
+        self.phase_completed("dap")
         try:
             app, assets = self.build(faults=True)
+            self.phase_completed("fault-build")
             self.proof("run_faults.py", app, assets, "faults")
+            self.phase_completed("faults")
         finally:
             # Faults must not leave the ordinary helper/package in a poisoned build state.
             app, assets = self.build()
+        self.phase_completed("ordinary-debug-restored")
         self.proof("run_device.py", app, assets, "restored-dap")
+        self.phase_completed("restored-dap")
+        require(self.state["completedPhases"] == self.state["requiredPhases"],
+                "The full mobile suite did not complete every required phase in order.")
+        self.state["phasesComplete"] = True
+        self.save()
+
+    def phase_completed(self, name):
+        self.state.setdefault("completedPhases", []).append(name)
+        self.save()
+
+    def debug_identity(self, app, assets):
+        files = [("app/" + path.relative_to(app).as_posix(), path) for path in app.rglob("*") if path.is_file()]
+        for name in ("DncDbg.MauiTestApp.dll", "DncDbg.MauiTestApp.pdb", "DncDbg.ReloadFixture.dll",
+                     "DncDbg.ReloadFixture.pdb", "dncdbg-agent.json", "dncdbg-package.json"):
+            files.append(("assets/" + name, assets / name))
+        hashes = {}
+        for name, path in sorted(files):
+            root = app if name.startswith("app/") else assets
+            require(path.resolve().is_relative_to(root.resolve()), "Debug artifact escapes its owned build output.")
+            digest = hashlib.sha256()
+            with path.open("rb") as stream:
+                for block in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(block)
+            hashes[name] = digest.hexdigest()
+        require(any(name.startswith("app/") for name in hashes), "Debug app identity inventory is empty.")
+        return hashes
 
     def fixture_proof(self, app, assets, proof, name, disconnect=False):
         command = [sys.executable, str(Path(__file__).with_name("run_direct.py")), "--platform", self.args.platform,
@@ -417,8 +479,14 @@ class Suite:
 
     def independent_proofs(self, app, assets):
         self.fixture_proof(app, assets, "dap", "debugger-dap-broker-unavailable")
+        self.phase_completed("broker-independent-dap")
+        self.independent_client_proofs(app, assets)
+
+    def independent_client_proofs(self, app, assets):
         self.fixture_proof(app, assets, "client", "direct-continue")
+        self.phase_completed("direct-continue")
         self.fixture_proof(app, assets, "client", "direct-disconnect", disconnect=True)
+        self.phase_completed("direct-disconnect")
 
     def cleanup(self):
         errors = []
@@ -606,7 +674,13 @@ class Suite:
         destination.mkdir(exist_ok=True)
         manifest = {"head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
                     "dirty": bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True).strip()),
-                    "platform": self.args.platform, "pins": PIN, "passed": passed, "error": error,
+                    "platform": self.args.platform, "pins": PIN,
+                    "passed": passed and self.state.get("cleanupDone", False) and
+                        (self.args.platform == "contracts" or self.state.get("phasesComplete", False)),
+                    "error": error,
+                    "phases": {"required": self.state.get("requiredPhases", []),
+                               "completed": self.state.get("completedPhases", []),
+                               "complete": self.state.get("phasesComplete", False)},
                     "cleanup": self.state.get("cleanupDone", False),
                     "resourceJournalClean": self.state.get("resourceJournalClean", self.state.get("cleanupDone", False)),
                     "cleanupErrors": self.state.get("cleanupErrors", []), "files": {}}
@@ -706,6 +780,8 @@ def main():
                     contracts(suite)
                 else:
                     suite.execute()
+                    require(suite.state.get("phasesComplete", False),
+                            "The full mobile suite did not complete every required phase.")
                 passed = True
             except BaseException as failure:
                 remember(failure)
@@ -719,6 +795,8 @@ def main():
                 except BaseException as failure:
                     remember(failure)
 
+        if passed and not suite.state.get("cleanupDone", False):
+            remember(RuntimeError("Owned cleanup remains unverified after the required mobile phases."))
         # All rich reporting/bookkeeping is inside the outer non-escaping perimeter.
         error = repr(primary) if primary is not None else None
         if primary is not None:

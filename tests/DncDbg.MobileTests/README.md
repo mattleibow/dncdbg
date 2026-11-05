@@ -200,6 +200,16 @@ cleanup. Diagnostic collection must not replace the primary failure or skip
 mandatory process cleanup; collection errors remain separate evidence.
 Diagnostic-only experiments do not substitute for the complete pinned suite.
 
+On iOS the ordinary Debug build and first broker-independent DAP proof run
+immediately after tuple admission and boot, before the Release isolation
+build. Every original Release, direct-client, UI, combined, fault and restored
+Debug proof remains required in the same job. The manifest records required
+and completed phases in order; an early DAP pass is not qualification, and a
+later phase or cleanup failure keeps the overall result failed. Before/after
+hash inventories also require Release to leave the previously proven Debug
+app, agent/package metadata and DLL/PDB assets unchanged. Android retains its
+Release-first order.
+
 Build budgets are separate from debugger/RPC and fault deadlines. The first
 hosted iOS attempt exceeded 600 seconds in a cold Release build with no useful
 quiet output. Release packaging now has a **20-minute build-only bound**;

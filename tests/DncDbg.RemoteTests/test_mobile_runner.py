@@ -1,6 +1,7 @@
 """Portable regression gates for mobile orchestration, isolation and evidence (no device required)."""
 import json
 import io
+import errno
 import queue
 import os
 import runpy
@@ -1374,6 +1375,107 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
                 self.assertTrue(caught.exception is original or caught.exception.__cause__ is original)
                 self.assertTrue(self.suite.recovery_fallback.complete)
                 self.assertIs(self.suite.recovery_fallback.primary_error, original)
+
+    def test_owned_exec_preserves_real_popen_oserror_class_errno_and_filename(self):
+        denied = self.output / "not-executable"
+        denied.write_text("not executable")
+        denied.chmod(0o600)
+        invalid = self.output / "invalid-format"
+        invalid.write_text("not an executable format")
+        invalid.chmod(0o700)
+        for target in (str(self.output / "missing"), str(denied), str(self.output), str(invalid)):
+            with self.subTest(target=target):
+                try:
+                    subprocess.Popen([target])
+                except OSError as expected:
+                    expected_type, expected_errno, expected_filename = type(expected), expected.errno, expected.filename
+                else:
+                    self.fail("Invalid executable unexpectedly launched.")
+                with self.assertRaises(expected_type) as caught:
+                    self.suite.run(target, deadline=time.monotonic() + 2)
+                self.assertEqual(caught.exception.errno, expected_errno)
+                self.assertEqual(caught.exception.filename, expected_filename)
+                owner = self.suite.recovery_fallback
+                self.assertTrue(owner.complete)
+                self.assertIsNone(owner.exec_error_read)
+                self.assertIsNone(owner.exec_error_write)
+                self.assertNotIn("Traceback", owner.stderr_text)
+
+    def test_owned_exec_restores_popen_native_sigpipe_disposition(self):
+        command = ("/bin/sh", "-c", "kill -PIPE $$; printf survived")
+        expected = process_tools.run_owned(*command, check=False)
+        actual = self.suite.run(*command, check=False, deadline=time.monotonic() + 2)
+        self.assertEqual((actual.returncode, actual.stdout), (expected.returncode, expected.stdout))
+        self.assertEqual(actual.returncode, -signal.SIGPIPE)
+
+    def test_exec_error_handshake_handles_partial_malformed_and_timeout_records(self):
+        import threading
+        for payload, expected in ((b'{"version":1,"errno":2}', FileNotFoundError),
+                                  (b"{malformed", RuntimeError), (b"x" * 300, RuntimeError), (None, subprocess.TimeoutExpired)):
+            with self.subTest(payload=payload):
+                read, write = os.pipe()
+                owner = process_tools.OwnedProcessRecovery(None, self.output / "handshake.log", time.monotonic() + 1)
+                owner.exec_error_read = read
+                done = threading.Event()
+
+                def send():
+                    try:
+                        if payload is None:
+                            done.wait(timeout=2)
+                        else:
+                            os.write(write, payload[:5])
+                            time.sleep(0.01)
+                            os.write(write, payload[5:])
+                    finally:
+                        os.close(write)
+
+                sender = threading.Thread(target=send)
+                sender.start()
+                try:
+                    with self.assertRaises(expected):
+                        owner.await_exec(("missing-target",), time.monotonic() + 0.1)
+                    self.assertIsNone(owner.exec_error_read)
+                finally:
+                    done.set()
+                    sender.join(timeout=2)
+                    if owner.exec_error_read is not None:
+                        os.close(owner.exec_error_read)
+                    self.assertFalse(sender.is_alive())
+
+    @unittest.skipUnless(os.name == "posix", "POSIX exec-error pipe")
+    def test_signal_during_real_exec_handshake_settles_retained_process_group(self):
+        import threading
+        record = self.ios_deadline_helper("cleanup")
+        owner = process_tools.OwnedProcessRecovery(None, self.output / "handshake-cancel.log", time.monotonic() + 2)
+        self.assertTrue(callable(getattr(owner, "await_exec", None)))
+        read, write = os.pipe()
+        owner.exec_error_read = read
+        owner.process = process_tools.start_owned(("xcrun", "simctl", "list", "devices", "-j"),
+            env=self.suite.env, pass_fds=(write,), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        os.close(write)
+        ready = time.monotonic() + 1
+        while not record.exists() and time.monotonic() < ready:
+            time.sleep(0.005)
+        original = KeyboardInterrupt("exec handshake cancelled")
+
+        def interrupted(*_):
+            raise original
+
+        main_id = threading.get_ident()
+        sender = threading.Thread(target=lambda: (time.sleep(0.02), signal.pthread_kill(main_id, signal.SIGINT)))
+        previous = signal.signal(signal.SIGINT, interrupted)
+        sender.start()
+        try:
+            with self.assertRaises(KeyboardInterrupt) as caught:
+                owner.await_exec(("xcrun",), time.monotonic() + 1)
+            self.assertIs(caught.exception, original)
+        finally:
+            sender.join(timeout=1)
+            signal.signal(signal.SIGINT, previous)
+            self.assertTrue(owner.finish())
+            if owner.exec_error_read is not None:
+                os.close(owner.exec_error_read)
+        self.assert_ios_deadline_owned_processes_gone(record)
 
     @unittest.skipUnless(os.name == "posix", "POSIX command ownership")
     def test_real_invalid_output_bytes_are_preserved_independently_of_reaping(self):

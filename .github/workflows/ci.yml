@@ -119,6 +119,9 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
+      - name: Check DAP harness event waits
+        run: dotnet run --project test-suite/Runner --configuration Release -- --harness-contracts
+
       - name: Run smoke and acceptance tests
         shell: pwsh
         run: |

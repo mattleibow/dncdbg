@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Diagnostics;
 using System.Collections.Generic;
 using DbgTestCore;
 using DbgTestCore.DAP;
@@ -105,91 +106,127 @@ public class DAPDebugger
             }
             else
             {
-                Logger.LogLine("<- (E) " + line);
-                m_eventQueue.Enqueue(line);
-
-                bool stopEvent = false;
-                foreach (var entry in m_stopEvents)
-                {
-                    if (IsResponseContainProperty(line, "event", entry))
-                    {
-                        stopEvent = true;
-                    }
-                }
-
-                if (!stopEvent)
-                {
-                    m_notStopEventList.Add(line);
-                }
+                RecordEvent(line);
             }
         }
     }
 
     void ReceiveEvents(int timeout = -1)
     {
-        while (true)
+        while (ReceiveEvent(timeout, out bool stopEvent))
         {
-            string[]? response = m_client.Receive(timeout);
-            if (response == null)
-            {
-                if (timeout == DebuggerClient.PollTimeout)
-                {
-                    // No new messages during the poll.
-                    return;
-                }
-                throw new DebuggerNotResponses();
-            }
-            string line = response[0];
-
-            // Response for async requests
-            if (IsResponseContainProperty(line, "type", "response"))
-            {
-                Logger.LogLine("<- (R) " + line);
-
-                if (!(bool)GetResponsePropertyValue(line, "success")!)
-                {
-                    throw new FailResponse();
-                }
-
-                continue;
-            }
-
-            Logger.LogLine("<- (E) " + line);
-            m_eventQueue.Enqueue(line);
-
-            foreach (var entry in m_stopEvents)
-            {
-                if (IsResponseContainProperty(line, "event", entry))
-                {
-                    return;
-                }
-            }
-
-            m_notStopEventList.Add(line);
+            if (stopEvent)
+                return;
         }
+    }
+
+    bool ReceiveEvent(int timeout, out bool stopEvent)
+    {
+        stopEvent = false;
+        string[]? response = m_client.Receive(timeout);
+        if (response == null)
+        {
+            if (timeout == DebuggerClient.PollTimeout)
+                return false;
+            throw new DebuggerNotResponses();
+        }
+        string line = response[0];
+
+        // Response for async requests
+        if (IsResponseContainProperty(line, "type", "response"))
+        {
+            Logger.LogLine("<- (R) " + line);
+            if (!(bool)GetResponsePropertyValue(line, "success")!)
+                throw new FailResponse();
+        }
+        else
+        {
+            stopEvent = RecordEvent(line);
+        }
+        return true;
+    }
+
+    bool RecordEvent(string line)
+    {
+        Logger.LogLine("<- (E) " + line);
+        var received = new ReceivedEvent(line);
+        m_eventQueue.Enqueue(received);
+
+        foreach (var entry in m_stopEvents)
+        {
+            if (IsResponseContainProperty(line, "event", entry))
+                return true;
+        }
+        m_notStopEventList.Add(received);
+        return false;
+    }
+
+    bool TakeNotStopEvent(Func<string, bool> filter)
+    {
+        for (int i = 0; i < m_notStopEventList.Count; i++)
+        {
+            var received = m_notStopEventList[i];
+            if (!filter(received.Message))
+                continue;
+            m_notStopEventList.RemoveAt(i);
+            int queued = m_eventQueue.Count;
+            for (int j = 0; j < queued; j++)
+            {
+                var entry = m_eventQueue.Dequeue();
+                if (!ReferenceEquals(entry, received))
+                    m_eventQueue.Enqueue(entry);
+            }
+            return true;
+        }
+        return false;
+    }
+
+    public bool WaitForNotStopEvent(Func<string, bool> filter, int timeout = 10000)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(timeout);
+        var elapsed = Stopwatch.StartNew();
+        if (TakeNotStopEvent(filter))
+            return true;
+        while (elapsed.ElapsedMilliseconds < timeout)
+        {
+            int remaining = timeout - (int)elapsed.ElapsedMilliseconds;
+            if (remaining <= 0)
+                break;
+            ReceiveEvent(remaining, out _);
+            if (elapsed.ElapsedMilliseconds >= timeout)
+                break;
+            if (TakeNotStopEvent(filter))
+                return true;
+        }
+        return false;
+    }
+
+    bool TakeEvent(Func<string, bool> filter)
+    {
+        while (m_eventQueue.Count > 0)
+        {
+            var received = m_eventQueue.Dequeue();
+            if (filter(received.Message))
+            {
+                m_notStopEventList.Remove(received);
+                return true;
+            }
+        }
+        return false;
     }
 
     public bool IsEventReceived(Func<string, bool> filter)
     {
         // Check previously received events first.
-        while (m_eventQueue.Count > 0)
-        {
-            if (filter(m_eventQueue.Dequeue()))
-                return true;
-        }
+        if (TakeEvent(filter))
+            return true;
 
         // Receive new events and check them.
         // Note, stop events check must wait: the corresponding stop event may
         // come much later than the last response. For example, after restart
         // the newly started debuggee exits only after it finishes its work.
         ReceiveEvents(10000);
-        while (m_eventQueue.Count > 0)
-        {
-            if (filter(m_eventQueue.Dequeue()))
-                return true;
-        }
-
-        return false;
+        return TakeEvent(filter);
     }
 
     public bool IsNotStopEventReceived(Func<string, bool> filter, bool getNewEvents = false)
@@ -199,16 +236,7 @@ public class DAPDebugger
         {
             ReceiveEvents(DebuggerClient.PollTimeout);
         }
-        // Check previously received events.
-        foreach (var entry in m_notStopEventList)
-        {
-            if (filter(entry))
-            {
-                m_notStopEventList.Remove(entry);
-                return true;
-            }
-        }
-        return false;
+        return TakeNotStopEvent(filter);
     }
 
     public DAPDebugger(DebuggerClient debuggerClient)
@@ -216,8 +244,14 @@ public class DAPDebugger
         m_client = debuggerClient;
     }
 
-    Queue<string> m_eventQueue = new Queue<string>();
-    List<string> m_notStopEventList = new List<string>();
+    sealed class ReceivedEvent
+    {
+        public readonly string Message;
+        public ReceivedEvent(string message) { Message = message; }
+    }
+
+    Queue<ReceivedEvent> m_eventQueue = new Queue<ReceivedEvent>();
+    List<ReceivedEvent> m_notStopEventList = new List<ReceivedEvent>();
     readonly DebuggerClient m_client;
     static readonly string[] m_stopEvents = { "stopped", "terminated" };
     int m_requestSeq = 1;

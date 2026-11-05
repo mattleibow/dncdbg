@@ -1520,7 +1520,8 @@ partial class Context
             return false;
         };
 
-        Assert.True(m_dapDebugger.IsNotStopEventReceived(filter, getNewEvents), @"__FILE__:__LINE__" + "\n" + callerTrace);
+        Assert.True(getNewEvents ? m_dapDebugger.WaitForNotStopEvent(filter) : m_dapDebugger.IsNotStopEventReceived(filter),
+                    @"__FILE__:__LINE__" + "\n" + callerTrace);
     }
 
     public void FailedOutputEventCheck(string callerTrace, string category, string output, bool getNewEvents = false)

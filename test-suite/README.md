@@ -33,6 +33,17 @@ skipped on other operating systems.
 
 The target framework can be overridden with the `DNCDBG_TARGET_FRAMEWORK` environment variable (for example, `net8.0`); by default, the tests target `net10.0`.
 
+Positive `WasOutputEvent(..., getNewEvents: true)` assertions scan cached
+non-stop events first, then use one aggregate 10-second protocol deadline.
+Unmatched events retain their order; only the matching event is removed from
+both event stores. Negative/no-event checks still use the existing 100 ms
+short poll, not the positive wait. Run the deterministic fake-client contracts
+(also required by desktop CI) without launching an adapter:
+
+```sh
+dotnet run --project test-suite/Runner -c Release -- --harness-contracts
+```
+
 The required `Debugger (macos-latest)` check uses the official
 `macos-26-intel` runner and publishes an `osx-x64` adapter. Its stable context
 name is not an ARM64 coverage claim. The same complete suite remains runnable

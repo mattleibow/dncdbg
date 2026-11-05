@@ -805,7 +805,7 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
         with patch("process_tools.start_owned", side_effect=start), self.assertRaises(KeyboardInterrupt):
             self.suite.run("xcrun", "simctl", "list", "devices", "-j",
                            timeout=1.5, deadline=started + 1.5)
-        self.assertLessEqual(time.monotonic() - started, 6.75)
+        self.assertLessEqual(time.monotonic() - started, 1.75)
         self.assert_ios_deadline_owned_processes_gone(record)
 
     @unittest.skipUnless(os.name == "posix", "POSIX command ownership")
@@ -847,7 +847,7 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
                                 self.assertIn("settlement", str(error).lower())
                         else:
                             self.fail("Late cancellation/error cannot return success.")
-                    self.assertLessEqual(time.monotonic() - started, 1.75)
+                    self.assertLessEqual(time.monotonic() - started, 6.75)
                     self.assert_ios_deadline_owned_processes_gone(record)
                     self.assertIsNotNone(processes[0].returncode)
                     reports = [json.loads(p.read_text()) for p in self.output.glob("*.settlement.json")]

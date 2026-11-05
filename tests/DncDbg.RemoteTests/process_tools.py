@@ -1,7 +1,7 @@
 """Owned POSIX commands shared by remote/native/mobile test entrypoints."""
 import os
 import json
-import select
+import selectors
 import signal
 import socket
 import subprocess
@@ -84,10 +84,13 @@ class OwnedProcessRecovery:
 
     def await_exec(self, command, deadline):
         data = bytearray()
+        ready = None
         try:
+            ready = selectors.DefaultSelector()
+            ready.register(self.exec_error_read, selectors.EVENT_READ)
             while True:
                 available = deadline - time.monotonic()
-                if available <= 0 or not select.select([self.exec_error_read], [], [], max(0, available))[0]:
+                if available <= 0 or not ready.select(max(0, available)):
                     raise subprocess.TimeoutExpired(command, max(0, available))
                 part = os.read(self.exec_error_read, 257 - len(data))
                 if not part:
@@ -109,7 +112,11 @@ class OwnedProcessRecovery:
             self.preserve_error(error)
             raise
         finally:
-            self.close_exec_error_pipe()
+            try:
+                if ready is not None:
+                    ready.close()
+            finally:
+                self.close_exec_error_pipe()
 
     def settle(self, deadline):
         try:
@@ -195,9 +202,11 @@ def start_owned(*args, owner=None, **kwargs):
         raise RuntimeError("The remote integration runner requires POSIX process-group ownership")
     if owner is None:
         return subprocess.Popen(*args, start_new_session=True, **kwargs)
+    if not kwargs.get("close_fds", True):
+        raise ValueError("Owned/deadline launches reject close_fds=False; use explicit pass_fds.")
     previous = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
     try:
-        passed = tuple(kwargs.pop("pass_fds", ()))
+        passed = tuple(sorted(set(kwargs.pop("pass_fds", ()))))
         for fd in passed:
             os.fstat(fd)
         owner.exec_error_read, owner.exec_error_write = os.pipe()

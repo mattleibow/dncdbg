@@ -277,6 +277,13 @@ remains a red gate, never a successful skip.
   Partial malformed or stalled handshakes fail closed with ownership retained.
   The trampoline also restores `Popen`'s native SIGPIPE/SIGXFZ/SIGXFSZ
   dispositions rather than leaking Python's ignored-signal defaults into tools.
+  Handshake readiness uses the platform's high-FD-capable default selector,
+  not `select()`'s descriptor-number limit. This newly owned/deadline path
+  explicitly requires `close_fds=True` and accepts deduplicated `pass_fds`;
+  `close_fds=False` is rejected before spawning, not silently overridden.
+  No existing runner uses that option. The default/non-deadline helper retains
+  its native `close_fds=False` behavior. This avoids changing process-global
+  inheritable flags or claiming a lock can serialize other threads' spawns.
 - **`Mobile Android emulator (pinned)`** uses hosted **`ubuntu-24.04`**,
   explicitly enables/checks KVM and runs the **entire same** unified suite with
   the separate x64 pins. It does not merely cross-build an APK, run host fakes,

@@ -82,6 +82,16 @@ class ProcessOwnershipTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 validate.stop_owned(process)
 
+    def test_group_probe_rejects_malformed_or_other_group_rows(self):
+        for output in ("not-a-process-group\n", "999999\n", "123456\n999999\n"):
+            with self.subTest(output=output):
+                process = Mock(pid=123456)
+                with patch.object(validate.os, "killpg", side_effect=PermissionError(1, "Operation not permitted")), \
+                        patch.object(validate.subprocess, "run",
+                                     return_value=subprocess.CompletedProcess([], 0, output, "")):
+                    with self.assertRaisesRegex(RuntimeError, "group"):
+                        validate.stop_owned(process)
+
     def test_live_group_eperm_is_not_ignored(self):
         process = Mock(pid=123456)
         with patch.object(validate.os, "killpg", side_effect=PermissionError(1, "Operation not permitted")), \

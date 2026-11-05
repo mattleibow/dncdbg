@@ -1709,6 +1709,64 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
                            timeout=0.5)
         self.assertIn("before timeout", next(self.output.glob("*.log")).read_text())
 
+    @unittest.skipUnless(os.name == "posix", "POSIX build ownership")
+    def test_progress_timeout_retains_primary_and_owner_when_settlement_is_denied(self):
+        processes = []
+        start = process_tools.start_owned
+
+        def launch(*args, **kwargs):
+            process = start(*args, **kwargs)
+            processes.append(process)
+            return process
+
+        try:
+            with patch("run_suite.start_owned", side_effect=launch), patch("process_tools.start_owned", side_effect=launch), \
+                    patch("run_suite.stop_owned", side_effect=PermissionError(errno.EPERM, "controlled signal denial")), \
+                    patch("process_tools.stop_owned", side_effect=PermissionError(errno.EPERM, "controlled signal denial")):
+                with self.assertRaisesRegex(TimeoutError, "exceeded"):
+                    self.suite.run(sys.executable, "-c", "import time; print('build ready',flush=True);time.sleep(30)",
+                                   timeout=0.3, progress=True, progress_interval=0.05)
+            owner = self.suite.recovery_fallback
+            self.assertIsNotNone(owner)
+            self.assertIs(owner.process, processes[0])
+            self.assertFalse(owner.complete)
+            status = json.loads(next(self.output.glob("*.status.json")).read_text())
+            self.assertEqual(status["primaryError"], "TimeoutError")
+            self.assertFalse(status["buildGroupSettled"])
+            self.assertIn("PermissionError", status["recoveryErrors"])
+            self.assertIn("build ready", next(self.output.glob("*.log")).read_text())
+            with patch.object(self.suite, "run", side_effect=AssertionError("No ordinary cleanup after an unverified build")) as ordinary:
+                with self.assertRaises(RuntimeError):
+                    self.suite.cleanup()
+            ordinary.assert_not_called()
+            self.assertFalse(self.suite.state["cleanupDone"])
+            self.assertFalse(self.suite.state["buildGroupSettled"])
+        finally:
+            for process in processes:
+                if process.poll() is None:
+                    process_tools.stop_owned(process)
+                process.communicate(timeout=5)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX build ownership")
+    def test_progress_status_write_failure_cannot_replace_the_build_timeout(self):
+        write = Path.write_text
+
+        def fail_status(path, *args, **kwargs):
+            if path.name.endswith(".status.json"):
+                raise OSError("controlled status write failure")
+            return write(path, *args, **kwargs)
+
+        with patch.object(Path, "write_text", fail_status):
+            with self.assertRaisesRegex(TimeoutError, "exceeded"):
+                self.suite.run(sys.executable, "-c", "import time;print('build ready',flush=True);time.sleep(30)",
+                               timeout=0.3, progress=True, progress_interval=0.05)
+        owner = self.suite.recovery_fallback
+        self.assertIsNotNone(owner)
+        self.assertTrue(owner.complete)
+        self.assertIsInstance(owner.primary_error, TimeoutError)
+        self.assertTrue(owner.record_errors)
+        self.assertIn("build ready", next(self.output.glob("*.log")).read_text())
+
     def run_ios_phase_contract(self, failure=None):
         destination = self.output / "phase-contract"
         suite = Suite(Namespace(platform="ios", output=destination, xcode_dir=None))

@@ -225,6 +225,12 @@ remains a red gate, never a successful skip.
   on observed 30.23-second inventory latency. It never authorizes other devices
   or shared service resets. Android boot/cleanup and all app, debugger, RPC,
   fault, build and assertion deadlines remain unchanged; no retries are added.
+  The absolute monotonic deadline includes command execution, TERM/KILL
+  escalation, output drain and process-group reaping. Each command reserves up
+  to one second inside its remaining budget for settlement, with no fixed
+  post-deadline waits. Real parent/child tests require completion within a
+  1.5-second test budget plus only 250 ms of scheduler tolerance, captured
+  output, no surviving listener/PID and cancellation settlement.
 - **`Mobile Android emulator (pinned)`** uses hosted **`ubuntu-24.04`**,
   explicitly enables/checks KVM and runs the **entire same** unified suite with
   the separate x64 pins. It does not merely cross-build an APK, run host fakes,

@@ -649,7 +649,7 @@ class MobileRunnerTests(unittest.TestCase):
         with patch("run_suite.time.monotonic", return_value=100), \
                 patch.object(self.suite, "run", return_value=subprocess.CompletedProcess([], 0, '{"devices":{}}', "")) as run:
             self.suite.cleanup()
-        run.assert_called_once_with("xcrun", "simctl", "list", "devices", "-j", timeout=60)
+        run.assert_called_once_with("xcrun", "simctl", "list", "devices", "-j", timeout=60, deadline=160)
         self.assertTrue(self.suite.state["cleanupDone"])
 
     def test_ios_boot_budget_requires_exact_owned_booted_device(self):
@@ -665,7 +665,7 @@ class MobileRunnerTests(unittest.TestCase):
 
         with patch("run_suite.time.monotonic", return_value=100), patch.object(self.suite, "run", side_effect=run):
             self.suite.boot()
-        self.assertIn((("xcrun", "simctl", "bootstatus", device, "-b"), {"timeout": 600}), commands)
+        self.assertIn((("xcrun", "simctl", "bootstatus", device, "-b"), {"timeout": 600, "deadline": 700}), commands)
         self.assertEqual(commands[-1][0], ("xcrun", "simctl", "list", "devices", "-j"))
         report = json.loads((self.output / "ios-provisioning.json").read_text())
         self.assertEqual(report["timeoutSeconds"], 600)

@@ -17,7 +17,7 @@ import uuid
 
 from mobile_tools import ROOT, adb_path, android_sdk, tool_environment
 
-from process_tools import start_owned, stop_owned
+from process_tools import run_owned, start_owned, stop_owned
 
 PIN = json.loads(Path(__file__).with_name("tuple.json").read_text())
 FIXTURE = ROOT / "tests/DncDbg.MauiTestApp"
@@ -71,12 +71,20 @@ class Suite:
         self.state_path.write_text(json.dumps(self.state, indent=2))
 
     def run(self, *command, cwd=ROOT, timeout=180, check=True, input=None, grouped=True,
-            progress=False, progress_interval=30, environment=None):
+            progress=False, progress_interval=30, environment=None, deadline=None):
         if progress:
             require(grouped, "Build diagnostics require owned process groups.")
             return self.run_progress(command, cwd, timeout, check, input, progress_interval, environment)
         self.number += 1
         print("RUN:", " ".join(str(c) for c in command), flush=True)
+        if deadline is not None:
+            require(grouped, "Absolute deadlines require owned process groups.")
+            log = self.output / f"{self.number:03d}-{Path(str(command[0])).name}.log"
+            try:
+                return run_owned(*(str(c) for c in command), cwd=cwd, env=self.env if environment is None else environment,
+                                 timeout=timeout, check=check, input=input, log=log, deadline=deadline)
+            except subprocess.TimeoutExpired as error:
+                raise TimeoutError(f"{command[0]} exceeded its aggregate deadline; partial output: {log.relative_to(ROOT)}") from error
         process = subprocess.Popen([str(c) for c in command], cwd=cwd,
                                    env=self.env if environment is None else environment, text=True,
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -226,9 +234,10 @@ class Suite:
                 return budget
 
             try:
-                self.run("xcrun", "simctl", "boot", device, timeout=remaining())
-                self.run("xcrun", "simctl", "bootstatus", device, "-b", timeout=remaining())
-                devices = self.json("xcrun", "simctl", "list", "devices", "-j", timeout=remaining())
+                deadline = started + IOS_BOOT_TIMEOUT
+                self.run("xcrun", "simctl", "boot", device, timeout=remaining(), deadline=deadline)
+                self.run("xcrun", "simctl", "bootstatus", device, "-b", timeout=remaining(), deadline=deadline)
+                devices = self.json("xcrun", "simctl", "list", "devices", "-j", timeout=remaining(), deadline=deadline)
                 remaining()
                 matches = [d for d in devices["devices"].get(self.ios["runtime"], [])
                            if d["udid"] == device and d["name"] == name and d["state"] == "Booted"]
@@ -394,7 +403,8 @@ class Suite:
                     timeout = ios_deadline - time.monotonic()
                     if timeout <= 0:
                         raise TimeoutError(f"Owned simulator cleanup exceeded {IOS_CLEANUP_TIMEOUT}s.")
-                result = self.run(*command, timeout=timeout, **kwargs)
+                budget = {"deadline": ios_deadline} if ios_deadline is not None and command[:2] == ("xcrun", "simctl") else {}
+                result = self.run(*command, timeout=timeout, **budget, **kwargs)
                 if ios_deadline is not None and command[:2] == ("xcrun", "simctl") and time.monotonic() > ios_deadline:
                     raise TimeoutError(f"Owned simulator cleanup exceeded {IOS_CLEANUP_TIMEOUT}s.")
                 return result

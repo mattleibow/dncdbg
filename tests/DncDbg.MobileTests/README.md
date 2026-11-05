@@ -257,6 +257,12 @@ remains a red gate, never a successful skip.
   partial registration. Every final recovery pass rechecks cancellation, and
   all evidence/fallback directory writes preserve the first cancellation even
   if later recording is interrupted or the filesystem remains unavailable.
+  The suite retains an owner before launching the command; callbacks only
+  notify after that handoff. Its preallocated settlement error references the
+  owner without decoding or constructing a report. One outer non-escaping
+  perimeter covers all report construction, formatting and bookkeeping.
+  Under exhausted memory, rich evidence may be unavailable: ownership
+  settlement and the first cancellation take precedence over allocating logs.
 - **`Mobile Android emulator (pinned)`** uses hosted **`ubuntu-24.04`**,
   explicitly enables/checks KVM and runs the **entire same** unified suite with
   the separate x64 pins. It does not merely cross-build an APK, run host fakes,

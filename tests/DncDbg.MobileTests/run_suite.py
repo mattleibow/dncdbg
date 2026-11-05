@@ -17,7 +17,7 @@ import uuid
 
 from mobile_tools import ROOT, adb_path, android_sdk, tool_environment
 
-from process_tools import OwnedProcessSettlementError, original_cancellation, run_owned, start_owned, stop_owned
+from process_tools import OwnedProcessRecovery, OwnedProcessSettlementError, original_cancellation, run_owned, start_owned, stop_owned
 
 PIN = json.loads(Path(__file__).with_name("tuple.json").read_text())
 FIXTURE = ROOT / "tests/DncDbg.MauiTestApp"
@@ -71,7 +71,8 @@ class Suite:
 
     def owned_recoveries(self):
         yield from self.process_recoveries
-        if self.recovery_fallback is not None and self.recovery_fallback not in self.process_recoveries:
+        if (self.recovery_fallback is not None and self.recovery_fallback.process is not None
+                and self.recovery_fallback not in self.process_recoveries):
             yield self.recovery_fallback
 
     def save(self):
@@ -87,10 +88,12 @@ class Suite:
         if deadline is not None:
             require(grouped, "Absolute deadlines require owned process groups.")
             log = self.output / f"{self.number:03d}-{Path(str(command[0])).name}.log"
+            owner = OwnedProcessRecovery(None, log, deadline)
+            self.recovery_fallback = owner
             try:
                 return run_owned(*(str(c) for c in command), cwd=cwd, env=self.env if environment is None else environment,
                                  timeout=timeout, check=check, input=input, log=log, deadline=deadline,
-                                 owner_callback=self.process_recoveries.append)
+                                 owner_callback=self.process_recoveries.append, recovery_owner=owner)
             except OwnedProcessSettlementError as error:
                 self.recovery_fallback = error.recovery
                 try:
@@ -649,66 +652,79 @@ def main():
     args = parser.parse_args()
     args.output = args.output or ROOT / "build/mobile-tests" / f"{args.platform}-{uuid.uuid4().hex}"
     suite = Suite(args)
-    if args.cleanup:
-        if not suite.state_path.exists():
-            return 0
-        suite.state = json.loads(suite.state_path.read_text())
-        require(suite.state["platform"] == args.platform, "Cleanup platform does not match the journal.")
-        if not suite.state.get("cleanupDone"):
-            try:
-                suite.cleanup()
-            finally:
-                suite.evidence(False, "Recovery after an interrupted mobile run; rerun all gates on a fresh output.")
-        return 0
-    require(not suite.output.exists(), f"Evidence output already exists; choose a fresh path: {suite.output}")
-    suite.output.mkdir(parents=True)
-    suite.state = {"platform": args.platform, "cleanupDone": False}
-    suite.save()
-    passed, error, cancellation = False, None, None
+    passed, primary, cancellation = False, None, None
 
-    def report(message):
-        nonlocal cancellation
+    def remember(failure):
+        nonlocal primary, cancellation
+        if cancellation is None:
+            cancellation = original_cancellation(failure)
+        if primary is None:
+            primary = failure
+
+    def settle(recovery):
+        if recovery is None or recovery.process is None:
+            return
+        if cancellation is None and original_cancellation(recovery.primary_error) is not None:
+            remember(recovery.primary_error)
         try:
-            print(message, file=sys.stderr, flush=True)
+            if not recovery.complete and not recovery.finish():
+                remember(recovery.failure_exception)
         except BaseException as failure:
-            cancellation = cancellation or original_cancellation(failure)
-            suite.state.setdefault("evidenceErrors", []).append(repr(failure))
+            remember(failure)
+        finally:
+            if original_cancellation(recovery.primary_error) is not None:
+                remember(recovery.primary_error)
 
     def interrupted(_signal, _frame):
         raise KeyboardInterrupt("Mobile run interrupted")
 
     signal.signal(signal.SIGTERM, interrupted)
     try:
-        if args.platform == "contracts":
-            contracts(suite)
-        else:
-            suite.execute()
-        passed = True
-    except BaseException as failure:
-        cancellation = original_cancellation(failure)
-        error = repr(failure)
-        try:
-            (suite.output / "failure.log").write_text(traceback.format_exc())
-        except BaseException as write_error:
-            cancellation = cancellation or original_cancellation(write_error)
-            suite.state.setdefault("evidenceErrors", []).append(repr(write_error))
-            error += f"\nFailure evidence: {write_error}"
-        report(error)
-    finally:
-        try:
-            if args.platform != "contracts":
+        if args.cleanup:
+            if not suite.state_path.exists():
+                return 0
+            suite.state = json.loads(suite.state_path.read_text())
+            require(suite.state["platform"] == args.platform, "Cleanup platform does not match the journal.")
+            if suite.state.get("cleanupDone"):
+                return 0
+            try:
                 suite.cleanup()
-            else:
-                suite.state["cleanupDone"] = True
-                suite.save()
-        except BaseException as failure:
-            cancellation = cancellation or original_cancellation(failure)
-            passed, error = False, f"{error or ''}\nCleanup: {failure!r}"
-            report(error)
+            except BaseException as failure:
+                remember(failure)
+        else:
+            require(not suite.output.exists(), f"Evidence output already exists; choose a fresh path: {suite.output}")
+            suite.output.mkdir(parents=True)
+            suite.state = {"platform": args.platform, "cleanupDone": False}
+            suite.save()
+            try:
+                if args.platform == "contracts":
+                    contracts(suite)
+                else:
+                    suite.execute()
+                passed = True
+            except BaseException as failure:
+                remember(failure)
+            finally:
+                try:
+                    if args.platform != "contracts":
+                        suite.cleanup()
+                    else:
+                        suite.state["cleanupDone"] = True
+                        suite.save()
+                except BaseException as failure:
+                    remember(failure)
+
+        # All rich reporting/bookkeeping is inside the outer non-escaping perimeter.
+        error = repr(primary) if primary is not None else None
+        if primary is not None:
+            (suite.output / "failure.log").write_text("".join(traceback.format_exception(primary)))
+            print(error, file=sys.stderr, flush=True)
+        if args.cleanup and error is None:
+            error = "Recovery after an interrupted mobile run; rerun all gates on a fresh output."
         try:
-            suite.evidence(passed, error)
+            suite.evidence(passed and primary is None, error)
         except BaseException as failure:
-            cancellation = cancellation or original_cancellation(failure)
+            remember(failure)
             passed = False
             error = f"{error or ''}\nEvidence: {failure!r}"
             suite.state.setdefault("evidenceErrors", []).append(repr(failure))
@@ -718,19 +734,28 @@ def main():
                 (destination / "manifest.json").write_text(json.dumps({
                     "passed": False, "error": error, "cleanup": suite.state.get("cleanupDone", False)}, indent=2))
             except BaseException as write_error:
-                cancellation = cancellation or original_cancellation(write_error)
+                remember(write_error)
                 suite.state.setdefault("evidenceErrors", []).append(repr(write_error))
-                report(f"Evidence failure: {write_error}")
-            report(error)
-    try:
-        print(f"{'PASS' if passed else 'FAIL'}: {args.platform}; evidence: {suite.output.relative_to(ROOT)}/evidence")
+                print(f"Evidence failure: {write_error}", file=sys.stderr)
+            print(error, file=sys.stderr)
+        print(f"{'PASS' if passed and primary is None else 'FAIL'}: {args.platform}; "
+              f"evidence: {suite.output.relative_to(ROOT)}/evidence")
     except BaseException as failure:
-        cancellation = cancellation or original_cancellation(failure)
-        passed = False
-        suite.state.setdefault("evidenceErrors", []).append(repr(failure))
-    if cancellation is not None:
-        raise cancellation
-    return 0 if passed else 1
+        remember(failure)
+        try:
+            print(repr(primary), file=sys.stderr, flush=True)
+        except BaseException as reporting_failure:
+            remember(reporting_failure)
+    finally:
+        try:
+            # Retention is established before launch; settle this slot before any iterator/report allocation.
+            settle(suite.recovery_fallback)
+            for recovery in suite.process_recoveries:
+                settle(recovery)
+        finally:
+            if cancellation is not None:
+                raise cancellation
+    return 0 if primary is None and (args.cleanup or passed) else 1
 
 
 if __name__ == "__main__":

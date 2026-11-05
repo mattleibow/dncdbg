@@ -15,9 +15,7 @@ class OwnedProcessSettlementError(RuntimeError):
 
     def __init__(self, recovery):
         self.recovery = recovery
-        super().__init__(f"Owned process/group {recovery.process.pid} required failure settlement; "
-                         f"leaderReaped={recovery.leader_reaped}, groupAbsent={recovery.group_absent}, "
-                         f"drainComplete={recovery.drain_complete}; see {recovery.log}.")
+        super().__init__("Owned command required failure settlement; inspect its retained recovery owner.")
 
 
 def original_cancellation(error):
@@ -38,11 +36,13 @@ class OwnedProcessRecovery:
         self.stdout = self.stderr = b""
         self.errors = []
         self.record_errors = []
+        self.record_failure = None
         self.primary_error = None
+        self.failure_exception = OwnedProcessSettlementError(self)
 
     @property
     def complete(self):
-        return self.leader_reaped and self.group_absent and self.drain_complete
+        return self.process is None or self.leader_reaped and self.group_absent and self.drain_complete
 
     @property
     def stdout_text(self):
@@ -100,11 +100,22 @@ class OwnedProcessRecovery:
             for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
                 if stream is not None:
                     stream.close()
-        self.record()
+        self.safe_record()
         return self.complete
 
+    def safe_record(self):
+        try:
+            self.record()
+        except BaseException as error:
+            self.record_failure = error
+            self.preserve_error(error)
+            try:
+                self.record_errors.append(type(error).__name__)
+            except BaseException:
+                pass  # Exhausted bookkeeping must not discard the retained owner/primary failure.
+
     def record(self):
-        if self.log:
+        if self.log and self.process is not None:
             report = {
                 "pid": self.process.pid, "processGroup": self.process.pid,
                 "ownershipScope": "leader-and-original-process-group",
@@ -198,7 +209,8 @@ def native_listener_closed(port, forwarded):
         return False
 
 
-def run_owned(*args, env=None, check=True, input=None, timeout=180, log=None, cwd=ROOT, deadline=None, owner_callback=None):
+def run_owned(*args, env=None, check=True, input=None, timeout=180, log=None, cwd=ROOT, deadline=None,
+              owner_callback=None, recovery_owner=None):
     if deadline is not None:
         # Reserve settlement time inside the caller's budget, not after its expiry.
         available = max(0, deadline - time.monotonic())
@@ -207,9 +219,12 @@ def run_owned(*args, env=None, check=True, input=None, timeout=180, log=None, cw
         reserve = min(1, available / 4)
         if any(arg in ("--daemon", "--daemonize", "--background") for arg in args):
             raise ValueError("Daemonizing commands require a separate stable resource journal, not group ownership.")
-        process = start_owned(args, cwd=cwd, env=env, text=False,
-                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        owner = OwnedProcessRecovery(process, log, deadline)
+        owner = recovery_owner if recovery_owner is not None else OwnedProcessRecovery(None, log, deadline)
+        if owner.process is not None:
+            raise ValueError("An owned command cannot reuse an existing process owner.")
+        owner.process = start_owned(args, cwd=cwd, env=env, text=False,
+                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        process = owner.process
         callback_complete = owner_callback is None
         try:
             try:
@@ -226,22 +241,22 @@ def run_owned(*args, env=None, check=True, input=None, timeout=180, log=None, cw
                 if owner.primary_error is None:
                     owner.primary_error = subprocess.TimeoutExpired(args, timeout)
                 owner.finish()
-                raise OwnedProcessSettlementError(owner) from owner.primary_error
+                raise owner.failure_exception from owner.primary_error
             if not callback_complete:
-                raise OwnedProcessSettlementError(owner) from owner.primary_error
+                raise owner.failure_exception from owner.primary_error
         finally:
             if owner.complete:
                 for stream in (process.stdin, process.stdout, process.stderr):
                     if stream is not None:
                         stream.close()
-            owner.record()
+            owner.safe_record()
         if time.monotonic() > deadline:
             if owner.primary_error is None:
                 owner.primary_error = subprocess.TimeoutExpired(args, timeout)
-            raise OwnedProcessSettlementError(owner) from owner.primary_error
+            raise owner.failure_exception from owner.primary_error
         if owner.primary_error is not None:
             if owner.record_errors:
-                raise OwnedProcessSettlementError(owner) from owner.primary_error
+                raise owner.failure_exception from owner.primary_error
             if isinstance(owner.primary_error, subprocess.TimeoutExpired):
                 owner.primary_error.output, owner.primary_error.stderr = owner.stdout_text, owner.stderr_text
             raise owner.primary_error

@@ -1194,6 +1194,76 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
                 finally:
                     signal.signal(signal.SIGTERM, previous)
 
+    def test_suite_retains_owner_before_report_or_decode_even_if_notification_fails(self):
+        class Notifications(list):
+            def append(self, value):
+                raise ValueError("notification failed before retaining")
+
+        for phase in ("report", "decode"):
+            with self.subTest(phase=phase):
+                self.suite.process_recoveries = Notifications()
+                observed = []
+
+                def unavailable(owner):
+                    observed.append(self.suite.recovery_fallback is owner)
+                    raise MemoryError("report allocation failed")
+
+                original_record = process_tools.OwnedProcessRecovery.record
+                if phase == "report":
+                    replacement = unavailable
+                else:
+                    def replacement(owner):
+                        observed.append(self.suite.recovery_fallback is owner)
+                        return original_record(owner)
+                try:
+                    with patch.object(process_tools.OwnedProcessRecovery, "record", replacement):
+                        if phase == "decode":
+                            with patch.object(process_tools.OwnedProcessRecovery, "stdout_text",
+                                              new_callable=unittest.mock.PropertyMock, side_effect=MemoryError("decode failed")):
+                                self.suite.run(sys.executable, "-c", "print('retained owner')",
+                                               deadline=time.monotonic() + 2)
+                        else:
+                            self.suite.run(sys.executable, "-c", "print('retained owner')",
+                                           deadline=time.monotonic() + 2)
+                except BaseException:
+                    pass
+                else:
+                    self.fail("Failed notification/evidence cannot report success.")
+                self.assertTrue(observed and all(observed), "Mandatory retention must precede all report/decode operations.")
+                self.assertIsNotNone(self.suite.recovery_fallback)
+                self.assertTrue(self.suite.recovery_fallback.complete)
+
+    def test_main_outer_perimeter_preserves_first_cancel_when_bookkeeping_itself_fails(self):
+        for phase in ("repr", "append"):
+            for later in (KeyboardInterrupt("bookkeeping interrupt"), SystemExit(31), MemoryError("bookkeeping allocation")):
+                with self.subTest(phase=phase, later=type(later).__name__):
+                    destination = self.output / uuid.uuid4().hex
+                    original = KeyboardInterrupt("first protected cancellation")
+
+                    class Unformattable(Exception):
+                        def __repr__(self):
+                            raise later
+
+                    class Unrecordable(list):
+                        def append(self, value):
+                            raise later
+
+                    def evidence(suite, *args):
+                        if phase == "append":
+                            suite.state["evidenceErrors"] = Unrecordable()
+                            raise OSError("evidence failed")
+                        raise Unformattable()
+
+                    previous = signal.getsignal(signal.SIGTERM)
+                    try:
+                        with patch.object(sys, "argv", ["run_suite.py", "--platform", "ios", "--output", str(destination)]), \
+                                patch.object(Suite, "execute", side_effect=original), patch.object(Suite, "evidence", evidence):
+                            with self.assertRaises(KeyboardInterrupt) as caught:
+                                run_suite.main()
+                            self.assertIs(caught.exception, original)
+                    finally:
+                        signal.signal(signal.SIGTERM, previous)
+
     @unittest.skipUnless(os.name == "posix", "POSIX command ownership")
     def test_real_invalid_output_bytes_are_preserved_independently_of_reaping(self):
         result = self.suite.run(sys.executable, "-c",

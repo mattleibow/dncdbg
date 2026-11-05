@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Host-only process ownership regression; no mobile SDK or device is needed."""
 import json
+import errno
 import os
 from pathlib import Path
 import shutil
@@ -65,7 +66,7 @@ class ProcessOwnershipTests(unittest.TestCase):
     def test_disappeared_group_eperm_requires_independent_absence_check(self):
         process = Mock(pid=123456)
         with patch.object(validate.os, "killpg", side_effect=PermissionError(1, "Operation not permitted")), \
-                patch.object(validate.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, " 12\n 34\n", "")) as snapshot:
+                patch.object(validate.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")) as snapshot:
             validate.stop_owned(process)
         snapshot.assert_called_with(["ps", "-g", str(process.pid), "-o", "pgid="],
                                     check=False, capture_output=True, text=True, timeout=5)
@@ -178,6 +179,105 @@ class ListenerOwnershipTests(unittest.TestCase):
                 done.set()
                 proxy.join(timeout=3)
                 self.assertFalse(proxy.is_alive())
+
+
+@unittest.skipUnless(os.name == "posix", "POSIX exact process identity")
+class GroupIdentityTests(unittest.TestCase):
+    def ownership(self):
+        process = Mock(pid=123456, returncode=None)
+        process.poll.return_value = None
+        recovery = validate.OwnedProcessRecovery(process, None, time.monotonic() + 5)
+        owner = validate.ProcessGroupOwnership(recovery)
+        identity = {"pid": process.pid, "ppid": 123, "pgid": process.pid, "sid": process.pid,
+                    "uid": os.geteuid(), "startIdentity": "original-birth", "state": "running"}
+        owner.original = identity
+        owner.members[process.pid] = identity
+        return owner, identity
+
+    def test_public_kernel_identity_matches_current_exact_process(self):
+        identity = validate.process_identity(os.getpid())
+        self.assertEqual(identity["pid"], os.getpid())
+        self.assertEqual(identity["pgid"], os.getpgid(0))
+        self.assertEqual(identity["sid"], os.getsid(0))
+        self.assertEqual(identity["uid"], os.geteuid())
+        self.assertTrue(identity["startIdentity"])
+        self.assertTrue(validate.ProcessGroupOwnership.same(identity, validate.process_identity(os.getpid())))
+
+    def test_changed_birth_session_or_uid_never_authorizes_a_signal(self):
+        for field in ("startIdentity", "sid", "uid"):
+            with self.subTest(field=field):
+                owner, identity = self.ownership()
+                changed = dict(identity, **{field: "different" if field == "startIdentity" else identity[field] + 1})
+                with patch.object(validate, "process_identity", return_value=changed), \
+                        patch.object(validate.subprocess, "run",
+                                     return_value=subprocess.CompletedProcess([], 0, "123456\n", "")), \
+                        patch.object(validate.os, "killpg") as send:
+                    with self.assertRaisesRegex(RuntimeError, "identity|session|UID"):
+                        owner.send(signal.SIGTERM, time.monotonic() + 1)
+                send.assert_not_called()
+
+    def test_scoped_group_probe_failure_or_mismatched_rows_cannot_authorize_absence(self):
+        for result in (subprocess.CompletedProcess([], 2, "", "probe failed"),
+                       subprocess.CompletedProcess([], 1, "123456\n", ""),
+                       subprocess.CompletedProcess([], 0, "not-a-pid\n", ""),
+                       subprocess.CompletedProcess([], 0, "999999\n", "")):
+            with self.subTest(result=result):
+                owner, identity = self.ownership()
+                wrong = dict(identity, pid=999999, pgid=999999)
+                with patch.object(validate, "process_identity",
+                                  side_effect=lambda pid: identity if pid == 123456 else wrong), \
+                        patch.object(validate.subprocess, "run", return_value=result), \
+                        patch.object(validate.os, "killpg") as send:
+                    with self.assertRaises(RuntimeError):
+                        owner.exists(time.monotonic() + 1)
+                send.assert_not_called()
+
+    def test_signal_zero_eperm_accepts_only_the_following_authoritative_empty_group(self):
+        owner, identity = self.ownership()
+        with patch.object(validate, "process_identity", return_value=identity), \
+                patch.object(validate.subprocess, "run", side_effect=[
+                    subprocess.CompletedProcess([], 0, "123456\n", ""),
+                    subprocess.CompletedProcess([], 1, "", "")]), \
+                patch.object(validate.os, "killpg", side_effect=PermissionError(errno.EPERM, "denied")) as send:
+            self.assertFalse(owner.exists(time.monotonic() + 1))
+        send.assert_called_once_with(123456, 0)
+        self.assertEqual(owner.signals[0]["errno"], errno.EPERM)
+        self.assertEqual(owner.signals[0]["after"], [])
+
+    def test_live_eperm_is_not_absence_and_nonzero_signal_is_not_retried(self):
+        owner, identity = self.ownership()
+        with patch.object(validate, "process_identity", return_value=identity), \
+                patch.object(validate.subprocess, "run",
+                             return_value=subprocess.CompletedProcess([], 0, "123456\n", "")), \
+                patch.object(validate.os, "killpg", side_effect=PermissionError(errno.EPERM, "denied")) as send:
+            for _ in range(2):
+                with self.assertRaises(PermissionError):
+                    owner.send(signal.SIGTERM, time.monotonic() + 1)
+        self.assertEqual(sum(call.args[1] == signal.SIGTERM for call in send.call_args_list), 1)
+        self.assertTrue(all(attempt["after"] for attempt in owner.signals))
+
+    def test_reaped_leader_does_not_authorize_an_unjournaled_group_member(self):
+        owner, identity = self.ownership()
+        child = dict(identity, pid=123457, ppid=1, startIdentity="child-birth")
+        with patch.object(validate, "process_identity", side_effect=lambda pid: child if pid == child["pid"] else None), \
+                patch.object(validate.subprocess, "run",
+                             return_value=subprocess.CompletedProcess([], 0, "123457\n", "")), \
+                patch.object(validate.os, "killpg") as send:
+            with self.assertRaisesRegex(RuntimeError, "journaled"):
+                owner.send(signal.SIGKILL, time.monotonic() + 1)
+        send.assert_not_called()
+
+    def test_exact_journaled_child_remains_authorized_after_leader_reaping(self):
+        owner, identity = self.ownership()
+        child = dict(identity, pid=123457, ppid=1, startIdentity="child-birth")
+        owner.members[child["pid"]] = child
+        with patch.object(validate, "process_identity", side_effect=lambda pid: child if pid == child["pid"] else None), \
+                patch.object(validate.subprocess, "run", side_effect=[
+                    subprocess.CompletedProcess([], 0, "123457\n", ""),
+                    subprocess.CompletedProcess([], 1, "", "")]), \
+                patch.object(validate.os, "killpg") as send:
+            self.assertFalse(owner.send(signal.SIGKILL, time.monotonic() + 1))
+        send.assert_called_once_with(123456, signal.SIGKILL)
 
 
 if __name__ == "__main__":

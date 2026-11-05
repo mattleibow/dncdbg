@@ -706,6 +706,27 @@ class MobileRunnerTests(unittest.TestCase):
                 self.suite.boot()
         self.assertFalse(json.loads((self.output / "ios-provisioning.json").read_text())["ready"])
 
+    def test_ios_creation_does_not_reset_the_aggregate_provisioning_clock(self):
+        self.suite.args.platform = "ios"
+        clock = [100]
+        commands = []
+
+        def run(*command, **kwargs):
+            commands.append(command)
+            if command[2] == "create":
+                clock[0] += 601
+                return subprocess.CompletedProcess(command, 0, "owned-device", "")
+            raise AssertionError("Expired provisioning must not start another ordinary command.")
+
+        with patch("run_suite.time.monotonic", side_effect=lambda: clock[0]), patch.object(self.suite, "run", side_effect=run):
+            with self.assertRaisesRegex(TimeoutError, "provisioning.*600"):
+                self.suite.boot()
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(self.suite.state["device"], "owned-device")
+        report = json.loads((self.output / "ios-provisioning.json").read_text())
+        self.assertFalse(report["ready"])
+        self.assertEqual(report["seconds"], 601)
+
     def test_ios_cleanup_uses_one_owned_sixty_second_budget(self):
         self.suite.args.platform = "ios"
         clock = [100]
@@ -1735,7 +1756,8 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
             self.assertFalse(status["buildGroupSettled"])
             self.assertIn("PermissionError", status["recoveryErrors"])
             self.assertIn("build ready", next(self.output.glob("*.log")).read_text())
-            with patch.object(self.suite, "run", side_effect=AssertionError("No ordinary cleanup after an unverified build")) as ordinary:
+            with patch.object(self.suite, "run", side_effect=AssertionError("No ordinary cleanup after an unverified build")) as ordinary, \
+                    patch("process_tools.stop_owned", side_effect=PermissionError(errno.EPERM, "controlled signal denial")):
                 with self.assertRaises(RuntimeError):
                     self.suite.cleanup()
             ordinary.assert_not_called()
@@ -1762,10 +1784,93 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
                                timeout=0.3, progress=True, progress_interval=0.05)
         owner = self.suite.recovery_fallback
         self.assertIsNotNone(owner)
-        self.assertTrue(owner.complete)
+        self.assertTrue(owner.complete, repr((owner.errors, owner.group_ownership.observations)))
         self.assertIsInstance(owner.primary_error, TimeoutError)
         self.assertTrue(owner.record_errors)
         self.assertIn("build ready", next(self.output.glob("*.log")).read_text())
+
+    @unittest.skipUnless(os.name == "posix", "POSIX exact build ownership")
+    def test_real_ready_build_kill_eperm_remains_owned_with_exact_identity_and_no_signal_retry(self):
+        record = self.ios_deadline_helper("cleanup")
+        send = os.killpg
+        denied = []
+
+        def guarded(group, value):
+            if value == signal.SIGKILL:
+                denied.append((group, value))
+                raise PermissionError(errno.EPERM, "controlled live SIGKILL denial")
+            return send(group, value)
+
+        owner = None
+        try:
+            with patch("process_tools.os.killpg", side_effect=guarded):
+                with self.assertRaisesRegex(TimeoutError, "exceeded"):
+                    self.suite.run("xcrun", "simctl", "list", "devices", "-j",
+                                   timeout=0.75, progress=True, progress_interval=0.1)
+                owner = self.suite.recovery_fallback
+                self.assertFalse(owner.complete)
+                identity = owner.group_ownership.original
+                self.assertEqual(identity["pid"], json.loads(record.read_text())["parent"])
+                self.assertEqual(identity["pgid"], identity["pid"])
+                self.assertEqual(identity["sid"], identity["pid"])
+                self.assertEqual(identity["uid"], os.geteuid())
+                self.assertTrue(identity["startIdentity"])
+                attempts = owner.group_ownership.signals
+                self.assertEqual(sum(a["signal"] == signal.SIGTERM for a in attempts), 1)
+                self.assertEqual(sum(a["signal"] == signal.SIGKILL for a in attempts), 1)
+                self.assertEqual(next(a for a in attempts if a["signal"] == signal.SIGKILL)["errno"], errno.EPERM)
+                self.assertTrue(any(a["before"] and a["after"] for a in attempts if a["signal"] == signal.SIGKILL))
+                owner.finish()
+                self.assertEqual(len(denied), 1, "Final settlement must not retry a denied nonzero signal.")
+                self.assertIsInstance(owner.primary_error, TimeoutError)
+                with patch.object(self.suite, "run", side_effect=AssertionError("Unverified build forbids ordinary cleanup")):
+                    with self.assertRaises(RuntimeError):
+                        self.suite.cleanup()
+                self.assertFalse(self.suite.state["cleanupDone"])
+                self.assertFalse(self.suite.state["buildGroupSettled"])
+                self.assertFalse(self.suite.state["simulatorJournalClean"])
+        finally:
+            if owner is not None and owner.process.poll() is None:
+                current = process_tools.process_identity(owner.process.pid)
+                self.assertTrue(owner.group_ownership.same(current, owner.group_ownership.original))
+                send(owner.process.pid, signal.SIGKILL)
+                owner.process.wait(timeout=5)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX build cancellation")
+    def test_progress_cancel_keeps_first_identity_through_status_baseexceptions(self):
+        start, write = process_tools.start_owned, Path.write_text
+        for secondary in (SystemExit("status signal"), MemoryError("status allocation")):
+            with self.subTest(secondary=type(secondary).__name__):
+                original = KeyboardInterrupt("first build cancellation")
+
+                def launch(*args, **kwargs):
+                    process = start(*args, **kwargs)
+                    communicate = process.communicate
+                    calls = [0]
+
+                    def interrupt(*args, **kwargs):
+                        calls[0] += 1
+                        if calls[0] == 1:
+                            raise original
+                        return communicate(*args, **kwargs)
+                    process.communicate = interrupt
+                    return process
+
+                def fail_status(path, *args, **kwargs):
+                    if path.name.endswith(".status.json"):
+                        raise secondary
+                    return write(path, *args, **kwargs)
+
+                with patch("run_suite.start_owned", side_effect=launch), patch.object(Path, "write_text", fail_status):
+                    with self.assertRaises(KeyboardInterrupt) as raised:
+                        self.suite.run(sys.executable, "-c", "import time;time.sleep(30)",
+                                       timeout=2, progress=True, progress_interval=0.1)
+                self.assertIs(raised.exception, original)
+                owner = self.suite.recovery_fallback
+                self.assertTrue(owner.complete)
+                self.assertIs(owner.primary_error, original)
+                self.assertTrue(owner.record_errors)
+                self.assertIsNotNone(owner.process.returncode)
 
     def run_ios_phase_contract(self, failure=None):
         destination = self.output / "phase-contract"

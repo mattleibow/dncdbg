@@ -61,6 +61,7 @@ class ProcessGroupOwnership:
     def __init__(self, recovery):
         self.recovery = recovery
         self.original = None
+        self.capture_state = "not-applicable"
         self.members = {}
         self.observations = []
         self.signals = []
@@ -72,12 +73,18 @@ class ProcessGroupOwnership:
         return all(left[key] == right[key] for key in ("pid", "pgid", "sid", "uid", "startIdentity"))
 
     def capture(self):
+        if self.capture_state != "not-applicable":
+            return
+        self.capture_state = "unverified"
+        if self.recovery.process is None or self.recovery.process.returncode is not None:
+            return
         identity = process_identity(self.recovery.process.pid)
-        if identity is not None:
+        if identity is not None and identity["state"] not in ("Z", 5):
             if identity["pgid"] != identity["pid"] or identity["sid"] != identity["pid"] or identity["uid"] != self.euid:
                 raise RuntimeError("Launched process does not own the expected exact group/session/UID.")
             self.original = identity
             self.members[identity["pid"]] = identity
+            self.capture_state = "verified"
 
     def observe(self, deadline, retry=True):
         process = self.recovery.process
@@ -99,6 +106,8 @@ class ProcessGroupOwnership:
                 probe.returncode == 1 and fields or any(not value.isdecimal() or int(value) <= 0 for value in fields) or
                 len(fields) > 1024 or len(fields) != len(set(fields))):
             raise RuntimeError("Cannot verify the exact owned process group observation.")
+        if fields and self.capture_state != "verified":
+            raise RuntimeError("Original process birth capture is unverified; refusing every group signal.")
         for value in fields:
             identity = process_identity(int(value))
             if identity is None:
@@ -155,6 +164,7 @@ class ProcessGroupOwnership:
     def report(self):
         process = self.recovery.process
         return {"platform": sys.platform, "ownerUid": self.uid, "ownerEuid": self.euid,
+                "identityCapture": self.capture_state,
                 "ownerCreatedMonotonic": self.created, "originalIdentity": self.original,
                 "memberIdentities": list(self.members.values()), "groupObservations": self.observations,
                 "signalAttempts": self.signals, "popenReturnCode": process.returncode if process else None,
@@ -190,6 +200,7 @@ class OwnedProcessRecovery:
         self.record_errors = []
         self.record_failure = None
         self.primary_error = None
+        self.operation_error = None
         self.failure_exception = OwnedProcessSettlementError(self)
         self.exec_error_read = self.exec_error_write = None
         self.group_ownership = None
@@ -198,7 +209,8 @@ class OwnedProcessRecovery:
     @property
     def complete(self):
         return ((self.process is None or self.leader_reaped and self.group_absent and self.drain_complete)
-                and self.exec_error_read is None and self.exec_error_write is None)
+                and self.exec_error_read is None and self.exec_error_write is None and
+                (self.process is None or self.group_ownership is None or self.group_ownership.capture_state == "verified"))
 
     @property
     def stdout_text(self):
@@ -215,6 +227,9 @@ class OwnedProcessRecovery:
         self.stdout, self.stderr = merge(self.stdout, stdout), merge(self.stderr, stderr)
 
     def preserve_error(self, error):
+        if self.operation_error is not None:
+            self.primary_error = self.operation_error
+            return
         current = self.primary_error
         if (current is None or
                 isinstance(current, subprocess.TimeoutExpired) and not isinstance(error, subprocess.TimeoutExpired) or
@@ -272,8 +287,6 @@ class OwnedProcessRecovery:
 
     def settle(self, deadline):
         try:
-            if self.group_ownership is not None and self.group_ownership.original is None:
-                self.group_ownership.capture()
             if not self.group_absent:
                 available = deadline - time.monotonic()
                 if available <= 0:
@@ -338,6 +351,7 @@ class OwnedProcessRecovery:
                 "drainComplete": self.drain_complete, "resourceJournalClean": False,
                 "returnCode": self.process.returncode, "recoveryComplete": self.complete,
                 "primaryError": type(self.primary_error).__name__ if self.primary_error else None,
+                "operationError": type(self.operation_error).__name__ if self.operation_error else None,
                 "deadlineExceeded": time.monotonic() > self.deadline,
                 "failureRecoveryBudgetSeconds": 5, "recoveryErrors": self.errors,
                 "recordErrors": self.record_errors,
@@ -363,6 +377,8 @@ def start_owned(*args, owner=None, **kwargs):
         raise RuntimeError("The remote integration runner requires POSIX process-group ownership")
     if owner is None:
         return subprocess.Popen(*args, start_new_session=True, **kwargs)
+    if owner.group_ownership is None:
+        owner.group_ownership = ProcessGroupOwnership(owner)
     if not kwargs.get("close_fds", True):
         raise ValueError("Owned/deadline launches reject close_fds=False; use explicit pass_fds.")
     previous = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
@@ -382,6 +398,8 @@ def start_owned(*args, owner=None, **kwargs):
                    "--signal-dispositions", ",".join(dispositions), "--", *(os.fsdecode(value) for value in args[0])]
         process = subprocess.Popen(command, start_new_session=True, pass_fds=(*passed, owner.exec_error_write), **kwargs)
         owner.process = process
+        if owner.group_ownership is not None:
+            owner.group_ownership.capture()
         return process
     finally:
         try:

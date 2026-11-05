@@ -51,6 +51,11 @@ def properties(path):
     return {key.strip(): value.strip() for line in path.read_text().splitlines() if "=" in line
             for key, value in [line.split("=", 1)]}
 
+def atomic_json(path, value):
+    pending = path.with_name(path.name + ".pending")
+    pending.write_text(json.dumps(value, indent=2))
+    pending.replace(path)
+
 
 class Suite:
     def __init__(self, args):
@@ -67,6 +72,9 @@ class Suite:
         self.broker_process = None
         self.process_recoveries = []
         self.recovery_fallback = None
+        self.run_nonce = uuid.uuid4().hex
+        self.source = None
+        self.evidence_core = None
         self.android = PIN["androidX64" if getattr(args, "android_abi", "arm64-v8a") == "x86_64" else "android"]
         self.ios = PIN["iosX64" if getattr(args, "ios_architecture", "arm64") == "x64" else "ios"]
 
@@ -77,7 +85,51 @@ class Suite:
             yield self.recovery_fallback
 
     def save(self):
-        self.state_path.write_text(json.dumps(self.state, indent=2))
+        atomic_json(self.state_path, self.state)
+
+    def source_record(self):
+        if self.source is None:
+            self.source = {
+                "head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+                "dirty": bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True).strip())}
+        return self.source
+
+    @staticmethod
+    def simulator_uuid(value):
+        require(isinstance(value, str) and str(uuid.UUID(value)).casefold() == value.casefold(),
+                "Simulator create did not return one canonical UDID.")
+        return value
+
+    def simulator_candidate(self, listing, intent):
+        require(intent["name"] == self.state["name"] and intent["name"].startswith("dncdbg") and
+                uuid.UUID(intent["name"][6:]).hex == intent["name"][6:] and
+                intent["runtime"] == self.ios["runtime"] and intent["deviceType"] == self.ios["deviceType"] and
+                len(intent["sourceHead"]) == 40 and len(intent["runNonce"]) == 32,
+                "Simulator creation intent identity is invalid.")
+        entries = [(runtime, entry) for runtime, group in listing["devices"].items() for entry in group]
+        known = self.state.get("simulatorIdentity")
+        require(known is None or all(entry["name"] == intent["name"] for _, entry in entries
+                                    if entry["udid"].casefold() == known["udid"].casefold()),
+                "Registered simulator identity changed its unique name.")
+        candidates = [(runtime, entry) for runtime, entry in entries if entry["name"] == intent["name"]]
+        require(len(candidates) <= 1, "Simulator creation intent matches multiple devices; refusing mutations.")
+        if not candidates:
+            return None
+        runtime, entry = candidates[0]
+        require(runtime == intent["runtime"] and entry.get("deviceTypeIdentifier") == intent["deviceType"],
+                "Simulator creation intent runtime or device type mismatch.")
+        self.simulator_uuid(entry["udid"])
+        require(known is None or known["udid"].casefold() == entry["udid"].casefold(),
+                "Simulator creation identity changed after registration.")
+        return {"udid": entry["udid"], "name": entry["name"], "runtime": runtime,
+                "deviceType": entry["deviceTypeIdentifier"]}
+
+    def register_simulator(self, identity, resolution):
+        self.state["device"] = identity["udid"]
+        self.state["simulatorIdentity"] = identity
+        self.save()
+        self.state["simulatorCreate"].update(pending=False, resolution=resolution)
+        self.save()
 
     def recovery_state(self):
         return [{
@@ -85,12 +137,56 @@ class Suite:
             "leaderReaped": r.leader_reaped, "groupAbsent": r.group_absent, "drainComplete": r.drain_complete,
             "isBuild": getattr(r, "is_build", False),
             "originalIdentity": r.group_ownership.original if r.group_ownership is not None else None,
+            "identityCapture": r.group_ownership.capture_state if r.group_ownership is not None else "not-applicable",
+            "fingerprint": getattr(r, "command_intent", {}).get("fingerprint"),
         } for r in self.owned_recoveries()]
+
+    def prepare_command(self, owner, command):
+        executable = Path(str(command[0])).name
+        simctl = len(command) > 2 and executable == "xcrun" and command[1] == "simctl"
+        operation = command[2] if simctl and command[2] in (
+            "create", "boot", "bootstatus", "list", "terminate", "uninstall", "shutdown", "delete") else "command"
+        owner.command_intent = {"nonce": uuid.uuid4().hex, "provider": "simctl" if simctl else executable,
+                                "operation": operation,
+                                "fingerprint": hashlib.sha256(json.dumps([str(c) for c in command]).encode()).hexdigest(),
+                                "state": "launch-pending", "pid": None, "identityCapture": "not-applicable", "identity": None}
+        owner.command_intent["sourceHead"] = self.source_record()["head"]
+        owner.command_intent["runNonce"] = self.run_nonce
+        self.state["commandIntent"] = owner.command_intent
+        self.state["commandRecoveryRequired"] = True
+        self.state["cleanupDone"] = False
+        if getattr(owner, "is_build", False):
+            self.state["buildGroupSettled"] = False
+        self.save()
+
+    def command_published(self, owner):
+        ownership = owner.group_ownership
+        owner.command_intent.update(pid=owner.process.pid, identityCapture=ownership.capture_state,
+                                    identity=ownership.original,
+                                    state="owned" if ownership.capture_state == "verified" else "unverified")
+        self.state["processRecovery"] = self.recovery_state()
+        self.save()
+        self.process_recoveries.append(owner)
+        require(ownership.capture_state == "verified", "Original command birth identity is unverified.")
+
+    def command_settled(self, owner):
+        intent = getattr(owner, "command_intent", None)
+        if intent is not None:
+            intent["state"] = "settled" if owner.complete else "unverified"
+            self.state["commandIntent"] = intent
+        self.state["processRecovery"] = self.recovery_state()
+        self.state["commandRecoveryRequired"] = any(not r.complete for r in self.owned_recoveries())
+        self.save()
+
+    def unverified_command_journal(self):
+        return self.state.get("commandRecoveryRequired", False) or any(
+            r.get("identityCapture") == "unverified" or not all(r.get(key, False) for key in
+                ("leaderReaped", "groupAbsent", "drainComplete")) for r in self.state.get("processRecovery", []))
 
     def run(self, *command, cwd=ROOT, timeout=180, check=True, input=None, grouped=True,
             progress=False, progress_interval=30, environment=None, deadline=None):
         require(not any(not r.complete for r in self.owned_recoveries()) and
-                not (self.state.get("commandRecoveryRequired", False) and not any(self.owned_recoveries())),
+                not (self.unverified_command_journal() and not any(self.owned_recoveries())),
                 "Unverified owned command recovery forbids another ordinary command.")
         if progress:
             require(grouped, "Build diagnostics require owned process groups.")
@@ -103,11 +199,13 @@ class Suite:
             require(grouped, "Absolute deadlines require owned process groups.")
             log = self.output / f"{self.number:03d}-{Path(str(command[0])).name}.log"
             owner = OwnedProcessRecovery(None, log, deadline)
+            owner.group_ownership = ProcessGroupOwnership(owner)
             self.recovery_fallback = owner
             try:
+                self.prepare_command(owner, command)
                 return run_owned(*(str(c) for c in command), cwd=cwd, env=self.env if environment is None else environment,
                                  timeout=timeout, check=check, input=input, log=log, deadline=deadline,
-                                 owner_callback=self.process_recoveries.append, recovery_owner=owner)
+                                 owner_callback=self.command_published, recovery_owner=owner)
             except OwnedProcessSettlementError as error:
                 first_error, first_cause = error, error.__cause__
                 try:
@@ -124,6 +222,18 @@ class Suite:
                     raise first_error from first_cause
             except subprocess.TimeoutExpired as error:
                 raise TimeoutError(f"{command[0]} exceeded its aggregate deadline; partial output: {log.relative_to(ROOT)}") from error
+            finally:
+                pending = sys.exc_info()[1]
+                try:
+                    self.command_settled(owner)
+                except BaseException as error:
+                    owner.record_failure = error
+                    try:
+                        owner.record_errors.append(type(error).__name__)
+                    except BaseException:
+                        pass
+                    if pending is None:
+                        raise
         process = subprocess.Popen([str(c) for c in command], cwd=cwd,
                                    env=self.env if environment is None else environment, text=True,
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -164,21 +274,14 @@ class Suite:
         print("RUN:", " ".join(str(c) for c in command), flush=True)
         process = None
         try:
-            self.state["commandRecoveryRequired"] = True
-            self.state["cleanupDone"] = False
-            if owner.is_build:
-                self.state["buildGroupSettled"] = False
-            self.save()
+            self.prepare_command(owner, command)
             with log.open("wb") as stream:
                 try:
                     command_environment = self.env if environment is None else environment
                     process = start_owned([str(c) for c in command], owner=owner, cwd=cwd,
                                           env=build_environment(command_environment) if interval is not None else command_environment,
                                           text=False, stdin=subprocess.PIPE, stdout=stream, stderr=subprocess.STDOUT)
-                    owner.group_ownership.capture()
-                    self.state["processRecovery"] = self.recovery_state()
-                    self.save()
-                    self.process_recoveries.append(owner)
+                    self.command_published(owner)
                     owner.await_exec(command, owner.deadline)
                     first = True
                     while True:
@@ -211,8 +314,10 @@ class Suite:
                     timed_out = True
                     primary = TimeoutError(f"{command[0]} exceeded {timeout}s; partial output: {log.relative_to(ROOT)}")
                     primary.__cause__ = error
+                    owner.operation_error = primary
                     owner.preserve_error(primary)
                 except BaseException as error:
+                    owner.operation_error = error
                     owner.preserve_error(error)
                 finally:
                     process = owner.process
@@ -229,6 +334,8 @@ class Suite:
                             if not owner.complete:
                                 owner.finish()
                         except BaseException as error:
+                            if owner.primary_error is None:
+                                owner.operation_error = error
                             owner.preserve_error(error)
                         finally:
                             try:
@@ -248,8 +355,6 @@ class Suite:
                         self.state["buildGroupSettled"] = all(r.complete for r in builds)
                     else:
                         self.state.setdefault("buildGroupSettled", True)
-                    self.state["processRecovery"] = self.recovery_state()
-                    self.state["commandRecoveryRequired"] = any(not r.complete for r in self.owned_recoveries())
                     log.with_suffix(".status.json").write_text(json.dumps({
                         "command": Path(str(command[0])).name, "argumentCount": len(command) - 1,
                         "seconds": time.monotonic() - started,
@@ -260,7 +365,7 @@ class Suite:
                         "drainComplete": owner.drain_complete,
                         **owner.group_ownership.report(),
                     }, indent=2))
-                    self.save()
+                    self.command_settled(owner)
                 except BaseException as error:
                     owner.record_failure = error
                     owner.preserve_error(error)
@@ -270,11 +375,10 @@ class Suite:
                         pass
             else:
                 try:
-                    self.state["commandRecoveryRequired"] = any(not r.complete for r in self.owned_recoveries())
                     if owner.is_build:
                         self.state["buildGroupSettled"] = all(
                             r.complete for r in self.owned_recoveries() if getattr(r, "is_build", False))
-                    self.save()
+                    self.command_settled(owner)
                 except BaseException as error:
                     owner.preserve_error(error)
         if owner.primary_error is not None:
@@ -345,6 +449,8 @@ class Suite:
         self.save()
 
     def boot(self):
+        require(self.args.platform != "ios" or not self.state.get("simulatorCreate", {}).get("pending", False),
+                "A pending simulator creation must be resolved before another create.")
         name = "dncdbg" + uuid.uuid4().hex
         self.state["name"] = name
         with socket.socket() as reserve:
@@ -364,10 +470,22 @@ class Suite:
 
             try:
                 deadline = started + IOS_BOOT_TIMEOUT
+                self.state["simulatorCreate"] = {
+                    "pending": True, "name": name, "runtime": self.ios["runtime"], "deviceType": self.ios["deviceType"],
+                    "sourceHead": self.source_record()["head"], "runNonce": self.run_nonce}
+                self.state["simulatorJournalClean"] = self.state["resourceJournalClean"] = False
+                self.state.pop("device", None)
+                self.save()
                 device = self.run("xcrun", "simctl", "create", name, self.ios["deviceType"], self.ios["runtime"],
                                   timeout=min(180, remaining()), deadline=deadline).stdout.strip()
-                self.state["device"] = device
-                self.save()
+                remaining()
+                self.simulator_uuid(device)
+                listing = self.json("xcrun", "simctl", "list", "devices", "-j", timeout=remaining(), deadline=deadline)
+                identity = self.simulator_candidate(listing, self.state["simulatorCreate"])
+                require(identity is not None and identity["udid"].casefold() == device.casefold(),
+                        "Created simulator reply does not match the exact owned inventory.")
+                self.register_simulator(identity, "create-reply-and-inventory")
+                device = identity["udid"]
                 self.run("xcrun", "simctl", "boot", device, timeout=remaining(), deadline=deadline)
                 self.run("xcrun", "simctl", "bootstatus", device, "-b", timeout=remaining(), deadline=deadline)
                 devices = self.json("xcrun", "simctl", "list", "devices", "-j", timeout=remaining(), deadline=deadline)
@@ -598,7 +716,7 @@ class Suite:
         errors = []
         cancellation = None
         ios_deadline = time.monotonic() + IOS_CLEANUP_TIMEOUT if self.args.platform == "ios" else None
-        unverified_command = self.state.get("commandRecoveryRequired", False) and not any(self.owned_recoveries())
+        unverified_command = self.unverified_command_journal() and not any(self.owned_recoveries())
         if unverified_command:
             errors.append("Unverified owned command launch/recovery journal from an unavailable original owner.")
         if not self.process_recoveries and self.recovery_fallback is None and any(not all(r.get(key, False) for key in
@@ -647,6 +765,22 @@ class Suite:
         if self.args.platform == "ios":
             if self.args.xcode_dir:
                 self.env["DEVELOPER_DIR"] = str(self.args.xcode_dir.resolve())
+            intent = self.state.get("simulatorCreate")
+            if intent and intent.get("pending"):
+                try:
+                    listing = clean("xcrun", "simctl", "list", "devices", "-j")
+                    require(listing is not None, "Pending simulator creation inventory is unavailable.")
+                    identity = self.simulator_candidate(json.loads(listing.stdout), intent)
+                    if identity is None:
+                        intent.update(pending=False, resolution="absence-verified")
+                        self.save()
+                    else:
+                        self.register_simulator(identity, "exact-inventory")
+                    device = self.state.get("device")
+                except BaseException as failure:
+                    cancellation = cancellation or original_cancellation(failure)
+                    errors.append("Pending simulator creation remains unverified: " + str(failure))
+                    device = None
             if device:
                 devices = clean("xcrun", "simctl", "list", "devices", "-j")
                 matches = [d for group in json.loads(devices.stdout)["devices"].values() for d in group
@@ -654,13 +788,23 @@ class Suite:
                 if matches and matches[0]["name"] != self.state["name"]:
                     errors.append("Simulator identity changed; refusing to touch a different device.")
                 elif matches:
-                    clean("xcrun", "simctl", "terminate", device, APP, check=False)
-                    clean("xcrun", "simctl", "uninstall", device, APP, check=False)
-                    clean("xcrun", "simctl", "shutdown", device, check=False)
-                    clean("xcrun", "simctl", "delete", device)
-                    remaining = clean("xcrun", "simctl", "list", "devices", "-j")
-                    if remaining and device in remaining.stdout:
-                        errors.append("Owned simulator remains after deletion.")
+                    verified = True
+                    if self.state.get("simulatorIdentity"):
+                        try:
+                            require(self.simulator_candidate(json.loads(devices.stdout), self.state["simulatorCreate"])
+                                    == self.state["simulatorIdentity"], "Simulator runtime/type identity changed.")
+                        except BaseException as failure:
+                            cancellation = cancellation or original_cancellation(failure)
+                            errors.append(str(failure))
+                            verified = False
+                    if verified:
+                        clean("xcrun", "simctl", "terminate", device, APP, check=False)
+                        clean("xcrun", "simctl", "uninstall", device, APP, check=False)
+                        clean("xcrun", "simctl", "shutdown", device, check=False)
+                        clean("xcrun", "simctl", "delete", device)
+                        remaining = clean("xcrun", "simctl", "list", "devices", "-j")
+                        if remaining and device in remaining.stdout:
+                            errors.append("Owned simulator remains after deletion.")
         elif device:
             def owned_emulator_pid():
                 pid = self.state.get("emulatorPid")
@@ -787,15 +931,10 @@ class Suite:
             raise cancellation
         require(not errors, "Cleanup failed: " + "; ".join(errors))
 
-    def evidence(self, passed, error):
-        destination = self.output / "evidence"
-        destination.mkdir(exist_ok=True)
-        manifest = {"head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
-                    "dirty": bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True).strip()),
+    def prepare_evidence(self, error):
+        manifest = {**self.source_record(),
                     "platform": self.args.platform, "pins": PIN,
-                    "passed": passed and self.state.get("cleanupDone", False) and
-                        (self.args.platform == "contracts" or self.state.get("phasesComplete", False)),
-                    "error": error,
+                    "passed": False, "error": error or "Evidence collection is incomplete.",
                     "phases": {"required": self.state.get("requiredPhases", []),
                                "completed": self.state.get("completedPhases", []),
                                "complete": self.state.get("phasesComplete", False)},
@@ -803,9 +942,26 @@ class Suite:
                     "buildGroupSettled": self.state.get("buildGroupSettled", True),
                     "simulatorJournalClean": self.state.get("simulatorJournalClean", False),
                     "resourceJournalClean": self.state.get("resourceJournalClean", self.state.get("cleanupDone", False)),
-                    "cleanupErrors": self.state.get("cleanupErrors", []), "files": {}}
+                    "cleanupErrors": self.state.get("cleanupErrors", []),
+                    "processRecovery": self.state.get("processRecovery", []),
+                    "commandRecoveryRequired": self.state.get("commandRecoveryRequired", False),
+                    "recoveriesUnavailable": bool(self.state.get("commandRecoveryRequired") and not any(self.owned_recoveries())),
+                    "simulatorCreate": self.state.get("simulatorCreate"),
+                    "evidenceErrors": self.state.get("evidenceErrors", []), "files": {}}
         if self.args.platform in ("ios", "android"):
             manifest["runtimeIdentifier"] = self.ios["rid"] if self.args.platform == "ios" else self.android["rid"]
+        self.evidence_core = manifest
+        return manifest
+
+    def persist_evidence_core(self):
+        destination = self.output / "evidence"
+        destination.mkdir(exist_ok=True)
+        atomic_json(destination / "manifest.json", self.evidence_core)
+
+    def evidence(self, passed, error):
+        manifest = self.prepare_evidence(error)
+        self.persist_evidence_core()
+        destination = self.output / "evidence"
         total = 0
         for path in self.output.rglob("*"):
             relative = path.relative_to(self.output)
@@ -823,7 +979,13 @@ class Suite:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
             manifest["files"][str(relative)] = hashlib.sha256(data).hexdigest()
-        (destination / "manifest.json").write_text(json.dumps(manifest, indent=2))
+        manifest["error"] = error
+        manifest["passed"] = (passed and self.state.get("cleanupDone", False) and
+                              self.state.get("buildGroupSettled", True) and
+                              not self.state.get("commandRecoveryRequired", False) and
+                              not self.state.get("simulatorCreate", {}).get("pending", False) and
+                              (self.args.platform == "contracts" or self.state.get("phasesComplete", False)))
+        self.persist_evidence_core()
 
 
 def contracts(suite):
@@ -855,6 +1017,8 @@ def main():
 
     def remember(failure):
         nonlocal primary, cancellation
+        if isinstance(primary, (TimeoutError, subprocess.TimeoutExpired)):
+            return
         if cancellation is None:
             cancellation = original_cancellation(failure)
         if primary is None:
@@ -884,7 +1048,11 @@ def main():
                 return 0
             suite.state = json.loads(suite.state_path.read_text())
             require(suite.state["platform"] == args.platform, "Cleanup platform does not match the journal.")
-            if suite.state.get("cleanupDone"):
+            if (suite.state.get("cleanupDone") and suite.state.get("buildGroupSettled", True) and
+                    not suite.state.get("commandRecoveryRequired", False) and
+                    not suite.state.get("simulatorCreate", {}).get("pending", False) and
+                    all(r.get("identityCapture") != "unverified" and all(r.get(key, False) for key in
+                        ("leaderReaped", "groupAbsent", "drainComplete")) for r in suite.state.get("processRecovery", []))):
                 return 0
             try:
                 suite.cleanup()
@@ -919,13 +1087,15 @@ def main():
             remember(RuntimeError("Owned cleanup remains unverified after the required mobile phases."))
         # All rich reporting/bookkeeping is inside the outer non-escaping perimeter.
         error = repr(primary) if primary is not None else None
-        if primary is not None:
-            (suite.output / "failure.log").write_text(
-                "".join(traceback.format_exception(type(primary), primary, primary.__traceback__)))
-            print(error, file=sys.stderr, flush=True)
         if args.cleanup and error is None:
             error = "Recovery after an interrupted mobile run; rerun all gates on a fresh output."
+        suite.prepare_evidence(error)
         try:
+            suite.persist_evidence_core()
+            if primary is not None:
+                (suite.output / "failure.log").write_text(
+                    "".join(traceback.format_exception(type(primary), primary, primary.__traceback__)))
+                print(error, file=sys.stderr, flush=True)
             suite.evidence(passed and primary is None, error)
         except BaseException as failure:
             remember(failure)
@@ -933,10 +1103,9 @@ def main():
             error = f"{error or ''}\nEvidence: {failure!r}"
             suite.state.setdefault("evidenceErrors", []).append(repr(failure))
             try:
-                destination = suite.output / "evidence"
-                destination.mkdir(exist_ok=True)
-                (destination / "manifest.json").write_text(json.dumps({
-                    "passed": False, "error": error, "cleanup": suite.state.get("cleanupDone", False)}, indent=2))
+                suite.evidence_core.update(passed=False, error=error,
+                                           evidenceErrors=suite.state["evidenceErrors"])
+                suite.persist_evidence_core()
             except BaseException as write_error:
                 remember(write_error)
                 suite.state.setdefault("evidenceErrors", []).append(repr(write_error))

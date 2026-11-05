@@ -22,6 +22,7 @@ sys.path.insert(0, str(ROOT / "tests/DncDbg.MobileTests"))
 from argparse import Namespace
 from mobile_tools import android_sdk
 from run_suite import PIN, Suite
+import run_suite
 from run_device import verify_ui, Ui
 from run_direct import unavailable_broker_environment, FixtureApp
 from assert_artifacts import verify
@@ -894,6 +895,26 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
         self.assert_ios_deadline_owned_processes_gone(record)
         self.assertTrue(all(r.leader_reaped for r in self.suite.process_recoveries))
 
+    def test_mobile_main_records_evidence_then_preserves_original_cancellation(self):
+        destination = self.output / "cancelled-main"
+        original = KeyboardInterrupt("top-level cancellation")
+        previous = signal.getsignal(signal.SIGTERM)
+        try:
+            with patch.object(sys, "argv", ["run_suite.py", "--platform", "ios", "--output", str(destination)]), \
+                    patch.object(Suite, "execute", side_effect=original):
+                try:
+                    run_suite.main()
+                except BaseException as error:
+                    self.assertIs(error, original)
+                else:
+                    self.fail("Top-level cancellation cannot become an ordinary status or success.")
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+        manifest = json.loads((destination / "evidence/manifest.json").read_text())
+        self.assertFalse(manifest["passed"])
+        self.assertIn("top-level cancellation", manifest["error"])
+        self.assertIn("KeyboardInterrupt", (destination / "failure.log").read_text())
+
     @unittest.skipUnless(os.name == "posix", "POSIX command ownership")
     def test_deadline_recovery_separates_reaped_leader_from_failed_partial_drain(self):
         log = self.output / "drain.log"
@@ -952,6 +973,74 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
                 self.suite.run("xcrun", "simctl", "list", "devices", "-j", timeout=1, deadline=deadline)
         self.assertTrue(caught.exception.recovery.complete)
         self.assert_ios_deadline_owned_processes_gone(record)
+
+    def test_deadline_runner_rejects_known_daemon_modes_without_resource_journal(self):
+        for flag in ("--daemon", "--daemonize", "--background"):
+            with self.subTest(flag=flag), patch("process_tools.start_owned") as start:
+                with self.assertRaisesRegex(ValueError, "resource journal"):
+                    self.suite.run("unowned-tool", flag, deadline=time.monotonic() + 1)
+                start.assert_not_called()
+
+    def test_restarted_cleanup_cannot_hide_unverified_process_recovery_journal(self):
+        self.suite.args.platform = "ios"
+        self.suite.state["processRecovery"] = [{
+            "pid": 123456, "processGroup": 123456, "leaderReaped": False,
+            "groupAbsent": False, "drainComplete": False}]
+        with patch.object(self.suite, "run", return_value=subprocess.CompletedProcess([], 0, '{"devices":{}}', "")):
+            with self.assertRaisesRegex(RuntimeError, "process recovery journal"):
+                self.suite.cleanup()
+        self.assertFalse(self.suite.state["cleanupDone"])
+        self.assertFalse(self.suite.state["resourceJournalClean"])
+
+    @unittest.skipUnless(os.name == "posix", "POSIX command ownership")
+    def test_real_invalid_output_bytes_are_preserved_independently_of_reaping(self):
+        result = self.suite.run(sys.executable, "-c",
+            "import sys;sys.stdout.buffer.write(b'output\\xff');sys.stderr.buffer.write(b'error\\xfe')",
+            deadline=time.monotonic() + 2)
+        self.assertEqual(result.stdout, "output\\xff")
+        self.assertEqual(result.stderr, "error\\xfe")
+        report = json.loads(next(self.output.glob("*.settlement.json")).read_text())
+        self.assertTrue(report["leaderReaped"] and report["groupAbsent"] and report["drainComplete"])
+        self.assertFalse(report["resourceJournalClean"])
+        self.assertEqual(report["ownershipScope"], "leader-and-original-process-group")
+
+    @unittest.skipUnless(os.name == "posix", "POSIX command ownership")
+    def test_escaped_pipe_holder_is_not_group_owned_or_a_clean_resource_journal(self):
+        record = self.output / "escaped.json"
+        nonce = uuid.uuid4().hex
+        child = (
+            "import os,socket,json;from pathlib import Path;"
+            "s=socket.socket();s.bind(('127.0.0.1',0));s.listen();"
+            f"Path({str(record)!r}).write_text(json.dumps({{'pid':os.getpid(),'port':s.getsockname()[1],'nonce':{nonce!r}}}));"
+            "print('escaped resource ready',flush=True);c,_=s.accept();"
+            f"assert c.recv(128)=={nonce.encode()!r};c.close();s.close()")
+        parent = f"import subprocess,sys;subprocess.Popen([sys.executable,'-c',{child!r}],start_new_session=True)"
+        owned = None
+        try:
+            with self.assertRaises(process_tools.OwnedProcessSettlementError) as caught:
+                self.suite.run(sys.executable, "-c", parent, timeout=1, deadline=time.monotonic() + 1)
+            owned = json.loads(record.read_text())
+            recovery = caught.exception.recovery
+            self.assertTrue(recovery.leader_reaped and recovery.group_absent)
+            self.assertFalse(recovery.drain_complete)
+            self.assertNotEqual(os.getpgid(owned["pid"]), recovery.process.pid)
+            self.assertTrue(alive(owned["pid"]), "An escaped resource must not be killed by inferred ancestry.")
+            with self.assertRaisesRegex(RuntimeError, "recovery incomplete"):
+                self.suite.cleanup()
+            self.assertFalse(self.suite.state["cleanupDone"])
+            self.assertFalse(self.suite.state["resourceJournalClean"])
+        finally:
+            if record.exists():
+                owned = json.loads(record.read_text())
+                self.assertEqual(owned["nonce"], nonce)
+                with socket.create_connection(("127.0.0.1", owned["port"]), timeout=2) as connection:
+                    connection.sendall(nonce.encode())
+                deadline = time.monotonic() + 5
+                while alive(owned["pid"]) and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertFalse(alive(owned["pid"]))
+                with socket.socket() as connection:
+                    self.assertNotEqual(connection.connect_ex(("127.0.0.1", owned["port"])), 0)
 
     def test_ios_cleanup_refuses_another_device_identity(self):
         self.suite.args.platform = "ios"

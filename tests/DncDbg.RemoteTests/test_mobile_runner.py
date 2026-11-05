@@ -1296,6 +1296,24 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
                         signal.signal(signal.SIGTERM, previous)
 
     @unittest.skipUnless(os.name == "posix", "POSIX publication signal mask")
+    def test_publication_fault_waits_for_ready_helper_within_existing_operation_deadline(self):
+        helper = self.ios_deadline_helper
+
+        def delayed(mode):
+            record = helper(mode)
+            record.unlink(missing_ok=True)
+            executable = self.output / "xcrun"
+            executable.write_text(executable.read_text().replace(
+                "import os, sys", "import os, sys, time\ntime.sleep(1.1)", 1))
+            return record
+
+        with patch.object(self, "ios_deadline_helper", side_effect=delayed):
+            for scenario in (self.test_system_exit_after_launch_return_keeps_published_owner_and_reaps,
+                             self.test_real_signal_during_launch_is_deferred_until_owner_publication):
+                with self.subTest(scenario=scenario.__name__):
+                    scenario()
+
+    @unittest.skipUnless(os.name == "posix", "POSIX publication signal mask")
     def test_real_signal_during_launch_is_deferred_until_owner_publication(self):
         import threading
         record = self.ios_deadline_helper("cleanup")

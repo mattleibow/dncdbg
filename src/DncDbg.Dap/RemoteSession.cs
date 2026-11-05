@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using Stopwatch = System.Diagnostics.Stopwatch;
 using DncDbg.Protocol;
 using DncDbg.Remote;
 
@@ -62,21 +63,35 @@ internal sealed class RemoteSession : IDisposable
     {
         CheckOpen();
         lifecycle = createLifecycle();
+        long began = Stopwatch.GetTimestamp();
+        string stage = "symbols";
+        int configured = 0;
+        using var startup = CancellationTokenSource.CreateLinkedTokenSource(Token);
+        startup.CancelAfter(TimeSpan.FromSeconds(options.StartupTimeoutSeconds));
         try
         {
-            using var startup = CancellationTokenSource.CreateLinkedTokenSource(Token);
-            startup.CancelAfter(TimeSpan.FromSeconds(options.StartupTimeoutSeconds));
+            log($"Remote startup session={lifecycle.SessionId} stage={stage} deadlineSeconds={options.StartupTimeoutSeconds}");
             symbols = new RemoteSymbols(options.AssetsPath, options.SourceFileMap);
+            log($"Remote startup session={lifecycle.SessionId} stage=symbols-complete modules={symbols.Modules.Length} methods={symbols.Modules.Sum(m => m.Methods.Length)} types={symbols.Modules.Sum(m => m.Types.Length)} elapsedMs={Stopwatch.GetElapsedTime(began).TotalMilliseconds:F3}");
+            stage = "connect";
             Wait(lifecycle.ConnectAsync(startup.Token));
+            stage = "configure";
             foreach (RemoteConfiguration chunk in symbols.ConfigurationChunks())
+            {
                 Wait(Client.RequestConfigureAsync(chunk, startup.Token));
+                configured++;
+                if (configured == 1 || configured % 128 == 0)
+                    log($"Remote startup session={lifecycle.SessionId} stage={stage} completedChunks={configured} elapsedMs={Stopwatch.GetElapsedTime(began).TotalMilliseconds:F3}");
+            }
+            log($"Remote startup session={lifecycle.SessionId} stage=configuration-complete completedChunks={configured} elapsedMs={Stopwatch.GetElapsedTime(began).TotalMilliseconds:F3}");
         }
-        catch (Exception startup)
+        catch (Exception failure)
         {
+            log($"Remote startup failed session={lifecycle.SessionId} stage={stage} completedChunks={configured} elapsedMs={Stopwatch.GetElapsedTime(began).TotalMilliseconds:F3} startupCancelled={startup.IsCancellationRequested} lifetimeCancelled={lifetime.IsCancellationRequested} error={failure.GetType().Name}");
             try { Wait(lifecycle.CloseAsync(terminate: true)); }
             catch (Exception cleanup)
             {
-                throw new InvalidOperationException(startup.Message + " Cleanup also failed: " + cleanup.Message, startup);
+                throw new InvalidOperationException(failure.Message + " Cleanup also failed: " + cleanup.Message, failure);
             }
             throw;
         }

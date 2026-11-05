@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 
 namespace DncDbg.Remote.Apple;
@@ -19,6 +20,7 @@ public sealed class AppleSimulatorProvider : IRemoteTargetProvider
     private readonly AppleSimulatorOptions options;
     private readonly ApplicationInstallation installation;
     private readonly ApplicationPackageIdentity package;
+    private readonly string? outputRoot;
     private string? data;
     private string session = "";
     private bool installed, started;
@@ -26,10 +28,12 @@ public sealed class AppleSimulatorProvider : IRemoteTargetProvider
     public string Name => options.ApplicationId;
     public string ExpectedPlatform => Profile.Runtime.Platform;
     public string ExpectedArchitecture => Profile.Runtime.Architecture;
-    public string? ArtifactsPath => null;
+    public string? ArtifactsPath => outputRoot == null ? null : Path.Combine(Path.GetFullPath(outputRoot), "apple-" + session);
 
-    public AppleSimulatorProvider(AppleSimulatorOptions options, string agentManifest, ApplicationInstallation installation)
+    public AppleSimulatorProvider(AppleSimulatorOptions options, string agentManifest, ApplicationInstallation installation,
+        string? outputRoot = null)
     {
+        this.outputRoot = outputRoot;
         this.options = options;
         this.installation = installation;
         if (options.RuntimeIdentifier != "iossimulator-arm64" || !Regex.IsMatch(options.DeviceId, @"\A[A-Za-z0-9-]+\z") ||
@@ -88,6 +92,11 @@ public sealed class AppleSimulatorProvider : IRemoteTargetProvider
     {
         var failures = new List<Exception>();
         async Task Attempt(Func<Task> action) { try { await action(); } catch (Exception e) { failures.Add(e); } }
+        await Attempt(() =>
+        {
+            CaptureEvidence();
+            return Task.CompletedTask;
+        });
         await Attempt(async () =>
         {
             if (!started || data == null) return;
@@ -99,5 +108,28 @@ public sealed class AppleSimulatorProvider : IRemoteTargetProvider
         if (terminate && installed && options.UninstallOnDisconnect)
             await Attempt(async () => { await Sim(token, false, "uninstall", options.DeviceId, options.ApplicationId); installation.Owned = false; });
         if (failures.Count != 0) throw new AggregateException("Apple target cleanup failed.", failures);
+    }
+
+    private void CaptureEvidence()
+    {
+        if (data == null || ArtifactsPath is not { } output) return;
+        Directory.CreateDirectory(output);
+        foreach (string name in new[] { "dncdbg-remote.json", "dncdbg-startup.jsonl", "dncdbg-startup-error.json", "dncdbg-preflight.json" })
+        {
+            string path = Path.Combine(data, "Library", name);
+            if (!File.Exists(path)) continue;
+            if (new FileInfo(path).Length > 1024 * 1024)
+                throw new InvalidDataException("Apple startup evidence exceeds its 1 MiB file limit.");
+            string content = File.ReadAllText(path);
+            string destination = name;
+            if (name == "dncdbg-remote.json")
+            {
+                JsonNode descriptor = JsonNode.Parse(content) ?? throw new InvalidDataException("Empty Apple descriptor.");
+                descriptor["Endpoint"]?.AsObject().Remove("Token");
+                content = descriptor.ToJsonString();
+                destination = "descriptor.json";
+            }
+            File.WriteAllText(Path.Combine(output, destination), content);
+        }
     }
 }

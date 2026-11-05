@@ -187,7 +187,7 @@ def state(count, result):
 def dap_proof(app, args, assets, environment):
     source = ROOT / "tests/DncDbg.MauiTestApp/MainPage.xaml.cs"
     line = next(i + 1 for i, row in enumerate(source.read_text().splitlines()) if "// MOBILE_BREAKPOINT:" in row)
-    dap = Dap(environment, timeout=120)
+    dap = Dap(environment, timeout=120, arguments=("--log=" + str(args.output / "adapter.log"),))
     pool = ThreadPoolExecutor(max_workers=1)
     try:
         dap.request("initialize", {"adapterID": "dncdbg"})
@@ -223,9 +223,33 @@ def dap_proof(app, args, assets, environment):
         app.native_cleanup()
         return info["sessionId"]
     finally:
+        if sys.exc_info()[0] is not None and not app.serial:
+            collect_ios_failure(app, args)
         dap.close()
         pool.shutdown(wait=True, cancel_futures=True)
         (args.output / "dap.json").write_text(json.dumps(dap.transcript, indent=2))
+
+
+def collect_ios_failure(app, args):
+    failures = []
+    for name, command in (
+        ("simulator-app.log", ("xcrun", "simctl", "spawn", args.device, "log", "show", "--last", "3m",
+                               "--style", "compact", "--predicate", 'process == "DncDbg.MauiTestApp"')),
+        ("simulator-processes.log", ("xcrun", "simctl", "spawn", args.device, "launchctl", "list")),
+    ):
+        try:
+            app.run(*command, timeout=10, log=name)
+        except Exception as error:
+            failures.append({"file": name, "error": repr(error)})
+    crashes = Path.home() / "Library/Logs/DiagnosticReports"
+    for path in sorted(crashes.glob("DncDbg.MauiTestApp-*.ips"))[-4:]:
+        try:
+            if path.stat().st_size > 1024 * 1024:
+                raise ValueError("App crash report exceeds the 1 MiB evidence bound.")
+            (args.output / (path.stem + ".log")).write_bytes(path.read_bytes())
+        except Exception as error:
+            failures.append({"file": path.name, "error": repr(error)})
+    (args.output / "failure-collection.json").write_text(json.dumps({"errors": failures}, indent=2))
 
 
 def ui_proof(app, args, manifest):

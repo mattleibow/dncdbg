@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Diagnostics;
 
 namespace DncDbg.Remote;
 
@@ -13,11 +14,13 @@ public sealed partial class RemoteDebugClient : IAsyncDisposable
     private readonly SemaphoreSlim gate = new(1);
     private long sequence;
     private bool disposed;
+    private Action<string>? trace;
     public RemoteCapabilities Capabilities { get; private set; } = null!;
 
-    public static async Task<RemoteDebugClient> ConnectAsync(RemoteEndpoint endpoint, CancellationToken cancellationToken)
+    public static async Task<RemoteDebugClient> ConnectAsync(RemoteEndpoint endpoint, CancellationToken cancellationToken,
+        Action<string>? trace = null)
     {
-        var result = new RemoteDebugClient();
+        var result = new RemoteDebugClient { trace = trace };
         try
         {
             await result.client.ConnectAsync(IPAddress.Loopback, endpoint.Port, cancellationToken);
@@ -65,6 +68,8 @@ public sealed partial class RemoteDebugClient : IAsyncDisposable
         try
         {
             long id = ++sequence;
+            long started = Stopwatch.GetTimestamp();
+            if (id <= 4096) trace?.Invoke($"DNC1 operation={operation} sequence={id} phase=started");
             NetworkStream stream = client.GetStream();
             await RemoteProtocol.WriteAsync(stream, new(RemoteProtocol.Version, id, operation, RemoteProtocol.Pack(body)), operationToken);
             RemoteEnvelope response = await RemoteProtocol.ReadAsync(stream, operationToken);
@@ -72,10 +77,12 @@ public sealed partial class RemoteDebugClient : IAsyncDisposable
                 throw new InvalidDataException("Uncorrelated remote response.");
             if (response.Error != null)
                 throw new RemoteRequestException(response.Error);
+            if (id <= 4096) trace?.Invoke($"DNC1 operation={operation} sequence={id} phase=completed elapsedMs={Stopwatch.GetElapsedTime(started).TotalMilliseconds:F3}");
             return RemoteProtocol.Unpack<TResponse>(response.Body);
         }
         catch (Exception e) when (e is not RemoteRequestException)
         {
+            trace?.Invoke($"DNC1 operation={operation} sequence={sequence} phase=failed error={e.GetType().Name} callerCancelled={token.IsCancellationRequested} rpcDeadlineCancelled={deadline.IsCancellationRequested}");
             // A canceled partial request cannot safely reuse a sequential framed stream.
             client.Dispose();
             disposed = true;

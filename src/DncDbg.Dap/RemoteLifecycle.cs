@@ -4,7 +4,8 @@ using System.Text.Json;
 namespace DncDbg.Dap;
 
 /// <summary>Platform-independent ownership of acquisition, authentication, cancellation and cleanup.</summary>
-internal sealed class RemoteLifecycle(IRemoteTargetProvider target, ITunnelProvider tunnel, int startupTimeoutSeconds, string outputRoot)
+internal sealed class RemoteLifecycle(IRemoteTargetProvider target, ITunnelProvider tunnel, int startupTimeoutSeconds, string outputRoot,
+    Action<string>? log = null)
 {
     private readonly object gate = new();
     private readonly CancellationTokenSource acquisitionCancellation = new();
@@ -40,7 +41,9 @@ internal sealed class RemoteLifecycle(IRemoteTargetProvider target, ITunnelProvi
         token = startup.Token;
         journal = new TargetOwnershipJournal(Path.Combine(Path.GetFullPath(outputRoot), SessionId, "lifecycle"), SessionId);
         journal.Record("acquire-intent", null, null);
+        log?.Invoke($"Remote acquire session={SessionId} provider={target.GetType().Name}");
         await target.AcquireAsync(SessionId, token);
+        log?.Invoke($"Remote acquire-complete session={SessionId} artifacts={target.ArtifactsPath}");
         RemoteEndpoint? endpoint = null;
         while (endpoint == null)
         {
@@ -76,8 +79,9 @@ internal sealed class RemoteLifecycle(IRemoteTargetProvider target, ITunnelProvi
         Route = new { provider = tunnel.GetType().Name, hostPort = ownedRoute.Port,
             targetPort = endpoint.Port, generation = SessionId };
         journal.Record("route-acquired", null, ProcessId);
+        log?.Invoke($"Remote route session={SessionId} process={ProcessId} provider={tunnel.GetType().Name} targetPort={endpoint.Port} hostPort={ownedRoute.Port}");
         token.ThrowIfCancellationRequested();
-        RemoteDebugClient client = await RemoteDebugClient.ConnectAsync(ownedRoute, token);
+        RemoteDebugClient client = await RemoteDebugClient.ConnectAsync(ownedRoute, token, log);
         try
         {
             RemoteCapabilities capabilities = client.Capabilities;

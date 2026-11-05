@@ -236,3 +236,19 @@ desktop debugger, a native parity fixture, or authorized use of proprietary
 Visual Studio proxies. Ordinary Release adapter/local desktop publish artifacts
 are inspected in CI; existing stock CLR/dbgshim/PDB-reader native dependencies
 are still allowed.
+# Intel iOS cancellation investigation
+
+The diagnostic branch's manual Mobile workflow runs frozen PR #20 source
+`306e2fa845a852d275be74ec85e0e878d9102cb1` with a diagnostics-only patch from
+main `aae6894abb5813294c95f98b7227a280ecdab28e`. `overlay.json` records both
+SHAs, the patch hash, and changed paths. This is not a clean-main or release
+qualification; the Intel profile, device/runtime pins, existing deadlines,
+assertions and full iOS proof sequence remain those of the frozen source.
+
+The adapter log records launch stage, completed symbol chunks, DNC1 operation
+and sequence (up to 4096 requests), and the startup/lifetime/RPC cancellation
+states without logging bodies or credentials. The Apple provider snapshots the
+descriptor with its credential field removed and bounded native/preflight
+reports before deleting the descriptor or terminating/uninstalling the app.
+Failed direct DAP proofs also retain bounded simulator logs, process state,
+app crash reports and explicit collection errors before fixture cleanup.

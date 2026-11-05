@@ -1,10 +1,6 @@
-name: Mobile proof
+name: Intel iOS cancellation diagnostics
 
 on:
-  pull_request:
-    branches: [main]
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -17,7 +13,7 @@ concurrency:
 jobs:
   ios:
     name: Mobile iOS simulator (pinned)
-    runs-on: macos-26
+    runs-on: macos-26-intel
     timeout-minutes: 50
     env:
       DOTNET_INSTALL_DIR: ${{ github.workspace }}/build/mobile-sdk
@@ -25,13 +21,66 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
           persist-credentials: false
+      - name: Apply diagnostics only to frozen PR20 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          overlay="$(git rev-parse HEAD)"
+          git diff --unified=1 aae6894abb5813294c95f98b7227a280ecdab28e HEAD -- \
+            src/DncDbg.Dap/DebugAdapter.cs src/DncDbg.Dap/RemoteSession.cs \
+            src/DncDbg.Dap/RemoteLifecycle.cs src/DncDbg.Dap/RemoteProviderFactory.cs \
+            src/DncDbg.Remote/RemoteDebugClient.cs src/DncDbg.Remote.Apple/AppleSimulatorProvider.cs \
+            tests/DncDbg.MobileTests/run_direct.py > "$RUNNER_TEMP/diagnostics.patch"
+          test -s "$RUNNER_TEMP/diagnostics.patch"
+          git checkout --detach 306e2fa845a852d275be74ec85e0e878d9102cb1
+          git apply --check "$RUNNER_TEMP/diagnostics.patch"
+          git apply "$RUNNER_TEMP/diagnostics.patch"
+          mkdir -p build/validation/mobile-ci
+          python3 - "$overlay" "$RUNNER_TEMP/diagnostics.patch" <<'PY'
+          import hashlib, json, pathlib, subprocess, sys
+          pathlib.Path("build/validation/mobile-ci/overlay.json").write_text(json.dumps({
+              "diagnosticsSha": sys.argv[1],
+              "sourceSha": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+              "patchSha256": hashlib.sha256(pathlib.Path(sys.argv[2]).read_bytes()).hexdigest(),
+              "changedPaths": subprocess.check_output(["git", "diff", "--name-only"], text=True).splitlines()
+          }, indent=2))
+          PY
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: |
             10.0.401
             11.0.100-rc.1.26425.128
+      - name: Verify pinned simulator inventory in the runner environment
+        timeout-minutes: 4
+        shell: bash
+        run: |
+          python3 -u - <<'PY'
+          import json, os, platform, subprocess, sys
+          from pathlib import Path
+          sys.path.insert(0, "tests/DncDbg.RemoteTests")
+          from process_tools import run_owned
+          pin = json.loads(Path("tests/DncDbg.MobileTests/tuple.json").read_text())["iosX64"]
+          output = Path("build/validation/mobile-ci/ios-prerequisite")
+          output.mkdir(parents=True)
+          env = dict(os.environ) | {"DEVELOPER_DIR": "/Applications/Xcode_26.6.app/Contents/Developer"}
+          report = {"head": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+                    "hostArchitecture": platform.machine(), "complete": False, "passed": False}
+          try:
+              assert platform.system() == "Darwin" and platform.machine() == pin["hostArchitecture"]
+              version = run_owned("xcodebuild", "-version", env=env, timeout=30, log=output / "xcode.log").stdout.strip()
+              assert version == f"Xcode {pin['xcode']}\nBuild version {pin['xcodeBuild']}", version
+              inventory = run_owned("xcrun", "simctl", "list", "runtimes", "-j",
+                                    env=env, timeout=180, log=output / "runner-environment.log").stdout
+              observed = [r for r in json.loads(inventory)["runtimes"]
+                          if r["identifier"] == pin["runtime"] and r.get("isAvailable")
+                          and r["buildversion"] == pin["runtimeBuild"]]
+              assert len(observed) == 1, "Exact pinned simulator runtime unavailable; no substitution."
+              report.update({"passed": True, "xcode": version, "runtime": observed[0]})
+          finally:
+              (output / "prerequisite.json").write_text(json.dumps(report, indent=2))
+          PY
       - name: Install exact workload and DevFlow CLI
         shell: bash
         run: |
@@ -45,26 +94,30 @@ jobs:
       - name: Build, provision and prove exact iOS simulator tuple
         run: >-
           dotnet run --project tests/DncDbg.MobileTests -c Release --
-          --platform ios --xcode-dir /Applications/Xcode_26.6.app/Contents/Developer
+          --platform ios --ios-architecture x64 --xcode-dir /Applications/Xcode_26.6.app/Contents/Developer
           --output build/validation/mobile-ci/ios
       - name: Recover owned simulator and processes even after cancellation
         if: always() && hashFiles('build/validation/mobile-ci/ios/state.json') != ''
         timeout-minutes: 3
         run: >-
           dotnet run --project tests/DncDbg.MobileTests -c Release --no-build --
-          --platform ios --xcode-dir /Applications/Xcode_26.6.app/Contents/Developer
+          --platform ios --ios-architecture x64 --xcode-dir /Applications/Xcode_26.6.app/Contents/Developer
           --output build/validation/mobile-ci/ios --cleanup
       - name: Upload bounded iOS evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: mobile-ios-${{ github.run_id }}-${{ github.run_attempt }}
-          path: build/validation/mobile-ci/ios/evidence/
+          path: |
+            build/validation/mobile-ci/ios/evidence/
+            build/validation/mobile-ci/ios-prerequisite/
+            build/validation/mobile-ci/overlay.json
           if-no-files-found: error
           retention-days: 7
           compression-level: 6
 
   android:
+    if: false
     name: Mobile Android emulator (pinned)
     runs-on: ubuntu-24.04
     timeout-minutes: 50

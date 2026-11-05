@@ -8,7 +8,7 @@ namespace DncDbg.Dap;
 
 internal static class RemoteProviderFactory
 {
-    public static Func<RemoteLifecycle> Create(RemoteLaunchArguments options)
+    public static Func<RemoteLifecycle> Create(RemoteLaunchArguments options, Action<string>? log = null)
     {
         if (options.Additional?.Count > 0 || options.Target?.Additional?.Count > 0 ||
             options.Tunnel?.Additional?.Count > 0)
@@ -30,12 +30,12 @@ internal static class RemoteProviderFactory
                 "android" when target.Android != null => new AndroidTargetProvider(target.Android,
                     Path.Combine(options.AssetsPath, "dncdbg-agent.json"), installation, options.OutputPath),
                 "appleSimulator" when target.Apple != null => new AppleSimulatorProvider(target.Apple,
-                    Path.Combine(options.AssetsPath, "dncdbg-agent.json"), installation),
+                    Path.Combine(options.AssetsPath, "dncdbg-agent.json"), installation, options.OutputPath),
                 _ => throw new PlatformNotSupportedException("Unknown target provider or incompatible typed configuration."),
             };
             if (target.Provider == "appleDevice" && provider.Profile?.Runtime.Platform != "iOSDevice")
                 throw new ArgumentException("Apple device command targets require an exact physical iOS runtime profile.");
-            return new(provider, Tunnel(options, target), options.StartupTimeoutSeconds, options.OutputPath);
+            return new(provider, Tunnel(options, target), options.StartupTimeoutSeconds, options.OutputPath, log);
         };
     }
 

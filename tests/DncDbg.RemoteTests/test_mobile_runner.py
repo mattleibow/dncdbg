@@ -9,6 +9,8 @@ from pathlib import Path
 import shutil
 import signal
 import socket
+import selectors
+import warnings
 import subprocess
 import sys
 import time
@@ -1476,6 +1478,85 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
             if owner.exec_error_read is not None:
                 os.close(owner.exec_error_read)
         self.assert_ios_deadline_owned_processes_gone(record)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX high-FD exec handshake")
+    def test_real_high_fd_exec_handshake_success_and_oserror(self):
+        import resource
+        previous = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if previous[1] != resource.RLIM_INFINITY and previous[1] < 1100:
+            self.skipTest(f"Hard FD limit {previous[1]} cannot exercise FD_SETSIZE.")
+        held = []
+        try:
+            try:
+                resource.setrlimit(resource.RLIMIT_NOFILE,
+                                   (1100 if previous[0] != resource.RLIM_INFINITY and previous[0] < 1100 else previous[0], previous[1]))
+                while not held or held[-1] < 1050:
+                    held.append(os.open(os.devnull, os.O_RDONLY))
+            except OSError as error:
+                if error.errno in (errno.EMFILE, errno.ENFILE, errno.EPERM):
+                    self.skipTest(f"Host FD resource limit prevents high-FD handshake: {error}")
+                raise
+            for command in (shutil.which("true"), str(self.output / "missing-high-fd")):
+                with self.subTest(command=command):
+                    if command.endswith("missing-high-fd"):
+                        with self.assertRaises(FileNotFoundError) as caught:
+                            self.suite.run(command, deadline=time.monotonic() + 2)
+                        self.assertEqual(caught.exception.errno, errno.ENOENT)
+                    else:
+                        self.assertEqual(self.suite.run(command, deadline=time.monotonic() + 2).returncode, 0)
+                    self.assertTrue(self.suite.recovery_fallback.complete)
+                    self.assertIsNone(self.suite.recovery_fallback.exec_error_read)
+        finally:
+            for fd in reversed(held):
+                os.close(fd)
+            resource.setrlimit(resource.RLIMIT_NOFILE, previous)
+
+    def test_close_fds_false_keeps_default_semantics_but_owned_mode_rejects_before_spawn(self):
+        read, write = os.pipe()
+        os.set_inheritable(write, True)
+        command = [sys.executable, "-c", f"import os;os.write({write},b'kept')"]
+        owner = process_tools.OwnedProcessRecovery(None, self.output / "close-fds.log", time.monotonic() + 2)
+        try:
+            process = process_tools.start_owned(command, close_fds=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                process.communicate(timeout=2)
+                self.assertEqual(process.returncode, 0)
+                self.assertEqual(os.read(read, 4), b"kept")
+            finally:
+                process_tools.stop_owned(process)
+                process.stdout.close()
+                process.stderr.close()
+            with warnings.catch_warnings(record=True) as caught, patch("process_tools.subprocess.Popen") as launch:
+                with self.assertRaisesRegex(ValueError, "close_fds=False"):
+                    process_tools.start_owned(command, owner=owner, close_fds=False)
+                launch.assert_not_called()
+                self.assertEqual(caught, [])
+        finally:
+            owner.close_exec_error_pipe()
+            os.close(read)
+            os.close(write)
+
+    def test_owned_launch_keeps_explicit_pass_fds_and_deduplicates_them(self):
+        read, write = os.pipe()
+        owner = process_tools.OwnedProcessRecovery(None, self.output / "pass-fds.log", time.monotonic() + 2)
+        command = [sys.executable, "-c", f"import os;os.write({write},b'kept')"]
+        try:
+            with warnings.catch_warnings(record=True) as caught:
+                process_tools.start_owned(command, owner=owner, pass_fds=(write, write),
+                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                owner.await_exec(command, time.monotonic() + 2)
+                with selectors.DefaultSelector() as ready:
+                    ready.register(read, selectors.EVENT_READ)
+                    self.assertTrue(ready.select(2), "Explicit caller FD did not survive exec.")
+                self.assertEqual(os.read(read, 4), b"kept")
+                self.assertEqual(caught, [])
+        finally:
+            if owner.process is not None:
+                self.assertTrue(owner.finish())
+            else:
+                owner.close_exec_error_pipe()
+            os.close(read)
+            os.close(write)
 
     @unittest.skipUnless(os.name == "posix", "POSIX command ownership")
     def test_real_invalid_output_bytes_are_preserved_independently_of_reaping(self):

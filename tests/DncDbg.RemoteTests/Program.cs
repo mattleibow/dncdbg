@@ -106,6 +106,12 @@ if (args is ["--rpc-deadline"])
     Console.WriteLine($"Passed {passed} authenticated stdio RPC deadline assertions.");
     return;
 }
+if (args is ["--trace-contracts"])
+{
+    await TestTraceFailuresAsync();
+    Console.WriteLine($"Passed {passed} observational trace contracts.");
+    return;
+}
 if (args is ["--native-host-capabilities", var nativeRuntime])
 {
     Console.WriteLine(JsonSerializer.Serialize(PrivateBootstrapPolicy.NativeHostCapabilities(nativeRuntime),
@@ -189,6 +195,7 @@ TestMachOUuid();
 PrivateBootstrapChecks.Run(Check);
 await TestAgentAsync();
 await TestCancellationAsync();
+await TestTraceFailuresAsync();
 await TestCorrelationAsync();
 await TestStaleSessionAsync();
 await TestRpcDeadlineAsync();
@@ -356,6 +363,22 @@ async Task TestCancellationAsync()
     await ThrowsAsync<ObjectDisposedException>(() => client.StartAsync(token), "canceled stream cannot be reused");
     await Task.WhenAll(agent.DisposeAsync().AsTask(), agent.DisposeAsync().AsTask());
     Check(backend!.DisposeCount == 1, "cancellation and concurrent disposal relinquish backend exactly once");
+}
+
+async Task TestTraceFailuresAsync()
+{
+    var backend = new ContractBackend();
+    await using var agent = new RemoteAgent(() => backend);
+    await using RemoteDebugClient client = await RemoteDebugClient.ConnectAsync(agent.Endpoint, token,
+        _ => throw new IOException("diagnostic writer failed"));
+    await client.StartAsync(token);
+    Check(true, "throwing trace callbacks cannot turn successful authentication/RPC into failure");
+    using var canceled = CancellationTokenSource.CreateLinkedTokenSource(token);
+    Task pending = client.WaitForStopAsync(canceled.Token);
+    await backend.WaitStarted.Task.WaitAsync(token);
+    canceled.Cancel();
+    await ThrowsAsync<OperationCanceledException>(() => pending, "throwing failure trace preserves original RPC cancellation");
+    await ThrowsAsync<ObjectDisposedException>(() => client.StartAsync(token), "throwing failure trace cannot prevent framed transport discard");
 }
 
 async Task TestCorrelationAsync()

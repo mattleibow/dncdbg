@@ -13,6 +13,8 @@ import sys
 import threading
 import time
 import unittest
+from unittest.mock import patch
+from argparse import Namespace
 import uuid
 import zipfile
 
@@ -629,6 +631,34 @@ class MobileDapTests(unittest.TestCase):
         self.assertIn("operation=Hello sequence=1 phase=completed", log)
         self.assertIn("stage=configuration-complete", log)
         self.assertNotIn(self.remote.endpoint["Token"], log + snapshots[0].read_text())
+
+    def test_ios_diagnostic_io_failure_cannot_fail_successful_cleanup(self):
+        self.remote = Remote(self.state, "iOS")
+        (self.state / "Library/dncdbg-startup.jsonl").write_bytes(b"x" * (1024 * 1024 + 1))
+        launch = self.dap.send("launch", self.arguments(
+            self.options("iosSimulator") | {"outputPath": str(self.state / "targets")}))
+        self.dap.request("configurationDone")
+        self.dap.response(launch)
+        self.dap.request("disconnect", {"terminateDebuggee": True})
+        self.dap.event("terminated")
+        self.assertIn("Apple startup evidence failed", (self.state / "adapter.log").read_text())
+        self.assertFalse((self.state / "installed").exists())
+
+    def test_failure_collection_cannot_mask_launch_failure_or_skip_dap_cleanup(self):
+        sys.path.insert(0, str(ROOT / "tests/DncDbg.MobileTests"))
+        from run_direct import dap_proof
+        for secondary in (RuntimeError("diagnostic collection failed"), KeyboardInterrupt(), SystemExit(7)):
+            with self.subTest(secondary=type(secondary).__name__):
+                primary = RuntimeError("primary launch failure")
+                with patch("run_direct.Dap") as factory, patch("run_direct.ThreadPoolExecutor") as pool, \
+                        patch("run_direct.collect_ios_failure", side_effect=secondary):
+                    factory.return_value.request.side_effect = primary
+                    factory.return_value.transcript = []
+                    with self.assertRaisesRegex(RuntimeError, "primary launch failure") as failure:
+                        dap_proof(Namespace(serial=None), Namespace(output=self.state), self.state / "assets", self.env)
+                    self.assertIs(failure.exception, primary)
+                    factory.return_value.close.assert_called_once_with()
+                    pool.return_value.shutdown.assert_called_once_with(wait=True, cancel_futures=True)
 
     def test_ios_replacement_removes_stale_descriptor_before_delayed_publication(self):
         self.remote = Remote(self.state, "iOS")

@@ -1872,6 +1872,42 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
                 self.assertTrue(owner.record_errors)
                 self.assertIsNotNone(owner.process.returncode)
 
+    def test_restarted_cleanup_refuses_an_unverified_command_launch_intent(self):
+        self.suite.args.platform = "ios"
+        self.suite.state["commandRecoveryRequired"] = True
+        self.suite.state["buildGroupSettled"] = False
+        with patch.object(self.suite, "run", side_effect=AssertionError("Unverified original owner forbids commands")) as ordinary:
+            with self.assertRaisesRegex(RuntimeError, "Unverified.*command"):
+                self.suite.cleanup()
+        ordinary.assert_not_called()
+        self.assertFalse(self.suite.state["cleanupDone"])
+        self.assertFalse(self.suite.state["buildGroupSettled"])
+        self.assertFalse(self.suite.state["simulatorJournalClean"])
+
+    @unittest.skipUnless(os.name == "posix", "POSIX publication ownership")
+    def test_progress_owner_is_retained_before_the_first_postlaunch_journal_write(self):
+        write = Path.write_text
+        writes = [0]
+        original = KeyboardInterrupt("journal failed after publication")
+
+        def fail_journal(path, *args, **kwargs):
+            if path == self.suite.state_path:
+                writes[0] += 1
+                if writes[0] >= 2:
+                    raise original
+            return write(path, *args, **kwargs)
+
+        with patch.object(Path, "write_text", fail_journal):
+            with self.assertRaises(KeyboardInterrupt) as raised:
+                self.suite.run(sys.executable, "-c", "import time;time.sleep(30)",
+                               timeout=2, progress=True, progress_interval=0.1)
+        self.assertIs(raised.exception, original)
+        owner = self.suite.recovery_fallback
+        self.assertIsNotNone(owner.process)
+        self.assertTrue(owner.complete)
+        self.assertIs(owner.primary_error, original)
+        self.assertIsNotNone(owner.group_ownership.original)
+
     def run_ios_phase_contract(self, failure=None):
         destination = self.output / "phase-contract"
         suite = Suite(Namespace(platform="ios", output=destination, xcode_dir=None))

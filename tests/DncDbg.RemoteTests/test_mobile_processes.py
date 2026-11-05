@@ -225,6 +225,23 @@ class GroupIdentityTests(unittest.TestCase):
                 send.assert_not_called()
                 direct.assert_not_called()
 
+    def test_initial_capture_requires_the_retained_child_still_alive_after_both_identity_reads(self):
+        for exited, changed in ((True, False), (False, True)):
+            with self.subTest(exited=exited, changed=changed):
+                owner, identity = self.ownership()
+                owner.original = None
+                owner.members.clear()
+                owner.capture_state = "not-applicable"
+                owner.recovery.process.returncode = None
+                owner.recovery.process.poll.return_value = 0 if exited else None
+                later = dict(identity, startIdentity="different-birth") if changed else identity
+                with patch.object(validate, "process_identity", side_effect=[identity, later]), \
+                        patch.object(validate.os, "killpg") as send:
+                    owner.capture()
+                self.assertEqual(owner.capture_state, "unverified")
+                self.assertIsNone(owner.original)
+                send.assert_not_called()
+
     def test_changed_birth_session_or_uid_never_authorizes_a_signal(self):
         for field in ("startIdentity", "sid", "uid"):
             with self.subTest(field=field):

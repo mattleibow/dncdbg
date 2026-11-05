@@ -908,6 +908,69 @@ class MobileRunnerTests(unittest.TestCase):
             self.suite.save()
         self.assertEqual(json.loads(self.suite.state_path.read_text())["phase"], "pending")
 
+    def test_state_intent_is_fsynced_before_replace_and_directory_is_fsynced_before_return(self):
+        self.suite.state = {"phase": "pending", "cleanupDone": False}
+        write, replace, sync = Path.write_text, Path.replace, os.fsync
+        events = []
+
+        def writing(path, *args, **kwargs):
+            events.append("write")
+            return write(path, *args, **kwargs)
+
+        def replacing(path, target):
+            events.append("replace")
+            return replace(path, target)
+
+        def syncing(fd):
+            events.append("fsync-dir" if os.fstat(fd).st_mode & 0o170000 == 0o040000 else "fsync-file")
+            return sync(fd)
+
+        with patch.object(Path, "write_text", writing), patch.object(Path, "replace", replacing), \
+                patch("run_suite.os.fsync", side_effect=syncing):
+            self.suite.save()
+        self.assertEqual(events, ["write", "fsync-file", "replace", "fsync-dir"])
+        self.assertFalse(self.suite.state_path.with_name("state.json.pending").exists())
+        self.assertEqual(json.loads(self.suite.state_path.read_text())["phase"], "pending")
+
+    def test_failed_intent_fsync_prevents_any_command_launch(self):
+        with patch("run_suite.os.fsync", side_effect=OSError("intent sync failed")), \
+                patch("run_suite.start_owned", side_effect=AssertionError("No launch without durable intent")) as launch:
+            with self.assertRaisesRegex(OSError, "intent sync"):
+                self.suite.run("must-not-launch", timeout=1, progress=True)
+        launch.assert_not_called()
+        self.assertIsNone(self.suite.recovery_fallback.process)
+
+    def test_restarted_cleanup_manifest_uses_original_source_not_the_current_checkout(self):
+        self.suite.args.platform = "ios"
+        original = {"head": "a" * 40, "dirty": False}
+        self.suite.state = {"platform": "ios", "cleanupDone": False, "source": original}
+        self.suite.save()
+        restarted = Suite(Namespace(platform="ios", output=self.output, xcode_dir=None))
+        previous = signal.getsignal(signal.SIGTERM)
+        try:
+            with patch.object(sys, "argv", ["run_suite.py", "--platform", "ios", "--cleanup", "--output", str(self.output)]), \
+                    patch("run_suite.Suite", return_value=restarted), \
+                    patch("run_suite.subprocess.check_output", side_effect=["b" * 40, "dirty checkout"]) as current:
+                self.assertEqual(run_suite.main(), 0)
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+        manifest = json.loads((self.output / "evidence/manifest.json").read_text())
+        self.assertEqual(manifest["head"], original["head"])
+        self.assertEqual(manifest["dirty"], original["dirty"])
+        current.assert_not_called()
+
+    def test_core_manifest_keeps_the_redacted_prepublication_command_intent(self):
+        intent = {"state": "launch-pending", "provider": "simctl", "operation": "create", "nonce": "c" * 32,
+                  "runNonce": "d" * 32, "sourceHead": "a" * 40, "fingerprint": "e" * 64,
+                  "pid": None, "identityCapture": "not-applicable", "identity": None}
+        self.suite.state.update(commandIntent=intent, commandRecoveryRequired=True, cleanupDone=False)
+        core = self.suite.prepare_evidence("Original owner unavailable")
+        self.suite.persist_evidence_core()
+        self.assertEqual(core["commandIntent"], intent)
+        self.assertTrue(core["recoveriesUnavailable"])
+        self.assertFalse(core["passed"] or core["cleanup"])
+        self.assertEqual(json.loads((self.output / "evidence/manifest.json").read_text())["commandIntent"], intent)
+
     def test_ios_cleanup_uses_one_owned_sixty_second_budget(self):
         self.suite.args.platform = "ios"
         clock = [100]

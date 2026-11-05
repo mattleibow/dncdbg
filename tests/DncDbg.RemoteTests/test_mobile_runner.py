@@ -485,6 +485,23 @@ class MobileRunnerTests(unittest.TestCase):
         self.assertEqual(order, ["debugger"])
         ui.assert_not_called()
 
+    def test_explicit_launch_diagnostics_are_narrow_and_cannot_claim_full_qualification(self):
+        self.suite.args.platform = "ios"
+        self.suite.args.diagnose_launch = True
+        with patch.object(self.suite, "preflight"), patch.object(self.suite, "boot"), \
+                patch.object(self.suite, "build", return_value=("app", "assets")) as build, \
+                patch.object(self.suite, "fixture_proof") as proof, \
+                patch.object(self.suite, "broker") as broker, patch.object(self.suite, "proof") as full:
+            self.suite.execute()
+        build.assert_called_once_with()
+        proof.assert_called_once_with("app", "assets", "dap", "debugger-dap-broker-unavailable")
+        broker.assert_not_called()
+        full.assert_not_called()
+        del self.suite.args.diagnose_launch
+        self.suite.evidence(True, None)
+        manifest = json.loads((self.output / "evidence/manifest.json").read_text())
+        self.assertEqual(manifest["scope"], "direct-dap-diagnostics-only")
+
     def test_evidence_contains_head_and_hashes_but_not_credential_files(self):
         (self.output / "report.json").write_text('{"passed": true}')
         assets = self.output / "assets"

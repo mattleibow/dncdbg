@@ -231,11 +231,21 @@ remains a red gate, never a successful skip.
   post-deadline waits. Real parent/child tests require completion within a
   1.5-second test budget plus only 250 ms of scheduler tolerance, captured
   output, no surviving listener/PID and cancellation settlement.
-  If cancellation or another error arrives after the deadline, a synchronous
-  failure-only owner gets at most 200 ms within that scheduler tolerance to
-  terminate, drain and reap the exact group. This never admits success: an
-  `OwnedProcessSettlementError` chains the original error and records PID/group,
-  reaping/exit state and error types in bounded `.settlement.json` evidence.
+  If cancellation, settlement or output drain fails, a retained owner gets a
+  separate, absolute five-second **failure-recovery** lifecycle. This is not
+  extra operation/admission time and can never convert the failure to success.
+  Final cleanup awaits recovery and cannot report completion while leader,
+  original group or output drain is unverified. Cancellation remains primary
+  through final cleanup and evidence recording, and stops ordinary commands.
+  Bounded `.settlement.json` evidence separately records `leaderReaped`,
+  `groupAbsent`, `drainComplete`, partial stdout/stderr and recovery errors;
+  the suite's `resourceJournalClean` separately verifies its device resources.
+  Group absence is not universal descendant containment. Commands must not
+  daemonize unless an out-of-group resource has a separately journaled stable
+  identity; known daemon/background flags are rejected by the deadline runner.
+  CoreSimulator services are shared and never inferred to be owned. Device
+  mutation still requires the exact journaled simulator GUID/name; no ancestry
+  scan or guessed PID/service kill is authorized.
 - **`Mobile Android emulator (pinned)`** uses hosted **`ubuntu-24.04`**,
   explicitly enables/checks KVM and runs the **entire same** unified suite with
   the separate x64 pins. It does not merely cross-build an APK, run host fakes,

@@ -11,7 +11,103 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class OwnedProcessSettlementError(RuntimeError):
-    """The operation failed and its owner needed emergency settlement past its deadline."""
+    """Failed command with a retained, separately bounded recovery owner."""
+
+    def __init__(self, recovery):
+        self.recovery = recovery
+        super().__init__(f"Owned process/group {recovery.process.pid} required failure settlement; "
+                         f"leaderReaped={recovery.leader_reaped}, groupAbsent={recovery.group_absent}, "
+                         f"drainComplete={recovery.drain_complete}; see {recovery.log}.")
+
+
+def original_cancellation(error):
+    while error is not None:
+        if not isinstance(error, Exception):
+            return error
+        error = error.__cause__
+    return None
+
+
+class OwnedProcessRecovery:
+    """Own only the leader/original group; external resources need their own journal."""
+
+    def __init__(self, process, log, deadline):
+        self.process, self.log, self.deadline = process, log, deadline
+        self.recovery_deadline = None
+        self.leader_reaped = self.group_absent = self.drain_complete = False
+        self.stdout = self.stderr = b""
+        self.errors = []
+        self.primary_error = None
+
+    @property
+    def complete(self):
+        return self.leader_reaped and self.group_absent and self.drain_complete
+
+    @property
+    def stdout_text(self):
+        return self.stdout.decode("utf-8", errors="backslashreplace")
+
+    @property
+    def stderr_text(self):
+        return self.stderr.decode("utf-8", errors="backslashreplace")
+
+    def capture(self, stdout, stderr):
+        def merge(previous, current):
+            current = current.encode() if isinstance(current, str) else current or b""
+            return current if current.startswith(previous) else previous if previous.startswith(current) else previous + current
+        self.stdout, self.stderr = merge(self.stdout, stdout), merge(self.stderr, stderr)
+
+    def settle(self, deadline):
+        try:
+            if not self.group_absent:
+                available = deadline - time.monotonic()
+                if available <= 0:
+                    raise subprocess.TimeoutExpired(self.process.args, 0)
+                stop_owned(self.process, grace_period=min(0.1, available / 4),
+                           settle_timeout=max(0, available / 2), deadline=deadline)
+                self.group_absent = True
+            available = deadline - time.monotonic()
+            if available <= 0:
+                raise subprocess.TimeoutExpired(self.process.args, 0)
+            self.capture(*self.process.communicate(timeout=available))
+            self.drain_complete = True
+        except subprocess.TimeoutExpired as error:
+            self.capture(error.output, error.stderr)
+            self.errors.append(type(error).__name__)
+        except BaseException as error:
+            self.errors.append(type(error).__name__)
+        finally:
+            self.leader_reaped = self.process.poll() is not None
+        return self.complete
+
+    def finish(self):
+        if self.complete:
+            return True
+        if self.recovery_deadline is None:
+            self.recovery_deadline = time.monotonic() + 5
+        self.settle(self.recovery_deadline)
+        if self.complete or time.monotonic() >= self.recovery_deadline:
+            for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
+                if stream is not None:
+                    stream.close()
+        self.record()
+        return self.complete
+
+    def record(self):
+        if self.log:
+            Path(self.log).write_text(self.stdout_text + self.stderr_text)
+            Path(self.log).with_suffix(".settlement.json").write_text(json.dumps({
+                "pid": self.process.pid, "processGroup": self.process.pid,
+                "ownershipScope": "leader-and-original-process-group",
+                "leaderReaped": self.leader_reaped, "groupAbsent": self.group_absent,
+                "drainComplete": self.drain_complete, "resourceJournalClean": False,
+                "returnCode": self.process.returncode, "recoveryComplete": self.complete,
+                "primaryError": type(self.primary_error).__name__ if self.primary_error else None,
+                "deadlineExceeded": time.monotonic() > self.deadline,
+                "failureRecoveryBudgetSeconds": 5, "recoveryErrors": self.errors,
+                "partialStdout": self.stdout_text[-4000:], "partialStderr": self.stderr_text[-4000:],
+                "stdoutBytes": len(self.stdout), "stderrBytes": len(self.stderr),
+            }, indent=2))
 
 
 def start_owned(*args, **kwargs):
@@ -91,63 +187,41 @@ def run_owned(*args, env=None, check=True, input=None, timeout=180, log=None, cw
         if not available:
             raise subprocess.TimeoutExpired(args, timeout)
         reserve = min(1, available / 4)
-        process = start_owned(args, cwd=cwd, env=env, text=True,
+        if any(arg in ("--daemon", "--daemonize", "--background") for arg in args):
+            raise ValueError("Daemonizing commands require a separate stable resource journal, not group ownership.")
+        process = start_owned(args, cwd=cwd, env=env, text=False,
                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        failure = None
-        stdout, stderr = "", ""
+        owner = OwnedProcessRecovery(process, log, deadline)
         try:
             try:
-                stdout, stderr = process.communicate(input, timeout=min(timeout, max(0, deadline - time.monotonic() - reserve)))
+                owner.capture(*process.communicate(input.encode() if isinstance(input, str) else input,
+                    timeout=min(timeout, max(0, deadline - time.monotonic() - reserve))))
             except BaseException as error:
-                failure = error
+                owner.primary_error = error
                 if isinstance(error, subprocess.TimeoutExpired):
-                    stdout = error.output or ""
-                    stderr = error.stderr or ""
-                    stdout = stdout.decode(errors="replace") if isinstance(stdout, bytes) else stdout
-                    stderr = stderr.decode(errors="replace") if isinstance(stderr, bytes) else stderr
-            finally:
-                remaining = max(0, deadline - time.monotonic())
-                try:
-                    if not remaining:
-                        raise subprocess.TimeoutExpired(args, timeout)
-                    stop_owned(process, grace_period=min(0.25, remaining / 2),
-                               settle_timeout=remaining, deadline=deadline)
-                    stdout, stderr = process.communicate(timeout=max(0, deadline - time.monotonic()))
-                except BaseException as settlement:
-                    original = failure if failure is not None else settlement
-                    # Failure-only reaper, within the documented scheduler epsilon; never success.
-                    reap_deadline = time.monotonic() + 0.2
-                    reaped = False
-                    try:
-                        stop_owned(process, grace_period=0.05, settle_timeout=0.2, deadline=reap_deadline)
-                        stdout, stderr = process.communicate(timeout=max(0, reap_deadline - time.monotonic()))
-                        reaped = process.returncode is not None
-                    except BaseException as emergency:
-                        settlement = emergency
-                    if log:
-                        Path(log).with_suffix(".settlement.json").write_text(json.dumps({
-                            "pid": process.pid, "processGroup": process.pid, "reaped": reaped,
-                            "returnCode": process.returncode, "primaryError": type(original).__name__,
-                            "settlementError": type(settlement).__name__, "deadlineExceeded": time.monotonic() > deadline,
-                        }, indent=2))
-                    raise OwnedProcessSettlementError(
-                        f"Owned process {process.pid}/group {process.pid} required emergency settlement; "
-                        f"reaped={reaped}, returncode={process.returncode}; see {log}.") from original
+                    owner.capture(error.output, error.stderr)
+            if not owner.settle(deadline):
+                if owner.primary_error is None:
+                    owner.primary_error = subprocess.TimeoutExpired(args, timeout)
+                owner.finish()
+                raise OwnedProcessSettlementError(owner) from owner.primary_error
         finally:
-            for stream in (process.stdin, process.stdout, process.stderr):
-                if stream is not None:
-                    stream.close()
-            if log:
-                Path(log).write_text(stdout + stderr)
+            if owner.complete:
+                for stream in (process.stdin, process.stdout, process.stderr):
+                    if stream is not None:
+                        stream.close()
+            owner.record()
         if time.monotonic() > deadline:
-            raise subprocess.TimeoutExpired(args, timeout, output=stdout, stderr=stderr)
-        if failure is not None:
-            if isinstance(failure, subprocess.TimeoutExpired):
-                failure.output, failure.stderr = stdout, stderr
-            raise failure
-        result = subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
+            if owner.primary_error is None:
+                owner.primary_error = subprocess.TimeoutExpired(args, timeout)
+            raise OwnedProcessSettlementError(owner) from owner.primary_error
+        if owner.primary_error is not None:
+            if isinstance(owner.primary_error, subprocess.TimeoutExpired):
+                owner.primary_error.output, owner.primary_error.stderr = owner.stdout_text, owner.stderr_text
+            raise owner.primary_error
+        result = subprocess.CompletedProcess(args, process.returncode, owner.stdout_text, owner.stderr_text)
         if check and result.returncode:
-            raise RuntimeError(f"{args[0]} failed ({result.returncode}): {(stdout + stderr)[-4000:]}")
+            raise RuntimeError(f"{args[0]} failed ({result.returncode}): {(result.stdout + result.stderr)[-4000:]}")
         return result
     with start_owned(args, cwd=cwd, env=env, text=True, stdin=subprocess.PIPE if input is not None else None,
                      stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:

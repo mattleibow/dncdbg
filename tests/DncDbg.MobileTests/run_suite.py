@@ -17,7 +17,7 @@ import uuid
 
 from mobile_tools import ROOT, adb_path, android_sdk, tool_environment
 
-from process_tools import run_owned, start_owned, stop_owned
+from process_tools import OwnedProcessSettlementError, original_cancellation, run_owned, start_owned, stop_owned
 
 PIN = json.loads(Path(__file__).with_name("tuple.json").read_text())
 FIXTURE = ROOT / "tests/DncDbg.MauiTestApp"
@@ -64,6 +64,7 @@ class Suite:
         self.emulator = None
         self.emulator_log = None
         self.broker_process = None
+        self.process_recoveries = []
         self.android = PIN["androidX64" if getattr(args, "android_abi", "arm64-v8a") == "x86_64" else "android"]
         self.ios = PIN["iosX64" if getattr(args, "ios_architecture", "arm64") == "x64" else "ios"]
 
@@ -83,6 +84,14 @@ class Suite:
             try:
                 return run_owned(*(str(c) for c in command), cwd=cwd, env=self.env if environment is None else environment,
                                  timeout=timeout, check=check, input=input, log=log, deadline=deadline)
+            except OwnedProcessSettlementError as error:
+                self.process_recoveries.append(error.recovery)
+                self.state["processRecovery"] = [{
+                    "pid": r.process.pid, "processGroup": r.process.pid,
+                    "leaderReaped": r.leader_reaped, "groupAbsent": r.group_absent, "drainComplete": r.drain_complete,
+                } for r in self.process_recoveries]
+                self.save()
+                raise
             except subprocess.TimeoutExpired as error:
                 raise TimeoutError(f"{command[0]} exceeded its aggregate deadline; partial output: {log.relative_to(ROOT)}") from error
         process = subprocess.Popen([str(c) for c in command], cwd=cwd,
@@ -394,9 +403,19 @@ class Suite:
 
     def cleanup(self):
         errors = []
+        cancellation = None
         ios_deadline = time.monotonic() + IOS_CLEANUP_TIMEOUT if self.args.platform == "ios" else None
+        if not self.process_recoveries and any(not all(r.get(key, False) for key in
+                ("leaderReaped", "groupAbsent", "drainComplete")) for r in self.state.get("processRecovery", [])):
+            errors.append("Unverified process recovery journal from an unavailable original owner; refusing completion.")
+        for recovery in self.process_recoveries:
+            if not recovery.finish():
+                errors.append(f"Owned process/group {recovery.process.pid} failure recovery incomplete.")
 
         def clean(*command, **kwargs):
+            nonlocal cancellation
+            if cancellation is not None or any(not r.complete for r in self.process_recoveries):
+                return None
             try:
                 timeout = 30
                 if ios_deadline is not None and command[:2] == ("xcrun", "simctl"):
@@ -408,7 +427,8 @@ class Suite:
                 if ios_deadline is not None and command[:2] == ("xcrun", "simctl") and time.monotonic() > ios_deadline:
                     raise TimeoutError(f"Owned simulator cleanup exceeded {IOS_CLEANUP_TIMEOUT}s.")
                 return result
-            except Exception as error:
+            except BaseException as error:
+                cancellation = original_cancellation(error)
                 errors.append(str(error))
 
         device = self.state.get("device")
@@ -525,10 +545,22 @@ class Suite:
                     time.sleep(0.1)
                 else:
                     errors.append("Owned DevFlow broker listener remained after shutdown.")
-        shutil.rmtree(self.output / "work", ignore_errors=True)
+        if cancellation is None:
+            shutil.rmtree(self.output / "work", ignore_errors=True)
+        for recovery in self.process_recoveries:
+            if not recovery.finish():
+                errors.append(f"Owned process/group {recovery.process.pid} failure recovery incomplete.")
+        if self.process_recoveries:
+            self.state["processRecovery"] = [{
+                "pid": r.process.pid, "processGroup": r.process.pid,
+                "leaderReaped": r.leader_reaped, "groupAbsent": r.group_absent, "drainComplete": r.drain_complete,
+            } for r in self.process_recoveries]
         self.state["cleanupErrors"] = errors
+        self.state["resourceJournalClean"] = not errors
         self.state["cleanupDone"] = not errors
         self.save()
+        if cancellation is not None:
+            raise cancellation
         require(not errors, "Cleanup failed: " + "; ".join(errors))
 
     def evidence(self, passed, error):
@@ -538,6 +570,7 @@ class Suite:
                     "dirty": bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True).strip()),
                     "platform": self.args.platform, "pins": PIN, "passed": passed, "error": error,
                     "cleanup": self.state.get("cleanupDone", False),
+                    "resourceJournalClean": self.state.get("resourceJournalClean", self.state.get("cleanupDone", False)),
                     "cleanupErrors": self.state.get("cleanupErrors", []), "files": {}}
         if self.args.platform in ("ios", "android"):
             manifest["runtimeIdentifier"] = self.ios["rid"] if self.args.platform == "ios" else self.android["rid"]
@@ -601,7 +634,7 @@ def main():
     suite.output.mkdir(parents=True)
     suite.state = {"platform": args.platform, "cleanupDone": False}
     suite.save()
-    passed, error = False, None
+    passed, error, cancellation = False, None, None
 
     def interrupted(_signal, _frame):
         raise KeyboardInterrupt("Mobile run interrupted")
@@ -614,6 +647,7 @@ def main():
             suite.execute()
         passed = True
     except BaseException as failure:
+        cancellation = original_cancellation(failure)
         error = repr(failure)
         (suite.output / "failure.log").write_text(traceback.format_exc())
         print(error, file=sys.stderr, flush=True)
@@ -625,6 +659,7 @@ def main():
                 suite.state["cleanupDone"] = True
                 suite.save()
         except BaseException as failure:
+            cancellation = cancellation or original_cancellation(failure)
             passed, error = False, f"{error or ''}\nCleanup: {failure!r}"
             print(error, file=sys.stderr)
         try:
@@ -638,6 +673,8 @@ def main():
                 "passed": False, "error": error, "cleanup": suite.state.get("cleanupDone", False)}, indent=2))
             print(error, file=sys.stderr)
     print(f"{'PASS' if passed else 'FAIL'}: {args.platform}; evidence: {suite.output.relative_to(ROOT)}/evidence")
+    if cancellation is not None:
+        raise cancellation
     return 0 if passed else 1
 
 

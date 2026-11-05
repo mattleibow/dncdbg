@@ -269,6 +269,14 @@ remains a red gate, never a successful skip.
   itself with the tool, preserving PID/group identity without `preexec_fn`.
   Other signals/default launch paths are unchanged; this orchestration is
   explicitly POSIX-only and fails before launch on unsupported hosts.
+  A close-on-exec pipe reports only a bounded version/errno record on exec
+  failure, without environment or credentials. Parent-side reading shares the
+  absolute operation deadline; successful exec closes the pipe atomically.
+  Missing/denied/directory/invalid-format executables retain native `Popen`
+  exception class, errno and filename, not a trampoline traceback/exit code.
+  Partial malformed or stalled handshakes fail closed with ownership retained.
+  The trampoline also restores `Popen`'s native SIGPIPE/SIGXFZ/SIGXFSZ
+  dispositions rather than leaking Python's ignored-signal defaults into tools.
 - **`Mobile Android emulator (pinned)`** uses hosted **`ubuntu-24.04`**,
   explicitly enables/checks KVM and runs the **entire same** unified suite with
   the separate x64 pins. It does not merely cross-build an APK, run host fakes,

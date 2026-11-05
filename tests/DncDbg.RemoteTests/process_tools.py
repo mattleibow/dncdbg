@@ -1,6 +1,7 @@
 """Owned POSIX commands shared by remote/native/mobile test entrypoints."""
 import os
 import json
+import select
 import signal
 import socket
 import subprocess
@@ -40,10 +41,12 @@ class OwnedProcessRecovery:
         self.record_failure = None
         self.primary_error = None
         self.failure_exception = OwnedProcessSettlementError(self)
+        self.exec_error_read = self.exec_error_write = None
 
     @property
     def complete(self):
-        return self.process is None or self.leader_reaped and self.group_absent and self.drain_complete
+        return ((self.process is None or self.leader_reaped and self.group_absent and self.drain_complete)
+                and self.exec_error_read is None and self.exec_error_write is None)
 
     @property
     def stdout_text(self):
@@ -65,6 +68,48 @@ class OwnedProcessRecovery:
                 isinstance(current, subprocess.TimeoutExpired) and not isinstance(error, subprocess.TimeoutExpired) or
                 original_cancellation(error) is not None and original_cancellation(current) is None):
             self.primary_error = error
+
+    def close_exec_error_pipe(self, read=True):
+        previous = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+        try:
+            for name in (("exec_error_read", "exec_error_write") if read else ("exec_error_write",)):
+                fd = getattr(self, name)
+                if fd is not None:
+                    try:
+                        os.close(fd)
+                    finally:
+                        setattr(self, name, None)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+
+    def await_exec(self, command, deadline):
+        data = bytearray()
+        try:
+            while True:
+                available = deadline - time.monotonic()
+                if available <= 0 or not select.select([self.exec_error_read], [], [], max(0, available))[0]:
+                    raise subprocess.TimeoutExpired(command, max(0, available))
+                part = os.read(self.exec_error_read, 257 - len(data))
+                if not part:
+                    break
+                data.extend(part)
+                if len(data) > 256:
+                    raise RuntimeError("Owned exec-error record exceeds its bounded size.")
+            if data:
+                try:
+                    record = json.loads(data)
+                except (ValueError, UnicodeError) as error:
+                    raise RuntimeError("Malformed owned exec-error record.") from error
+                if (not isinstance(record, dict) or set(record) != {"version", "errno"}
+                        or type(record["version"]) is not int or record["version"] != 1
+                        or type(record["errno"]) is not int or not 0 < record["errno"] < 4096):
+                    raise RuntimeError("Invalid owned exec-error record.")
+                raise OSError(record["errno"], os.strerror(record["errno"]), command[0])
+        except BaseException as error:
+            self.preserve_error(error)
+            raise
+        finally:
+            self.close_exec_error_pipe()
 
     def settle(self, deadline):
         try:
@@ -88,6 +133,11 @@ class OwnedProcessRecovery:
             self.preserve_error(error)
             self.errors.append(type(error).__name__)
         finally:
+            try:
+                self.close_exec_error_pipe()
+            except BaseException as error:
+                self.preserve_error(error)
+                self.errors.append(type(error).__name__)
             self.leader_reaped = self.process.poll() is not None
         return self.complete
 
@@ -147,13 +197,27 @@ def start_owned(*args, owner=None, **kwargs):
         return subprocess.Popen(*args, start_new_session=True, **kwargs)
     previous = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
     try:
+        passed = tuple(kwargs.pop("pass_fds", ()))
+        for fd in passed:
+            os.fstat(fd)
+        owner.exec_error_read, owner.exec_error_write = os.pipe()
+        dispositions = []
+        for name in ("SIGPIPE", "SIGXFZ", "SIGXFSZ"):
+            if hasattr(signal, name):
+                number = getattr(signal, name)
+                value = signal.SIG_DFL if kwargs.get("restore_signals", True) or signal.getsignal(number) != signal.SIG_IGN else signal.SIG_IGN
+                dispositions.append(f"{int(number)}:{int(value)}")
         command = [sys.executable, "-I", str(Path(__file__).resolve()), "--restore-signal-mask",
-                   ",".join(str(int(value)) for value in previous), *(str(value) for value in args[0])]
-        process = subprocess.Popen(command, start_new_session=True, **kwargs)
+                   ",".join(str(int(value)) for value in previous), "--exec-error-fd", str(owner.exec_error_write),
+                   "--signal-dispositions", ",".join(dispositions), "--", *(os.fsdecode(value) for value in args[0])]
+        process = subprocess.Popen(command, start_new_session=True, pass_fds=(*passed, owner.exec_error_write), **kwargs)
         owner.process = process
         return process
     finally:
-        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+        try:
+            owner.close_exec_error_pipe(read=owner.process is None)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous)
 
 
 def stop_owned(process, grace_period=1, settle_timeout=1, deadline=None):
@@ -242,6 +306,7 @@ def run_owned(*args, env=None, check=True, input=None, timeout=180, log=None, cw
                 if owner_callback is not None:
                     owner_callback(owner)
                     callback_complete = True
+                owner.await_exec(args, deadline - reserve)
                 owner.capture(*process.communicate(input.encode() if isinstance(input, str) else input,
                     timeout=min(timeout, max(0, deadline - time.monotonic() - reserve))))
             except BaseException as error:
@@ -300,7 +365,21 @@ def run_owned(*args, env=None, check=True, input=None, timeout=180, log=None, cw
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 4 or sys.argv[1] != "--restore-signal-mask":
+    if (len(sys.argv) < 9 or sys.argv[1] != "--restore-signal-mask" or sys.argv[3] != "--exec-error-fd"
+            or sys.argv[5] != "--signal-dispositions" or sys.argv[7] != "--"):
         raise SystemExit("Internal owned-command exec trampoline.")
-    signal.pthread_sigmask(signal.SIG_SETMASK, {int(value) for value in sys.argv[2].split(",") if value})
-    os.execvpe(sys.argv[3], sys.argv[3:], os.environ)
+    error_fd = int(sys.argv[4])
+    try:
+        os.set_inheritable(error_fd, False)
+        for item in sys.argv[6].split(","):
+            number, disposition = item.split(":")
+            signal.signal(int(number), int(disposition))
+        signal.pthread_sigmask(signal.SIG_SETMASK, {int(value) for value in sys.argv[2].split(",") if value})
+        os.execvpe(sys.argv[8], sys.argv[8:], os.environ)
+    except OSError as error:
+        try:
+            message = json.dumps({"version": 1, "errno": error.errno}).encode()
+            while message:
+                message = message[os.write(error_fd, message):]
+        finally:
+            os._exit(255)

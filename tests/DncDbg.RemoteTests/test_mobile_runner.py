@@ -992,6 +992,107 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
         self.assertFalse(self.suite.state["cleanupDone"])
         self.assertFalse(self.suite.state["resourceJournalClean"])
 
+    def test_stop_and_second_drain_errors_remain_primary_after_mandatory_recovery(self):
+        for phase in ("stop", "drain"):
+            for original in (KeyboardInterrupt("stop/drain cancellation"), SystemExit(17), ValueError("stop/drain error")):
+                with self.subTest(phase=phase, error=type(original).__name__):
+                    real_start, real_stop = process_tools.start_owned, process_tools.stop_owned
+                    calls = []
+
+                    def stop(*args, **kwargs):
+                        if phase == "stop" and not calls:
+                            calls.append(True)
+                            raise original
+                        return real_stop(*args, **kwargs)
+
+                    def start(*args, **kwargs):
+                        process = real_start(*args, **kwargs)
+                        communicate = process.communicate
+                        count = []
+
+                        def drain(*args, **kwargs):
+                            count.append(True)
+                            if phase == "drain" and len(count) == 2:
+                                raise original
+                            return communicate(*args, **kwargs)
+                        process.communicate = drain
+                        return process
+
+                    with patch("process_tools.start_owned", side_effect=start), \
+                            patch("process_tools.stop_owned", side_effect=stop):
+                        try:
+                            self.suite.run(sys.executable, "-c", "print('mandatory recovery output')",
+                                           deadline=time.monotonic() + 2)
+                        except BaseException as error:
+                            self.assertTrue(error is original or error.__cause__ is original)
+                        else:
+                            self.fail("Stop/drain failure cannot return success.")
+                    self.assertTrue(self.suite.process_recoveries[-1].complete)
+                    self.assertIs(self.suite.process_recoveries[-1].primary_error, original)
+
+    def test_evidence_write_failure_never_loses_owner_or_original_cancellation(self):
+        original = KeyboardInterrupt("cancel with full disk")
+        real_start = process_tools.start_owned
+
+        def start(*args, **kwargs):
+            process = real_start(*args, **kwargs)
+            communicate = process.communicate
+            calls = []
+
+            def cancel(*args, **kwargs):
+                if not calls:
+                    calls.append(True)
+                    raise original
+                return communicate(*args, **kwargs)
+            process.communicate = cancel
+            return process
+
+        with patch("process_tools.start_owned", side_effect=start), \
+                patch.object(Path, "write_text", side_effect=OSError("evidence disk full")):
+            try:
+                self.suite.run(sys.executable, "-c", "print('output before cancellation')",
+                               deadline=time.monotonic() + 2)
+            except BaseException as error:
+                self.assertTrue(error is original or error.__cause__ is original)
+            else:
+                self.fail("Cancellation cannot become success when evidence is unwritable.")
+            self.assertTrue(self.suite.process_recoveries)
+            recovery = self.suite.process_recoveries[-1]
+            self.assertTrue(recovery.complete)
+            self.assertTrue(recovery.record_errors)
+            with self.assertRaises(KeyboardInterrupt) as caught:
+                self.suite.cleanup()
+            self.assertIs(caught.exception, original)
+            self.assertFalse(self.suite.state["cleanupDone"])
+
+    def test_incomplete_recovery_owner_survives_unwritable_logs_and_state(self):
+        real_start = process_tools.start_owned
+
+        def start(*args, **kwargs):
+            process = real_start(*args, **kwargs)
+            communicate = process.communicate
+            calls = []
+
+            def drain(*args, **kwargs):
+                if not calls:
+                    calls.append(True)
+                    communicate(*args, **kwargs)
+                raise subprocess.TimeoutExpired(process.args, 0, output=b"unwritten partial")
+            process.communicate = drain
+            return process
+
+        with patch("process_tools.start_owned", side_effect=start), \
+                patch.object(Path, "write_text", side_effect=OSError("unwritable evidence")):
+            with self.assertRaises(process_tools.OwnedProcessSettlementError) as caught:
+                self.suite.run(sys.executable, "-c", "pass", deadline=time.monotonic() + 1)
+            self.assertIn(caught.exception.recovery, self.suite.process_recoveries)
+            self.assertTrue(caught.exception.recovery.leader_reaped)
+            self.assertFalse(caught.exception.recovery.drain_complete)
+            self.assertTrue(caught.exception.recovery.record_errors)
+            with self.assertRaises(RuntimeError):
+                self.suite.cleanup()
+            self.assertFalse(self.suite.state["cleanupDone"])
+
     @unittest.skipUnless(os.name == "posix", "POSIX command ownership")
     def test_real_invalid_output_bytes_are_preserved_independently_of_reaping(self):
         result = self.suite.run(sys.executable, "-c",

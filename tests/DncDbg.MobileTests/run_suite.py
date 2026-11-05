@@ -83,14 +83,17 @@ class Suite:
             log = self.output / f"{self.number:03d}-{Path(str(command[0])).name}.log"
             try:
                 return run_owned(*(str(c) for c in command), cwd=cwd, env=self.env if environment is None else environment,
-                                 timeout=timeout, check=check, input=input, log=log, deadline=deadline)
+                                 timeout=timeout, check=check, input=input, log=log, deadline=deadline,
+                                 owner_callback=self.process_recoveries.append)
             except OwnedProcessSettlementError as error:
-                self.process_recoveries.append(error.recovery)
                 self.state["processRecovery"] = [{
                     "pid": r.process.pid, "processGroup": r.process.pid,
                     "leaderReaped": r.leader_reaped, "groupAbsent": r.group_absent, "drainComplete": r.drain_complete,
                 } for r in self.process_recoveries]
-                self.save()
+                try:
+                    self.save()
+                except OSError as write_error:
+                    error.recovery.record_errors.append(f"state.json: {write_error}")
                 raise
             except subprocess.TimeoutExpired as error:
                 raise TimeoutError(f"{command[0]} exceeded its aggregate deadline; partial output: {log.relative_to(ROOT)}") from error
@@ -411,6 +414,11 @@ class Suite:
         for recovery in self.process_recoveries:
             if not recovery.finish():
                 errors.append(f"Owned process/group {recovery.process.pid} failure recovery incomplete.")
+            if recovery.record_errors:
+                errors.extend(recovery.record_errors)
+            cancellation = cancellation or original_cancellation(recovery.primary_error)
+        if cancellation is not None:
+            errors.append("Resource cleanup interrupted; journaled resources remain unverified.")
 
         def clean(*command, **kwargs):
             nonlocal cancellation
@@ -558,7 +566,11 @@ class Suite:
         self.state["cleanupErrors"] = errors
         self.state["resourceJournalClean"] = not errors
         self.state["cleanupDone"] = not errors
-        self.save()
+        try:
+            self.save()
+        except OSError as write_error:
+            errors.append(f"state.json: {write_error}")
+            self.state["cleanupDone"] = self.state["resourceJournalClean"] = False
         if cancellation is not None:
             raise cancellation
         require(not errors, "Cleanup failed: " + "; ".join(errors))
@@ -649,7 +661,10 @@ def main():
     except BaseException as failure:
         cancellation = original_cancellation(failure)
         error = repr(failure)
-        (suite.output / "failure.log").write_text(traceback.format_exc())
+        try:
+            (suite.output / "failure.log").write_text(traceback.format_exc())
+        except OSError as write_error:
+            error += f"\nFailure evidence: {write_error}"
         print(error, file=sys.stderr, flush=True)
     finally:
         try:
@@ -669,8 +684,11 @@ def main():
             error = f"{error or ''}\nEvidence: {failure!r}"
             destination = suite.output / "evidence"
             destination.mkdir(exist_ok=True)
-            (destination / "manifest.json").write_text(json.dumps({
-                "passed": False, "error": error, "cleanup": suite.state.get("cleanupDone", False)}, indent=2))
+            try:
+                (destination / "manifest.json").write_text(json.dumps({
+                    "passed": False, "error": error, "cleanup": suite.state.get("cleanupDone", False)}, indent=2))
+            except OSError as write_error:
+                print(f"Evidence failure: {write_error}", file=sys.stderr)
             print(error, file=sys.stderr)
     print(f"{'PASS' if passed else 'FAIL'}: {args.platform}; evidence: {suite.output.relative_to(ROOT)}/evidence")
     if cancellation is not None:

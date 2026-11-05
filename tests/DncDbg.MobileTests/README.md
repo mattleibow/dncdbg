@@ -246,6 +246,12 @@ remains a red gate, never a successful skip.
   CoreSimulator services are shared and never inferred to be owned. Device
   mutation still requires the exact journaled simulator GUID/name; no ancestry
   scan or guessed PID/service kill is authorized.
+  The owner is registered in the suite before evidence I/O. Unwritable logs or
+  state are separately retained as recording errors and fail the run without
+  discarding ownership or replacing a primary cancellation. Non-timeout errors
+  during TERM/KILL or the final drain retain their original exception/cause;
+  only timeout is an expected settlement condition; cancellation or other
+  faults remain primary while mandatory owned recovery completes.
 - **`Mobile Android emulator (pinned)`** uses hosted **`ubuntu-24.04`**,
   explicitly enables/checks KVM and runs the **entire same** unified suite with
   the separate x64 pins. It does not merely cross-build an APK, run host fakes,

@@ -37,6 +37,7 @@ class OwnedProcessRecovery:
         self.leader_reaped = self.group_absent = self.drain_complete = False
         self.stdout = self.stderr = b""
         self.errors = []
+        self.record_errors = []
         self.primary_error = None
 
     @property
@@ -57,6 +58,13 @@ class OwnedProcessRecovery:
             return current if current.startswith(previous) else previous if previous.startswith(current) else previous + current
         self.stdout, self.stderr = merge(self.stdout, stdout), merge(self.stderr, stderr)
 
+    def preserve_error(self, error):
+        current = self.primary_error
+        if (current is None or
+                isinstance(current, subprocess.TimeoutExpired) and not isinstance(error, subprocess.TimeoutExpired) or
+                original_cancellation(error) is not None and original_cancellation(current) is None):
+            self.primary_error = error
+
     def settle(self, deadline):
         try:
             if not self.group_absent:
@@ -73,8 +81,10 @@ class OwnedProcessRecovery:
             self.drain_complete = True
         except subprocess.TimeoutExpired as error:
             self.capture(error.output, error.stderr)
+            self.preserve_error(error)
             self.errors.append(type(error).__name__)
         except BaseException as error:
+            self.preserve_error(error)
             self.errors.append(type(error).__name__)
         finally:
             self.leader_reaped = self.process.poll() is not None
@@ -95,8 +105,7 @@ class OwnedProcessRecovery:
 
     def record(self):
         if self.log:
-            Path(self.log).write_text(self.stdout_text + self.stderr_text)
-            Path(self.log).with_suffix(".settlement.json").write_text(json.dumps({
+            report = {
                 "pid": self.process.pid, "processGroup": self.process.pid,
                 "ownershipScope": "leader-and-original-process-group",
                 "leaderReaped": self.leader_reaped, "groupAbsent": self.group_absent,
@@ -105,9 +114,19 @@ class OwnedProcessRecovery:
                 "primaryError": type(self.primary_error).__name__ if self.primary_error else None,
                 "deadlineExceeded": time.monotonic() > self.deadline,
                 "failureRecoveryBudgetSeconds": 5, "recoveryErrors": self.errors,
+                "recordErrors": self.record_errors,
                 "partialStdout": self.stdout_text[-4000:], "partialStderr": self.stderr_text[-4000:],
                 "stdoutBytes": len(self.stdout), "stderrBytes": len(self.stderr),
-            }, indent=2))
+            }
+            for path, is_report in ((Path(self.log), False), (Path(self.log).with_suffix(".settlement.json"), True)):
+                try:
+                    report["primaryError"] = type(self.primary_error).__name__ if self.primary_error else None
+                    content = json.dumps(report, indent=2) if is_report else self.stdout_text + self.stderr_text
+                    path.write_text(content)
+                except OSError as error:
+                    self.record_errors.append(f"{path.name}: {error}")
+                    if self.primary_error is None:
+                        self.primary_error = error
 
 
 def start_owned(*args, **kwargs):
@@ -180,7 +199,7 @@ def native_listener_closed(port, forwarded):
         return False
 
 
-def run_owned(*args, env=None, check=True, input=None, timeout=180, log=None, cwd=ROOT, deadline=None):
+def run_owned(*args, env=None, check=True, input=None, timeout=180, log=None, cwd=ROOT, deadline=None, owner_callback=None):
     if deadline is not None:
         # Reserve settlement time inside the caller's budget, not after its expiry.
         available = max(0, deadline - time.monotonic())
@@ -192,12 +211,14 @@ def run_owned(*args, env=None, check=True, input=None, timeout=180, log=None, cw
         process = start_owned(args, cwd=cwd, env=env, text=False,
                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         owner = OwnedProcessRecovery(process, log, deadline)
+        if owner_callback is not None:
+            owner_callback(owner)
         try:
             try:
                 owner.capture(*process.communicate(input.encode() if isinstance(input, str) else input,
                     timeout=min(timeout, max(0, deadline - time.monotonic() - reserve))))
             except BaseException as error:
-                owner.primary_error = error
+                owner.preserve_error(error)
                 if isinstance(error, subprocess.TimeoutExpired):
                     owner.capture(error.output, error.stderr)
             if not owner.settle(deadline):
@@ -216,6 +237,8 @@ def run_owned(*args, env=None, check=True, input=None, timeout=180, log=None, cw
                 owner.primary_error = subprocess.TimeoutExpired(args, timeout)
             raise OwnedProcessSettlementError(owner) from owner.primary_error
         if owner.primary_error is not None:
+            if owner.record_errors:
+                raise OwnedProcessSettlementError(owner) from owner.primary_error
             if isinstance(owner.primary_error, subprocess.TimeoutExpired):
                 owner.primary_error.output, owner.primary_error.stderr = owner.stdout_text, owner.stderr_text
             raise owner.primary_error

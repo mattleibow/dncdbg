@@ -1093,6 +1093,32 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
                 self.suite.cleanup()
             self.assertFalse(self.suite.state["cleanupDone"])
 
+    def test_completed_process_does_not_make_cancelled_resource_cleanup_successful(self):
+        original = KeyboardInterrupt("cancelled before resource cleanup")
+        real_start = process_tools.start_owned
+
+        def start(*args, **kwargs):
+            process = real_start(*args, **kwargs)
+            communicate = process.communicate
+            calls = []
+
+            def cancel(*args, **kwargs):
+                if not calls:
+                    calls.append(True)
+                    raise original
+                return communicate(*args, **kwargs)
+            process.communicate = cancel
+            return process
+
+        with patch("process_tools.start_owned", side_effect=start), self.assertRaises(KeyboardInterrupt):
+            self.suite.run(sys.executable, "-c", "pass", deadline=time.monotonic() + 2)
+        self.assertTrue(self.suite.process_recoveries[-1].complete)
+        with patch.object(self.suite, "run") as run, self.assertRaises(KeyboardInterrupt):
+            self.suite.cleanup()
+        run.assert_not_called()
+        self.assertFalse(self.suite.state["resourceJournalClean"])
+        self.assertFalse(self.suite.state["cleanupDone"])
+
     @unittest.skipUnless(os.name == "posix", "POSIX command ownership")
     def test_real_invalid_output_bytes_are_preserved_independently_of_reaping(self):
         result = self.suite.run(sys.executable, "-c",

@@ -13,6 +13,19 @@ class Program
 {
     static int Main(string[] args)
     {
+        if (args.Length == 1 && args[0] == "--harness-contracts")
+        {
+            try
+            {
+                Console.WriteLine("Passed {0} test-harness contracts.", HarnessContractChecks.Run());
+                return 0;
+            }
+            catch (Exception failure)
+            {
+                Console.Error.WriteLine(failure);
+                return 1;
+            }
+        }
         var cli = new CLInterface(args);
         DebuggerClient? debugger = null;
         ControlScript? script = null;

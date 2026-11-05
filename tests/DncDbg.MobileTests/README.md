@@ -184,6 +184,9 @@ screenshots and cleanup result. Credentials, tools, compiled assets and AVD data
 are excluded; credential-shaped logs fail closed. Limits: **8 MiB/file,
 100 MiB/run**, 50-minute CI jobs, three-minute recovery, seven-day artifacts.
 Failed gates preserve evidence, not successful-looking partial results.
+Failure traceback collection supports the macOS system Python 3.9 API as well
+as the pinned portable-contract interpreter; cancellation retains its original
+exception after collection.
 
 Build budgets are separate from debugger/RPC and fault deadlines. The first
 hosted iOS attempt exceeded 600 seconds in a cold Release build with no useful

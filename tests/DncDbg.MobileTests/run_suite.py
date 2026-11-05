@@ -722,7 +722,8 @@ def main():
         # All rich reporting/bookkeeping is inside the outer non-escaping perimeter.
         error = repr(primary) if primary is not None else None
         if primary is not None:
-            (suite.output / "failure.log").write_text("".join(traceback.format_exception(primary)))
+            (suite.output / "failure.log").write_text(
+                "".join(traceback.format_exception(type(primary), primary, primary.__traceback__)))
             print(error, file=sys.stderr, flush=True)
         if args.cleanup and error is None:
             error = "Recovery after an interrupted mobile run; rerun all gates on a fresh output."

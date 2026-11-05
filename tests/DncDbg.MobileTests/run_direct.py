@@ -223,11 +223,21 @@ def dap_proof(app, args, assets, environment):
         app.native_cleanup()
         return info["sessionId"]
     finally:
-        if sys.exc_info()[0] is not None and not app.serial:
-            collect_ios_failure(app, args)
-        dap.close()
-        pool.shutdown(wait=True, cancel_futures=True)
-        (args.output / "dap.json").write_text(json.dumps(dap.transcript, indent=2))
+        try:
+            if sys.exc_info()[0] is not None and not app.serial:
+                try:
+                    collect_ios_failure(app, args)
+                except BaseException as error:
+                    try:
+                        print("iOS failure collection failed: " + repr(error), file=sys.stderr, flush=True)
+                    except BaseException:
+                        pass
+        finally:
+            try:
+                dap.close()
+            finally:
+                pool.shutdown(wait=True, cancel_futures=True)
+                (args.output / "dap.json").write_text(json.dumps(dap.transcript, indent=2))
 
 
 def collect_ios_failure(app, args):
@@ -241,14 +251,6 @@ def collect_ios_failure(app, args):
             app.run(*command, timeout=10, log=name)
         except Exception as error:
             failures.append({"file": name, "error": repr(error)})
-    crashes = Path.home() / "Library/Logs/DiagnosticReports"
-    for path in sorted(crashes.glob("DncDbg.MauiTestApp-*.ips"))[-4:]:
-        try:
-            if path.stat().st_size > 1024 * 1024:
-                raise ValueError("App crash report exceeds the 1 MiB evidence bound.")
-            (args.output / (path.stem + ".log")).write_bytes(path.read_bytes())
-        except Exception as error:
-            failures.append({"file": path.name, "error": repr(error)})
     (args.output / "failure-collection.json").write_text(json.dumps({"errors": failures}, indent=2))
 
 

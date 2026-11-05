@@ -21,6 +21,7 @@ public sealed class AppleSimulatorProvider : IRemoteTargetProvider
     private readonly ApplicationInstallation installation;
     private readonly ApplicationPackageIdentity package;
     private readonly string? outputRoot;
+    private readonly Action<string> log;
     private string? data;
     private string session = "";
     private bool installed, started;
@@ -31,8 +32,9 @@ public sealed class AppleSimulatorProvider : IRemoteTargetProvider
     public string? ArtifactsPath => outputRoot == null ? null : Path.Combine(Path.GetFullPath(outputRoot), "apple-" + session);
 
     public AppleSimulatorProvider(AppleSimulatorOptions options, string agentManifest, ApplicationInstallation installation,
-        string? outputRoot = null)
+        string? outputRoot = null, Action<string>? log = null)
     {
+        this.log = RemoteDiagnostics.Safe(log ?? Console.Error.WriteLine);
         this.outputRoot = outputRoot;
         this.options = options;
         this.installation = installation;
@@ -92,11 +94,8 @@ public sealed class AppleSimulatorProvider : IRemoteTargetProvider
     {
         var failures = new List<Exception>();
         async Task Attempt(Func<Task> action) { try { await action(); } catch (Exception e) { failures.Add(e); } }
-        await Attempt(() =>
-        {
-            CaptureEvidence();
-            return Task.CompletedTask;
-        });
+        try { CaptureEvidence(); }
+        catch (Exception error) { log($"Apple startup evidence failed: {error.GetType().Name}: {error.Message}"); }
         await Attempt(async () =>
         {
             if (!started || data == null) return;

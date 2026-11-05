@@ -45,7 +45,7 @@ internal sealed class DebugAdapter : IDisposable
     public DebugAdapter(DapConnection connection, Action<string> log)
     {
         _connection = connection;
-        _log = log;
+        _log = DncDbg.Remote.RemoteDiagnostics.Safe(log);
         _engine = CreateEngine();
     }
 

@@ -34,6 +34,7 @@ internal sealed class RemoteLifecycle(IRemoteTargetProvider target, ITunnelProvi
 
     private async Task ConnectCoreAsync(CancellationToken token)
     {
+        log = RemoteDiagnostics.Safe(log);
         if (startupTimeoutSeconds is < 1 or > 300)
             throw new ArgumentOutOfRangeException(nameof(startupTimeoutSeconds));
         using var startup = CancellationTokenSource.CreateLinkedTokenSource(token, acquisitionCancellation.Token);

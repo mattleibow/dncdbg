@@ -43,7 +43,7 @@ internal sealed class RemoteSession : IDisposable
         this.options = options;
         this.createLifecycle = createLifecycle;
         this.connection = connection;
-        this.log = log;
+        this.log = RemoteDiagnostics.Safe(log);
         this.toClientLine = toClientLine;
         this.fromClientLine = fromClientLine;
     }

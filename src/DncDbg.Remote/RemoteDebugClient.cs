@@ -20,7 +20,7 @@ public sealed partial class RemoteDebugClient : IAsyncDisposable
     public static async Task<RemoteDebugClient> ConnectAsync(RemoteEndpoint endpoint, CancellationToken cancellationToken,
         Action<string>? trace = null)
     {
-        var result = new RemoteDebugClient { trace = trace };
+        var result = new RemoteDebugClient { trace = RemoteDiagnostics.Safe(trace) };
         try
         {
             await result.client.ConnectAsync(IPAddress.Loopback, endpoint.Port, cancellationToken);
@@ -65,10 +65,10 @@ public sealed partial class RemoteDebugClient : IAsyncDisposable
         {
             throw new TimeoutException("Remote debugger RPC queue exceeded its 30-second deadline.", error);
         }
+        long started = Stopwatch.GetTimestamp();
         try
         {
             long id = ++sequence;
-            long started = Stopwatch.GetTimestamp();
             if (id <= 4096) trace?.Invoke($"DNC1 operation={operation} sequence={id} phase=started");
             NetworkStream stream = client.GetStream();
             await RemoteProtocol.WriteAsync(stream, new(RemoteProtocol.Version, id, operation, RemoteProtocol.Pack(body)), operationToken);
@@ -82,7 +82,7 @@ public sealed partial class RemoteDebugClient : IAsyncDisposable
         }
         catch (Exception e) when (e is not RemoteRequestException)
         {
-            trace?.Invoke($"DNC1 operation={operation} sequence={sequence} phase=failed error={e.GetType().Name} callerCancelled={token.IsCancellationRequested} rpcDeadlineCancelled={deadline.IsCancellationRequested}");
+            trace?.Invoke($"DNC1 operation={operation} sequence={sequence} phase=failed elapsedMs={Stopwatch.GetElapsedTime(started).TotalMilliseconds:F3} error={e.GetType().Name} callerCancelled={token.IsCancellationRequested} rpcDeadlineCancelled={deadline.IsCancellationRequested}");
             // A canceled partial request cannot safely reuse a sequential framed stream.
             client.Dispose();
             disposed = true;

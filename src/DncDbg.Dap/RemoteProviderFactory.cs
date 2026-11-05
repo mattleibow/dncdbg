@@ -30,7 +30,7 @@ internal static class RemoteProviderFactory
                 "android" when target.Android != null => new AndroidTargetProvider(target.Android,
                     Path.Combine(options.AssetsPath, "dncdbg-agent.json"), installation, options.OutputPath),
                 "appleSimulator" when target.Apple != null => new AppleSimulatorProvider(target.Apple,
-                    Path.Combine(options.AssetsPath, "dncdbg-agent.json"), installation, options.OutputPath),
+                    Path.Combine(options.AssetsPath, "dncdbg-agent.json"), installation, options.OutputPath, log),
                 _ => throw new PlatformNotSupportedException("Unknown target provider or incompatible typed configuration."),
             };
             if (target.Provider == "appleDevice" && provider.Profile?.Runtime.Platform != "iOSDevice")

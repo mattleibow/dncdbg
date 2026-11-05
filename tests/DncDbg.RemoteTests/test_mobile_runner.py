@@ -1941,6 +1941,52 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
         self.assertIs(owner.primary_error, original)
         self.assertIsNotNone(owner.group_ownership.original)
 
+    @unittest.skipUnless(os.name == "posix", "POSIX deadline ownership")
+    def test_deadline_command_persists_intent_and_verified_birth_before_receive(self):
+        start, await_exec = process_tools.start_owned, process_tools.OwnedProcessRecovery.await_exec
+        snapshots = []
+
+        def launch(*args, **kwargs):
+            before = json.loads(self.suite.state_path.read_text())
+            self.assertTrue(before["commandRecoveryRequired"])
+            self.assertEqual(before["commandIntent"]["state"], "launch-pending")
+            self.assertIsNone(before["commandIntent"]["pid"])
+            snapshots.append(before)
+            return start(*args, **kwargs)
+
+        def receive(owner, *args, **kwargs):
+            after = json.loads(self.suite.state_path.read_text())
+            self.assertTrue(after["commandRecoveryRequired"])
+            intent = after["commandIntent"]
+            self.assertEqual(intent["state"], "owned")
+            self.assertEqual(intent["identityCapture"], "verified")
+            self.assertEqual(intent["pid"], owner.process.pid)
+            self.assertEqual(intent["identity"]["pgid"], owner.process.pid)
+            self.assertEqual(intent["identity"]["sid"], owner.process.pid)
+            self.assertEqual(intent["identity"]["uid"], os.geteuid())
+            self.assertTrue(intent["identity"]["startIdentity"])
+            self.assertEqual(len(intent["fingerprint"]), 64)
+            snapshots.append(after)
+            return await_exec(owner, *args, **kwargs)
+
+        with patch("process_tools.start_owned", side_effect=launch), \
+                patch.object(process_tools.OwnedProcessRecovery, "await_exec", receive):
+            result = self.suite.run(sys.executable, "-c", "print('exact deadline output')",
+                                    deadline=time.monotonic() + 2)
+        self.assertEqual(result.stdout.strip(), "exact deadline output")
+        self.assertFalse(self.suite.state["commandRecoveryRequired"])
+        self.assertEqual(self.suite.state["commandIntent"]["state"], "settled")
+        for i, snapshot in enumerate(snapshots):
+            destination = self.output / f"restart-{i}"
+            destination.mkdir()
+            restarted = Suite(Namespace(platform="ios", output=destination, xcode_dir=None))
+            restarted.state = snapshot
+            with patch.object(restarted, "run", side_effect=AssertionError("No guessed recovery command")) as ordinary:
+                with self.assertRaises(RuntimeError):
+                    restarted.cleanup()
+            ordinary.assert_not_called()
+            self.assertFalse(restarted.state["cleanupDone"])
+
     def run_ios_phase_contract(self, failure=None):
         destination = self.output / "phase-contract"
         suite = Suite(Namespace(platform="ios", output=destination, xcode_dir=None))

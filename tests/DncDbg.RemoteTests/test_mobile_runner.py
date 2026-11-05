@@ -1876,6 +1876,35 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
                 self.assertTrue(owner.record_errors)
                 self.assertIsNotNone(owner.process.returncode)
 
+    @unittest.skipUnless(os.name == "posix", "POSIX build timeout evidence")
+    def test_progress_timeout_stays_primary_through_later_diagnostic_cancellation(self):
+        preserve, write = process_tools.OwnedProcessRecovery.preserve_error, Path.write_text
+        for suffix in (".status.json", ".settlement.json"):
+            for secondary in (SystemExit("late diagnostic exit"), KeyboardInterrupt("late diagnostic interrupt")):
+                with self.subTest(suffix=suffix, secondary=type(secondary).__name__):
+                    first = []
+
+                    def observe(owner, error):
+                        if isinstance(error, TimeoutError) and not first:
+                            first.append(error)
+                        return preserve(owner, error)
+
+                    def fail_diagnostic(path, *args, **kwargs):
+                        if path.name.endswith(suffix):
+                            raise secondary
+                        return write(path, *args, **kwargs)
+
+                    with patch.object(process_tools.OwnedProcessRecovery, "preserve_error", observe), \
+                            patch.object(Path, "write_text", fail_diagnostic):
+                        with self.assertRaises(BaseException) as raised:
+                            self.suite.run(sys.executable, "-c", "import time;time.sleep(30)",
+                                           timeout=0.25, progress=True, progress_interval=0.05)
+                    self.assertTrue(first)
+                    self.assertIs(raised.exception, first[0])
+                    self.assertIs(self.suite.recovery_fallback.primary_error, first[0])
+                    self.assertTrue(self.suite.recovery_fallback.complete)
+                    self.assertTrue(self.suite.recovery_fallback.record_errors)
+
     def test_restarted_cleanup_refuses_an_unverified_command_launch_intent(self):
         self.suite.args.platform = "ios"
         self.suite.state["commandRecoveryRequired"] = True

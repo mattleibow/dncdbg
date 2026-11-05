@@ -2029,7 +2029,7 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
         original = KeyboardInterrupt("journal failed after publication")
 
         def fail_journal(path, *args, **kwargs):
-            if path == self.suite.state_path:
+            if path == self.suite.state_path.with_name(self.suite.state_path.name + ".pending"):
                 writes[0] += 1
                 if writes[0] >= 2:
                     raise original
@@ -2092,10 +2092,12 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
             ordinary.assert_not_called()
             self.assertFalse(restarted.state["cleanupDone"])
 
-    def run_ios_phase_contract(self, failure=None):
-        destination = self.output / "phase-contract"
+    def run_ios_phase_contract(self, failure=None, evidence_failure=None):
+        destination = self.output / ("phase-contract-" + uuid.uuid4().hex)
         suite = Suite(Namespace(platform="ios", output=destination, xcode_dir=None))
         calls = []
+        collect, make, write = suite.evidence, Path.mkdir, Path.write_text
+        failures = [0]
 
         def build(configuration="Debug", faults=False):
             calls.append(("build", configuration, faults))
@@ -2110,6 +2112,10 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
                 (assets / name).write_bytes(b"exact fixture identity")
             if configuration == "Release" and failure == "debug-mutated":
                 (destination / "Debug-assets/DncDbg.MauiTestApp.pdb").write_bytes(b"changed by Release")
+            if evidence_failure == "credential":
+                (destination / "invalid.json").write_text('{"Token":"must-not-upload"}')
+            elif evidence_failure == "oversize":
+                (destination / "huge.log").write_bytes(b"x" * (8 * 1024 * 1024 + 1))
             return app, assets
 
         def fixture(app, assets, proof, name, disconnect=False):
@@ -2120,7 +2126,32 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
         def cleanup():
             calls.append(("cleanup",))
             suite.state["cleanupDone"] = failure != "cleanup-unverified"
+            suite.state["buildGroupSettled"] = True
+            suite.state["simulatorJournalClean"] = failure != "cleanup-unverified"
+            suite.state["resourceJournalClean"] = failure != "cleanup-unverified"
             suite.save()
+
+        def mkdir(path, *args, **kwargs):
+            if evidence_failure == "mkdir" and path == destination / "evidence" and not failures[0]:
+                failures[0] += 1
+                raise OSError("controlled evidence mkdir failure")
+            return make(path, *args, **kwargs)
+
+        def write_text(path, *args, **kwargs):
+            if evidence_failure == "write" and path.name == "manifest.json.pending" and not failures[0]:
+                failures[0] += 1
+                raise OSError("controlled core manifest write failure")
+            return write(path, *args, **kwargs)
+
+        def evidence(passed, error):
+            if evidence_failure in ("mock", "late-cancel"):
+                core = json.loads((destination / "evidence/manifest.json").read_text())
+                self.assertFalse(core["passed"])
+                self.assertEqual(len(core["head"]), 40)
+                if evidence_failure == "late-cancel":
+                    raise KeyboardInterrupt("secondary report cancellation")
+                raise RuntimeError("controlled optional collector failure")
+            return collect(passed, error)
 
         previous = signal.getsignal(signal.SIGTERM)
         try:
@@ -2129,7 +2160,8 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
                     patch.object(suite, "boot"), patch.object(suite, "broker"), \
                     patch.object(suite, "build", side_effect=build), patch.object(suite, "fixture_proof", side_effect=fixture), \
                     patch.object(suite, "proof", side_effect=lambda helper, *a: calls.append(("proof", helper))), \
-                    patch.object(suite, "cleanup", side_effect=cleanup):
+                    patch.object(suite, "cleanup", side_effect=cleanup), patch.object(suite, "evidence", side_effect=evidence), \
+                    patch.object(Path, "mkdir", mkdir), patch.object(Path, "write_text", write_text):
                 result = run_suite.main()
         finally:
             signal.signal(signal.SIGTERM, previous)
@@ -2193,6 +2225,35 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
         self.assertTrue(manifest["phases"]["complete"])
         self.assertFalse(manifest["passed"] or manifest["cleanup"])
         self.assertIn("cleanup", manifest["error"].lower())
+
+    def test_optional_evidence_failures_keep_the_complete_core_manifest(self):
+        for failure in ("credential", "oversize", "mkdir", "write", "mock"):
+            with self.subTest(failure=failure):
+                result, _, manifest = self.run_ios_phase_contract(evidence_failure=failure)
+                self.assertEqual(result, 1)
+                self.assertFalse(manifest["passed"])
+                self.assertEqual(len(manifest["head"]), 40)
+                self.assertIn("dirty", manifest)
+                self.assertEqual(manifest["platform"], "ios")
+                self.assertEqual(manifest["runtimeIdentifier"], self.suite.ios["rid"])
+                self.assertEqual(manifest["pins"], PIN)
+                self.assertTrue(manifest["phases"]["complete"])
+                self.assertEqual(manifest["phases"]["required"], manifest["phases"]["completed"])
+                self.assertTrue(manifest["buildGroupSettled"])
+                self.assertTrue(manifest["simulatorJournalClean"])
+                self.assertTrue(manifest["resourceJournalClean"] and manifest["cleanup"])
+                self.assertEqual(manifest["cleanupErrors"], [])
+                self.assertIn("processRecovery", manifest)
+                self.assertFalse(manifest["recoveriesUnavailable"])
+                self.assertTrue(manifest["error"])
+
+    def test_build_timeout_is_not_replaced_by_later_optional_report_cancellation(self):
+        result, _, manifest = self.run_ios_phase_contract("release", "late-cancel")
+        self.assertEqual(result, 1)
+        self.assertFalse(manifest["passed"])
+        self.assertIn("controlled Release timeout", manifest["error"])
+        self.assertTrue(manifest["error"].startswith("TimeoutError"))
+        self.assertTrue(any("KeyboardInterrupt" in error for error in manifest["evidenceErrors"]))
 
     def test_fault_failure_still_restores_ordinary_native_helper(self):
         builds = []

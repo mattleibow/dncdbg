@@ -918,6 +918,26 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
         self.assertIn("top-level cancellation", manifest["error"])
         self.assertIn("KeyboardInterrupt", (destination / "failure.log").read_text())
 
+    def test_mobile_failure_evidence_uses_the_python39_traceback_contract(self):
+        destination = self.output / "python39-evidence"
+        formatter = run_suite.traceback.format_exception
+
+        def legacy_format(exception_type, exception, traceback):
+            return formatter(exception_type, exception, traceback)
+
+        previous = signal.getsignal(signal.SIGTERM)
+        try:
+            with patch.object(sys, "argv", ["run_suite.py", "--platform", "ios", "--output", str(destination)]), \
+                    patch.object(Suite, "execute", side_effect=RuntimeError("controlled startup failure")), \
+                    patch.object(Suite, "cleanup"), patch.object(run_suite.traceback, "format_exception", legacy_format):
+                self.assertEqual(run_suite.main(), 1)
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+        manifest = json.loads((destination / "evidence/manifest.json").read_text())
+        self.assertFalse(manifest["passed"])
+        self.assertIn("controlled startup failure", manifest["error"])
+        self.assertIn("RuntimeError", (destination / "failure.log").read_text())
+
     @unittest.skipUnless(os.name == "posix", "POSIX command ownership")
     def test_deadline_recovery_separates_reaped_leader_from_failed_partial_drain(self):
         log = self.output / "drain.log"

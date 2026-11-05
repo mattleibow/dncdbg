@@ -95,17 +95,22 @@ class Suite:
                                  timeout=timeout, check=check, input=input, log=log, deadline=deadline,
                                  owner_callback=self.process_recoveries.append, recovery_owner=owner)
             except OwnedProcessSettlementError as error:
-                self.recovery_fallback = error.recovery
+                first_error, first_cause = error, error.__cause__
                 try:
-                    self.state["processRecovery"] = [{
-                        "pid": r.process.pid, "processGroup": r.process.pid,
-                        "leaderReaped": r.leader_reaped, "groupAbsent": r.group_absent, "drainComplete": r.drain_complete,
-                    } for r in self.owned_recoveries()]
-                    self.save()
-                except BaseException as write_error:
-                    error.recovery.record_errors.append(f"state.json: {write_error}")
-                    error.recovery.preserve_error(write_error)
-                raise error from error.recovery.primary_error
+                    try:
+                        self.state["processRecovery"] = [{
+                            "pid": r.process.pid, "processGroup": r.process.pid,
+                            "leaderReaped": r.leader_reaped, "groupAbsent": r.group_absent, "drainComplete": r.drain_complete,
+                        } for r in self.owned_recoveries()]
+                        self.save()
+                    except BaseException as recording_failure:
+                        first_error.recovery.record_failure = recording_failure
+                        try:
+                            first_error.recovery.record_errors.append(type(recording_failure).__name__)
+                        except BaseException:
+                            pass
+                finally:
+                    raise first_error from first_cause
             except subprocess.TimeoutExpired as error:
                 raise TimeoutError(f"{command[0]} exceeded its aggregate deadline; partial output: {log.relative_to(ROOT)}") from error
         process = subprocess.Popen([str(c) for c in command], cwd=cwd,

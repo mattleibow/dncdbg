@@ -4,6 +4,7 @@ import json
 import signal
 import socket
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -139,10 +140,20 @@ class OwnedProcessRecovery:
                     self.preserve_error(error)
 
 
-def start_owned(*args, **kwargs):
+def start_owned(*args, owner=None, **kwargs):
     if os.name != "posix":
         raise RuntimeError("The remote integration runner requires POSIX process-group ownership")
-    return subprocess.Popen(*args, start_new_session=True, **kwargs)
+    if owner is None:
+        return subprocess.Popen(*args, start_new_session=True, **kwargs)
+    previous = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+    try:
+        command = [sys.executable, "-I", str(Path(__file__).resolve()), "--restore-signal-mask",
+                   ",".join(str(int(value)) for value in previous), *(str(value) for value in args[0])]
+        process = subprocess.Popen(command, start_new_session=True, **kwargs)
+        owner.process = process
+        return process
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
 
 
 def stop_owned(process, grace_period=1, settle_timeout=1, deadline=None):
@@ -222,12 +233,12 @@ def run_owned(*args, env=None, check=True, input=None, timeout=180, log=None, cw
         owner = recovery_owner if recovery_owner is not None else OwnedProcessRecovery(None, log, deadline)
         if owner.process is not None:
             raise ValueError("An owned command cannot reuse an existing process owner.")
-        owner.process = start_owned(args, cwd=cwd, env=env, text=False,
-                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        process = owner.process
         callback_complete = owner_callback is None
         try:
             try:
+                start_owned(args, owner=owner, cwd=cwd, env=env, text=False,
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                process = owner.process
                 if owner_callback is not None:
                     owner_callback(owner)
                     callback_complete = True
@@ -237,6 +248,8 @@ def run_owned(*args, env=None, check=True, input=None, timeout=180, log=None, cw
                 owner.preserve_error(error)
                 if isinstance(error, subprocess.TimeoutExpired):
                     owner.capture(error.output, error.stderr)
+            if owner.process is None:
+                raise owner.primary_error
             if not owner.settle(deadline):
                 if owner.primary_error is None:
                     owner.primary_error = subprocess.TimeoutExpired(args, timeout)
@@ -245,7 +258,8 @@ def run_owned(*args, env=None, check=True, input=None, timeout=180, log=None, cw
             if not callback_complete:
                 raise owner.failure_exception from owner.primary_error
         finally:
-            if owner.complete:
+            process = owner.process
+            if process is not None and owner.complete:
                 for stream in (process.stdin, process.stdout, process.stderr):
                     if stream is not None:
                         stream.close()
@@ -283,3 +297,10 @@ def run_owned(*args, env=None, check=True, input=None, timeout=180, log=None, cw
     if check and result.returncode:
         raise RuntimeError(f"{args[0]} failed ({result.returncode}): {(result.stdout + result.stderr)[-4000:]}")
     return result
+
+
+if __name__ == "__main__":
+    if len(sys.argv) < 4 or sys.argv[1] != "--restore-signal-mask":
+        raise SystemExit("Internal owned-command exec trampoline.")
+    signal.pthread_sigmask(signal.SIG_SETMASK, {int(value) for value in sys.argv[2].split(",") if value})
+    os.execvpe(sys.argv[3], sys.argv[3:], os.environ)

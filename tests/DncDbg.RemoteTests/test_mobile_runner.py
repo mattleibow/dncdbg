@@ -1346,6 +1346,14 @@ elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
                 process_tools.start_owned(["not-launched"])
             popen.assert_not_called()
 
+    @unittest.skipUnless(os.name == "posix", "POSIX publication signal mask")
+    def test_owned_exec_restores_the_original_child_signal_mask(self):
+        expected = sorted(int(value) for value in signal.pthread_sigmask(signal.SIG_BLOCK, set()))
+        result = self.suite.run(sys.executable, "-c",
+            "import json,signal;print(json.dumps(sorted(int(v) for v in signal.pthread_sigmask(signal.SIG_BLOCK,set()))))",
+            deadline=time.monotonic() + 2)
+        self.assertEqual(json.loads(result.stdout), expected)
+
     def test_state_handler_bookkeeping_cannot_replace_original_notification_cancellation(self):
         original = KeyboardInterrupt("first notification cancellation")
 

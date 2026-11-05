@@ -263,6 +263,12 @@ remains a red gate, never a successful skip.
   perimeter covers all report construction, formatting and bookkeeping.
   Under exhausted memory, rich evidence may be unavailable: ownership
   settlement and the first cancellation take precedence over allocating logs.
+  On POSIX, the launcher briefly masks only SIGINT/SIGTERM across `Popen` and
+  exact owner publication, then immediately restores the parent mask. An
+  isolated exec trampoline restores the original child mask before replacing
+  itself with the tool, preserving PID/group identity without `preexec_fn`.
+  Other signals/default launch paths are unchanged; this orchestration is
+  explicitly POSIX-only and fails before launch on unsupported hosts.
 - **`Mobile Android emulator (pinned)`** uses hosted **`ubuntu-24.04`**,
   explicitly enables/checks KVM and runs the **entire same** unified suite with
   the separate x64 pins. It does not merely cross-build an APK, run host fakes,

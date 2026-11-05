@@ -386,7 +386,7 @@ class MobileDapTests(unittest.TestCase):
                             self.state / "assets" / ("RemoteBreakpointApp." + extension))
         self.env = {**os.environ, "PATH": str(self.state / "tools") + os.pathsep + os.environ["PATH"],
                     "DNCDBG_FAKE_DEVICE": str(self.state), "ANDROID_HOME": str(self.state / "sdk"), "JAVA_HOME": ""}
-        self.dap = Dap(self.env)
+        self.dap = Dap(self.env, arguments=("--log=" + str(self.state / "adapter.log"),))
         self.dap.request("initialize", {"adapterID": "dncdbg", "linesStartAt1": True})
 
     def tearDown(self):
@@ -605,6 +605,31 @@ class MobileDapTests(unittest.TestCase):
         self.assertFalse(any(c[0] == "adb" or "uninstall" in c for c in commands))
         self.assertIn(9, self.remote.operations)
 
+    def test_ios_evidence_is_redacted_and_retained_before_descriptor_cleanup(self):
+        output = self.state / "targets"
+        self.remote = Remote(self.state, "iOS")
+        library = self.state / "Library"
+        native = '{"Phase":"authenticated-native-session","HResult":"0x00000000"}\n'
+        (library / "dncdbg-startup.jsonl").write_text(native)
+        launch = self.dap.send("launch", self.arguments(
+            self.options("iosSimulator") | {"outputPath": str(output)}))
+        self.dap.request("configurationDone")
+        self.dap.response(launch)
+        self.dap.request("disconnect", {"terminateDebuggee": True})
+        self.dap.event("terminated")
+        snapshots = list(output.glob("apple-*/descriptor.json"))
+        self.assertEqual(len(snapshots), 1)
+        descriptor = json.loads(snapshots[0].read_text())
+        self.assertEqual(descriptor["Process"]["Id"], 123)
+        self.assertEqual(descriptor["Endpoint"]["Port"], self.remote.endpoint["Port"])
+        self.assertNotIn("Token", descriptor["Endpoint"])
+        self.assertEqual((snapshots[0].parent / "dncdbg-startup.jsonl").read_text(), native)
+        self.assertFalse((library / "dncdbg-remote.json").exists())
+        log = (self.state / "adapter.log").read_text()
+        self.assertIn("operation=Hello sequence=1 phase=completed", log)
+        self.assertIn("stage=configuration-complete", log)
+        self.assertNotIn(self.remote.endpoint["Token"], log + snapshots[0].read_text())
+
     def test_ios_replacement_removes_stale_descriptor_before_delayed_publication(self):
         self.remote = Remote(self.state, "iOS")
         (self.state / "installed").touch()
@@ -639,6 +664,11 @@ class MobileDapTests(unittest.TestCase):
         commands = [json.loads(row) for row in (self.state / "commands.jsonl").read_text().splitlines()]
         self.assertEqual(sum("uninstall" in row for row in commands), 1)
         self.assertEqual(sum("--remove" in row for row in commands), 1)
+        log = (self.state / "adapter.log").read_text()
+        self.assertIn("stage=configure", log)
+        self.assertIn("startupCancelled=True lifetimeCancelled=False", log)
+        self.assertIn("operation=Configure sequence=2 phase=failed", log)
+        self.assertNotIn(self.remote.endpoint["Token"], log)
     def test_deep_stack_pages_preserve_truthful_totals(self):
         self.launch("android")
         self.remote.stack_count = 151

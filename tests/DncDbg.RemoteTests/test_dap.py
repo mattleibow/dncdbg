@@ -580,6 +580,35 @@ class MobileDapTests(unittest.TestCase):
         self.assertIn("Apple startup evidence failed", (self.state / "adapter.log").read_text())
         self.assertFalse((self.state / "installed").exists())
 
+    def assert_ios_descriptor_redaction(self, endpoint_name, token_name):
+        self.remote = Remote(self.state, "iOS")
+        output = self.state / "targets"
+        launch = self.dap.send("launch", self.arguments(
+            self.options("iosSimulator") | {"outputPath": str(output)}))
+        self.dap.request("configurationDone")
+        self.dap.response(launch)
+        path = self.state / "Library/dncdbg-remote.json"
+        descriptor = json.loads(path.read_text())
+        endpoint = descriptor.pop("Endpoint")
+        endpoint[token_name] = endpoint.pop("Token")
+        descriptor[endpoint_name] = endpoint
+        path.write_text(json.dumps(descriptor))
+        self.dap.request("disconnect", {"terminateDebuggee": True})
+        self.dap.event("terminated")
+        snapshots = list(output.glob("apple-*/descriptor.json"))
+        self.assertEqual(len(snapshots), 1)
+        content = snapshots[0].read_text()
+        redacted = json.loads(content)
+        self.assertFalse(any(name.lower() == "token" for name in redacted[endpoint_name]))
+        self.assertNotIn(self.remote.endpoint["Token"], content)
+        self.assertFalse(path.exists())
+
+    def test_ios_descriptor_redacts_camelcase_credentials(self):
+        self.assert_ios_descriptor_redaction("endpoint", "token")
+
+    def test_ios_descriptor_redacts_mixedcase_credentials(self):
+        self.assert_ios_descriptor_redaction("EnDpOiNt", "tOkEn")
+
     def test_failure_collection_cannot_mask_launch_failure_or_skip_dap_cleanup(self):
         sys.path.insert(0, str(ROOT / "tests/DncDbg.MobileTests"))
         from run_direct import dap_proof

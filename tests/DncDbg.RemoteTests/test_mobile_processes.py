@@ -33,7 +33,7 @@ def waiting_child():
             signal.pause()
 
 
-def waiting_parent(destination):
+def waiting_parent(destination, ignore_term=False):
     child = subprocess.Popen([sys.executable, __file__, "--waiting-child"],
                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
 
@@ -41,12 +41,18 @@ def waiting_parent(destination):
 
     def terminate(_signal, _frame):
         nonlocal stopping
-        stopping = True
+        if not ignore_term:
+            stopping = True
 
     signal.signal(signal.SIGTERM, terminate)
     record = json.loads(child.stdout.readline())
     record["parent"] = os.getpid()
     Path(destination).write_text(json.dumps(record))
+    print("owned helper ready", flush=True)
+    if ignore_term:
+        signal.signal(signal.SIGCHLD, lambda *_: child.poll())
+        while True:
+            signal.pause()
     while not stopping and child.poll() is None:
         time.sleep(0.02)
     if child.poll() is None:

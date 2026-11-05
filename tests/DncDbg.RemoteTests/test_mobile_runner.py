@@ -7,8 +7,10 @@ import runpy
 from pathlib import Path
 import shutil
 import signal
+import socket
 import subprocess
 import sys
+import time
 import unittest
 import xml.etree.ElementTree as ET
 from unittest.mock import patch
@@ -24,6 +26,7 @@ from run_device import verify_ui, Ui
 from run_direct import unavailable_broker_environment, FixtureApp
 from assert_artifacts import verify
 from fake_adb import FakeAdbDaemon
+from test_mobile_processes import alive
 
 
 class MobileRunnerTests(unittest.TestCase):
@@ -715,6 +718,90 @@ class MobileRunnerTests(unittest.TestCase):
                 self.suite.cleanup()
         self.assertEqual([kwargs["timeout"] for _, kwargs in commands], [60, 20])
         self.assertFalse(self.suite.state["cleanupDone"])
+
+    def ios_deadline_helper(self, mode):
+        helper = self.output / "xcrun"
+        helper.write_text(f"""#!{sys.executable}
+import os, sys
+from pathlib import Path
+sys.path.insert(0, {str(ROOT / "tests/DncDbg.RemoteTests")!r})
+from test_mobile_processes import waiting_parent
+if sys.argv[2] == "create":
+    print("12345678-1234-1234-1234-123456789abc")
+elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
+    waiting_parent(os.environ["DNCDBG_TEST_PROCESS_RECORD"], ignore_term=True)
+""")
+        helper.chmod(0o700)
+        self.suite.args.platform = "ios"
+        self.suite.env["PATH"] = str(self.output) + os.pathsep + os.environ["PATH"]
+        record = self.output / "owned-processes.json"
+        self.suite.env["DNCDBG_TEST_PROCESS_RECORD"] = str(record)
+        return record
+
+    def assert_ios_deadline_owned_processes_gone(self, record):
+        self.assertTrue(record.is_file(), "The real parent/child must reach the timeout path.")
+        owned = json.loads(record.read_text())
+        self.assertFalse(alive(owned["parent"]), "Timed-out group leader must be reaped.")
+        self.assertFalse(alive(owned["child"]), "Timed-out child must be reaped, not orphaned.")
+        with socket.socket() as connection:
+            self.assertNotEqual(connection.connect_ex(("127.0.0.1", owned["port"])), 0)
+        self.assertTrue(any("owned helper ready" in p.read_text() for p in self.output.glob("*.log")))
+
+    @unittest.skipUnless(os.name == "posix", "POSIX command ownership")
+    def test_real_ios_boot_timeout_includes_term_kill_drain_and_reap(self):
+        record = self.ios_deadline_helper("boot")
+        budget = 1.5
+        started = time.monotonic()
+        try:
+            with patch("run_suite.IOS_BOOT_TIMEOUT", budget), self.assertRaises(TimeoutError):
+                self.suite.boot()
+            self.assertLessEqual(time.monotonic() - started, budget + 0.25)
+            self.assert_ios_deadline_owned_processes_gone(record)
+        finally:
+            if record.exists():
+                owned = json.loads(record.read_text())
+                for pid in (owned["parent"], owned["child"]):
+                    if alive(pid):
+                        os.kill(pid, signal.SIGKILL)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX command ownership")
+    def test_real_ios_cleanup_timeout_includes_term_kill_drain_and_reap(self):
+        record = self.ios_deadline_helper("cleanup")
+        budget = 1.5
+        started = time.monotonic()
+        with patch("run_suite.IOS_CLEANUP_TIMEOUT", budget), self.assertRaisesRegex(RuntimeError, "Cleanup failed"):
+            self.suite.cleanup()
+        self.assertLessEqual(time.monotonic() - started, budget + 0.25)
+        self.assert_ios_deadline_owned_processes_gone(record)
+        self.assertFalse(self.suite.state["cleanupDone"])
+
+    @unittest.skipUnless(os.name == "posix", "POSIX command ownership")
+    def test_real_ios_cancellation_still_settles_owned_group_within_deadline(self):
+        record = self.ios_deadline_helper("cleanup")
+        from process_tools import start_owned
+        communicate = []
+
+        def start(*args, **kwargs):
+            process = start_owned(*args, **kwargs)
+            original = process.communicate
+
+            def cancel(*args, **kwargs):
+                if not communicate:
+                    ready = time.monotonic() + 1
+                    while not record.exists() and time.monotonic() < ready:
+                        time.sleep(0.01)
+                    communicate.append(True)
+                    raise KeyboardInterrupt()
+                return original(*args, **kwargs)
+            process.communicate = cancel
+            return process
+
+        started = time.monotonic()
+        with patch("process_tools.start_owned", side_effect=start), self.assertRaises(KeyboardInterrupt):
+            self.suite.run("xcrun", "simctl", "list", "devices", "-j",
+                           timeout=1.5, deadline=started + 1.5)
+        self.assertLessEqual(time.monotonic() - started, 1.75)
+        self.assert_ios_deadline_owned_processes_gone(record)
 
     def test_ios_cleanup_refuses_another_device_identity(self):
         self.suite.args.platform = "ios"

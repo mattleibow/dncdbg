@@ -643,10 +643,78 @@ class MobileRunnerTests(unittest.TestCase):
 
     def test_ios_cleanup_is_idempotent_after_partial_deletion(self):
         self.suite.args.platform = "ios"
-        with patch.object(self.suite, "run", return_value=subprocess.CompletedProcess([], 0, '{"devices":{}}', "")) as run:
+        with patch("run_suite.time.monotonic", return_value=100), \
+                patch.object(self.suite, "run", return_value=subprocess.CompletedProcess([], 0, '{"devices":{}}', "")) as run:
             self.suite.cleanup()
-        run.assert_called_once_with("xcrun", "simctl", "list", "devices", "-j", timeout=30)
+        run.assert_called_once_with("xcrun", "simctl", "list", "devices", "-j", timeout=60)
         self.assertTrue(self.suite.state["cleanupDone"])
+
+    def test_ios_boot_budget_requires_exact_owned_booted_device(self):
+        self.suite.args.platform = "ios"
+        device = "12345678-1234-1234-1234-123456789abc"
+        commands = []
+
+        def run(*command, **kwargs):
+            commands.append((command, kwargs))
+            text = device if command[2] == "create" else json.dumps({"devices": {
+                self.suite.ios["runtime"]: [{"udid": device, "name": self.suite.state["name"], "state": "Booted"}]}})
+            return subprocess.CompletedProcess(command, 0, text, "")
+
+        with patch("run_suite.time.monotonic", return_value=100), patch.object(self.suite, "run", side_effect=run):
+            self.suite.boot()
+        self.assertIn((("xcrun", "simctl", "bootstatus", device, "-b"), {"timeout": 600}), commands)
+        self.assertEqual(commands[-1][0], ("xcrun", "simctl", "list", "devices", "-j"))
+        report = json.loads((self.output / "ios-provisioning.json").read_text())
+        self.assertEqual(report["timeoutSeconds"], 600)
+        self.assertEqual(report["device"], device)
+        self.assertTrue(report["ready"])
+        self.assertFalse(report["complete"])
+
+    def test_ios_bootstatus_success_without_owned_readiness_is_not_qualification(self):
+        self.suite.args.platform = "ios"
+        device = "12345678-1234-1234-1234-123456789abc"
+        for field, value in (("state", "Shutdown"), ("name", "another-owner"), ("udid", "another-device")):
+            def run(*command, **kwargs):
+                entry = {"udid": device, "name": self.suite.state["name"], "state": "Booted"} | {field: value}
+                text = device if command[2] == "create" else json.dumps({"devices": {self.suite.ios["runtime"]: [entry]}})
+                return subprocess.CompletedProcess(command, 0, text, "")
+            with self.subTest(field=field), patch.object(self.suite, "run", side_effect=run):
+                with self.assertRaisesRegex(RuntimeError, "owned simulator.*Booted"):
+                    self.suite.boot()
+            self.assertFalse(json.loads((self.output / "ios-provisioning.json").read_text())["ready"])
+
+    def test_ios_boot_rejects_success_after_aggregate_provisioning_deadline(self):
+        self.suite.args.platform = "ios"
+        clock = [100]
+
+        def run(*command, **kwargs):
+            if command[2] == "bootstatus":
+                clock[0] += 601
+            return subprocess.CompletedProcess(command, 0, "owned-device", "")
+
+        with patch("run_suite.time.monotonic", side_effect=lambda: clock[0]), \
+                patch.object(self.suite, "run", side_effect=run):
+            with self.assertRaisesRegex(TimeoutError, "provisioning.*600"):
+                self.suite.boot()
+        self.assertFalse(json.loads((self.output / "ios-provisioning.json").read_text())["ready"])
+
+    def test_ios_cleanup_uses_one_owned_sixty_second_budget(self):
+        self.suite.args.platform = "ios"
+        clock = [100]
+        commands = []
+
+        def run(*command, **kwargs):
+            commands.append((command, kwargs))
+            entry = {"udid": self.suite.state["device"], "name": self.suite.state["name"], "state": "Booted"}
+            clock[0] += 40
+            return subprocess.CompletedProcess(command, 0, json.dumps({"devices": {"runtime": [entry]}}), "")
+
+        with patch("run_suite.time.monotonic", side_effect=lambda: clock[0]), \
+                patch.object(self.suite, "run", side_effect=run):
+            with self.assertRaisesRegex(RuntimeError, "cleanup.*60"):
+                self.suite.cleanup()
+        self.assertEqual([kwargs["timeout"] for _, kwargs in commands], [60, 20])
+        self.assertFalse(self.suite.state["cleanupDone"])
 
     def test_ios_cleanup_refuses_another_device_identity(self):
         self.suite.args.platform = "ios"

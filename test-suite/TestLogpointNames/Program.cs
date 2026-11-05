@@ -18,6 +18,8 @@ class Program
             foreach (string name in new[] { "main", "named", "unnamed", "renamed", "generic" })
                 Context.AddBreakpoint(@"__FILE__:__LINE__", name, logMessage: Context.NameTokenTemplate(name));
             Context.AddBreakpoint(@"__FILE__:__LINE__", "async", logMessage: "async={$FUNCTION}|plain={$FUNCTION,nq}");
+            Context.AddBreakpoint(@"__FILE__:__LINE__", "caller",
+                logMessage: "literal=$CALLER|caller={$CALLER}|plain={$CALLER,nq}|same={$CALLER == $CALLER}|hit={$HITCOUNT}");
             Context.AddBreakpoint(@"__FILE__:__LINE__", "after");
             Context.SetBreakpoints(@"__FILE__:__LINE__");
             Context.ConfigurationDone(@"__FILE__:__LINE__");
@@ -75,6 +77,7 @@ class Program
     static void Generic<T>(T value)
     {
         GC.KeepAlive(value);                                          Label.Breakpoint("generic");
+        CallerTarget();
     }
 
     static async Task Async(int number, string text)
@@ -82,6 +85,12 @@ class Program
         await Task.Yield();
         GC.KeepAlive(number);                                         Label.Breakpoint("async");
         GC.KeepAlive(text);
+        CallerTarget();
+    }
+
+    static void CallerTarget()
+    {
+        GC.KeepAlive(Thread.CurrentThread);                            Label.Breakpoint("caller");
     }
 }
 }
@@ -102,8 +111,18 @@ partial class Context
         CheckNameTokenLine(callerTrace, "renamed", "Worker()", "worker \"$FUNCTION\"\\name", 1);
         CheckNameTokenLine(callerTrace, "renamed", "Worker()", "worker \"$FUNCTION\"\\name", 2);
         CheckNameTokenLine(callerTrace, "generic", "Generic<int>(int value)", "named \"$PID\"\\thread", 1);
+        CheckCallerTokenLine(callerTrace, "Generic<int>(int value)", 1);
         string function = "TestLogpointNames.Program.Async(int number, string text)";
         WasOutputEvent(callerTrace, "console", "async=" + JsonConvert.SerializeObject(function) + "|plain=" + function + "\n");
+        CheckCallerTokenLine(callerTrace, "Async(int number, string text)", 2);
+    }
+
+    void CheckCallerTokenLine(string callerTrace, string method, int hit)
+    {
+        string caller = "TestLogpointNames.Program." + method;
+        WasOutputEvent(callerTrace, "console",
+            "literal=$CALLER|caller=" + JsonConvert.SerializeObject(caller) + "|plain=" + caller +
+            "|same=true|hit=" + hit + "\n");
     }
 
     void CheckNameTokenLine(string callerTrace, string label, string method, string thread, int hit)

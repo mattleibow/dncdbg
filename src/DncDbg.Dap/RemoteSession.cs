@@ -66,10 +66,12 @@ internal sealed class RemoteSession : IDisposable
         long began = Stopwatch.GetTimestamp();
         string stage = "symbols";
         int configured = 0;
-        using var startup = CancellationTokenSource.CreateLinkedTokenSource(Token);
-        startup.CancelAfter(TimeSpan.FromSeconds(options.StartupTimeoutSeconds));
+        CancellationToken startupToken = default;
         try
         {
+            using var startup = CancellationTokenSource.CreateLinkedTokenSource(Token);
+            startup.CancelAfter(TimeSpan.FromSeconds(options.StartupTimeoutSeconds));
+            startupToken = startup.Token;
             log($"Remote startup session={lifecycle.SessionId} stage={stage} deadlineSeconds={options.StartupTimeoutSeconds}");
             symbols = new RemoteSymbols(options.AssetsPath, options.SourceFileMap);
             log($"Remote startup session={lifecycle.SessionId} stage=symbols-complete modules={symbols.Modules.Length} methods={symbols.Modules.Sum(m => m.Methods.Length)} types={symbols.Modules.Sum(m => m.Types.Length)} elapsedMs={Stopwatch.GetElapsedTime(began).TotalMilliseconds:F3}");
@@ -87,7 +89,7 @@ internal sealed class RemoteSession : IDisposable
         }
         catch (Exception failure)
         {
-            log($"Remote startup failed session={lifecycle.SessionId} stage={stage} completedChunks={configured} elapsedMs={Stopwatch.GetElapsedTime(began).TotalMilliseconds:F3} startupCancelled={startup.IsCancellationRequested} lifetimeCancelled={lifetime.IsCancellationRequested} error={failure.GetType().Name}");
+            log($"Remote startup failed session={lifecycle.SessionId} stage={stage} completedChunks={configured} elapsedMs={Stopwatch.GetElapsedTime(began).TotalMilliseconds:F3} startupCancelled={startupToken.IsCancellationRequested} lifetimeCancelled={lifetime.IsCancellationRequested} error={failure.GetType().Name}");
             try { Wait(lifecycle.CloseAsync(terminate: true)); }
             catch (Exception cleanup)
             {

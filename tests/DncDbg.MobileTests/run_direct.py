@@ -224,7 +224,7 @@ def dap_proof(app, args, assets, environment):
         return info["sessionId"]
     finally:
         try:
-            if sys.exc_info()[0] is not None and not app.serial:
+            if isinstance(sys.exc_info()[1], Exception) and not app.serial:
                 try:
                     collect_ios_failure(app, args)
                 except BaseException as error:

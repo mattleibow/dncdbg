@@ -424,6 +424,13 @@ raise SystemExit(run_suite.main())
                     self.assertFalse(manifest["passed"])
                     self.assertEqual(manifest["head"], "a" * 40)
                     self.assertFalse(manifest["dirty"])
+                    self.assertTrue(manifest["cleanup"])
+                    self.assertFalse(manifest["leaseReleasePending"])
+                    self.assertEqual(manifest["finalization"]["status"], "complete")
+                    state = json.loads((directory / "state.json").read_text())
+                    self.assertTrue(state["cleanupDone"])
+                    self.assertFalse(state["leaseReleasePending"])
+                    self.assertEqual(state["finalization"], manifest["finalization"])
                 finally:
                     self.finish(runner)
 

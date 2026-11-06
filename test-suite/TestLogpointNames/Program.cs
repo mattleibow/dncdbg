@@ -92,7 +92,9 @@ partial class Context
 {
     public string NameTokenTemplate(string label) =>
         label + ":literal=$FUNCTION/$TNAME|function={$FUNCTION}|plain={$FUNCTION,nq}" +
-        "|thread={$TNAME}|plainThread={$TNAME,nq}|same={$TNAME == $TNAME}|hit={$HITCOUNT}";
+        "|thread={$TNAME}|plainThread={$TNAME,nq}|same={$TNAME == $TNAME}|hit={$HITCOUNT}" +
+        "|mixed={$FUNCTION + @\" / \" + $TNAME + @\"\\tail\",nq}" +
+        "|mixedFile={$FILEPOS + @\"\\\" + $TNAME,nq}";
 
     public void CheckNameTokenOutput(string callerTrace)
     {
@@ -110,10 +112,13 @@ partial class Context
     {
         string function = "TestLogpointNames.Program." + method;
         string quotedThread = JsonConvert.SerializeObject(thread);
+        string quotedMixed = JsonConvert.SerializeObject(function + " / " + thread + "\\tail");
+        string quotedMixedFile = JsonConvert.SerializeObject(GetSourceFilesPath() + ":" + GetLineNum(label) + "\\" + thread);
         WasOutputEvent(callerTrace, "console",
             label + ":literal=$FUNCTION/$TNAME|function=" + JsonConvert.SerializeObject(function) + "|plain=" + function +
             "|thread=" + quotedThread + "|plainThread=" + quotedThread.Substring(1, quotedThread.Length - 2) +
-            "|same=true|hit=" + hit + "\n");
+            "|same=true|hit=" + hit + "|mixed=" + quotedMixed.Substring(1, quotedMixed.Length - 2) +
+            "|mixedFile=" + quotedMixedFile.Substring(1, quotedMixedFile.Length - 2) + "\n");
     }
 }
 }

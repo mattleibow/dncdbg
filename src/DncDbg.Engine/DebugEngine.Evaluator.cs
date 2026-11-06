@@ -166,21 +166,14 @@ public sealed partial class DebugEngine
         private static int LastTopLevelComma(string text)
         {
             int depth = 0, last = -1;
-            for (int i = 0; i < text.Length; i++)
+            foreach (SyntaxToken token in SyntaxFactory.ParseTokens(text))
             {
-                char c = text[i];
-                if (c is '"' or '\'')
-                {
-                    for (i++; i < text.Length && text[i] != c; i++)
-                        if (text[i] == '\\')
-                            i++;
-                }
-                else if (c is '(' or '[' or '{')
+                if (token.Kind() is SyntaxKind.OpenParenToken or SyntaxKind.OpenBracketToken or SyntaxKind.OpenBraceToken)
                     depth++;
-                else if (c is ')' or ']' or '}')
+                else if (token.Kind() is SyntaxKind.CloseParenToken or SyntaxKind.CloseBracketToken or SyntaxKind.CloseBraceToken)
                     depth--;
-                else if (c == ',' && depth <= 0)
-                    last = i;
+                else if (token.IsKind(SyntaxKind.CommaToken) && depth <= 0)
+                    last = token.SpanStart;
             }
             return last;
         }

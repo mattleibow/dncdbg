@@ -43,6 +43,7 @@ launch main thread is `Main Thread`; other unnamed or unknown threads use
 `<No name>`. Explicit thread names and subsequent renames are preserved.
 For expressions containing `$FUNCTION` or `$TNAME`, `nq` removes string
 delimiters but retains escaped quotes and backslashes, matching native display.
+This also applies to concatenations with other tokens and string literals.
 Tokens embedded in a substituted thread name remain literal, not expanded.
 
 File paths and address strings are inserted using C# verbatim literal syntax.

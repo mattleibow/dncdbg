@@ -138,6 +138,11 @@ def pause(*args):
     print("READY",flush=True)
     sys.stdin.readline()
 run_suite.contracts = pause
+source_record = run_suite.Suite.source_record
+def source(suite):
+    suite.state.setdefault("source", {{"head":"a"*40,"dirty":False}})
+    return source_record(suite)
+run_suite.Suite.source_record = source
 evidence = run_suite.Suite.evidence
 def collect(suite,*args):
     pause()
@@ -319,6 +324,11 @@ sys.path.insert(0,{str(ROOT / "tests/DncDbg.MobileTests")!r})
 sys.path.insert(0,{str(ROOT / "tests/DncDbg.RemoteTests")!r})
 import run_suite
 run_suite.contracts = lambda suite: None
+source_record = run_suite.Suite.source_record
+def source(suite):
+    suite.state.setdefault("source", {{"head":"a"*40,"dirty":False}})
+    return source_record(suite)
+run_suite.Suite.source_record = source
 close = run_suite.JournalLease.close
 attempted = False
 def release(lease):
@@ -355,6 +365,83 @@ raise SystemExit(run_suite.main())
             self.assertFalse(json.loads((directory / "evidence/manifest.json").read_text())["passed"])
         finally:
             self.finish(runner)
+
+    def test_handoff_crashes_never_qualify_and_recovery_preserves_the_original_source(self):
+        for boundary in ("before-release", "after-release", "before-final-manifest"):
+            with self.subTest(boundary=boundary):
+                directory = self.output / ("crash-" + boundary)
+                script = f"""
+import sys
+sys.path.insert(0,{str(ROOT / "tests/DncDbg.MobileTests")!r})
+sys.path.insert(0,{str(ROOT / "tests/DncDbg.RemoteTests")!r})
+import run_suite
+run_suite.contracts = lambda suite: None
+source_record = run_suite.Suite.source_record
+def source(suite):
+    suite.state.setdefault("source",{{"head":"a"*40,"dirty":False}})
+    return source_record(suite)
+run_suite.Suite.source_record = source
+def pause():
+    print("READY",flush=True)
+    sys.stdin.readline()
+close = run_suite.JournalLease.close
+persist = run_suite.Suite.persist_evidence_core
+def release(lease):
+    if {boundary!r} == "before-release":
+        pause()
+    close(lease)
+    if {boundary!r} == "after-release":
+        pause()
+def evidence(suite):
+    if {boundary!r} == "before-final-manifest" and suite.evidence_core["passed"]:
+        pause()
+    return persist(suite)
+run_suite.JournalLease.close = release
+run_suite.Suite.persist_evidence_core = evidence
+sys.argv = ["run_suite.py","--platform","contracts","--output",sys.argv[1]]
+raise SystemExit(run_suite.main())
+"""
+                runner = self.worker(script, directory)
+                command = [sys.executable, str(ROOT / "tests/DncDbg.MobileTests/run_suite.py"),
+                           "--platform", "contracts", "--cleanup", "--output", str(directory)]
+                try:
+                    self.ready(runner)
+                    state_before = (directory / "state.json").read_bytes()
+                    manifest_before = (directory / "evidence/manifest.json").read_bytes()
+                    self.assertFalse(json.loads(manifest_before)["passed"])
+                    if boundary != "before-final-manifest":
+                        self.assertFalse(json.loads(state_before)["cleanupDone"])
+                        self.assertTrue(json.loads(state_before)["leaseReleasePending"])
+                    blocked = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=10)
+                    self.assertNotEqual(blocked.returncode, 0)
+                    self.assertEqual((directory / "state.json").read_bytes(), state_before)
+                    self.assertEqual((directory / "evidence/manifest.json").read_bytes(), manifest_before)
+                    runner.kill()
+                    runner.wait(timeout=5)
+                    recovered = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=10)
+                    self.assertEqual(recovered.returncode, 0, recovered.stderr)
+                    manifest = json.loads((directory / "evidence/manifest.json").read_text())
+                    self.assertFalse(manifest["passed"])
+                    self.assertEqual(manifest["head"], "a" * 40)
+                    self.assertFalse(manifest["dirty"])
+                finally:
+                    self.finish(runner)
+
+    def test_changed_generation_prevents_any_unlocked_finalization_write(self):
+        suite = run_suite.Suite(Namespace(platform="contracts", output=self.output, xcode_dir=None))
+        suite.state = {"platform": "contracts", "cleanupDone": True, "source": {"head": "a" * 40, "dirty": False}}
+        suite.publication_pending = True
+        suite.prepare_evidence(None)
+        suite.arm_handoff()
+        saved = json.loads(suite.state_path.read_text())
+        saved["finalization"]["nonce"] = "b" * 32
+        run_suite.atomic_json(suite.state_path, saved)
+        before = suite.state_path.read_bytes()
+        core = (self.output / "evidence/manifest.json").read_bytes()
+        with self.assertRaisesRegex(RuntimeError, "generation changed"):
+            suite.finish_handoff(True, None)
+        self.assertEqual(suite.state_path.read_bytes(), before)
+        self.assertEqual((self.output / "evidence/manifest.json").read_bytes(), core)
 
     def test_durable_directory_creation_refuses_symlink_components(self):
         actual = self.output / "actual"

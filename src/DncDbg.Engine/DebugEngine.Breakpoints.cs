@@ -536,7 +536,8 @@ public sealed partial class DebugEngine
                 {
                     bool hasTokens = logpointTokens != null && logpointTokens.Keys.Any(expression.Contains);
                     bool hasNameTokens = hasTokens && (expression.Contains("$FUNCTION", StringComparison.Ordinal)
-                        || expression.Contains("$TNAME", StringComparison.Ordinal));
+                        || expression.Contains("$TNAME", StringComparison.Ordinal)
+                        || expression.Contains("$CALLER", StringComparison.Ordinal));
                     if (hasTokens)
                         expression = ExpandLogpointTokens(expression, logpointTokens!);
                     sb.Append(evaluator.EvaluateToText(expression, quoteStrings || hasTokens, escapeUnquotedStrings: hasNameTokens));
@@ -592,6 +593,7 @@ public sealed partial class DebugEngine
             ["$TID"] = new(() => "$tid"),
             ["$PID"] = new(() => "$pid"),
             ["$TNAME"] = new(() => VerbatimLiteral(GetLogpointThreadName(frame.ThreadId))),
+            ["$CALLER"] = new(() => VerbatimLiteral(GetLogpointCallerName(frame))),
             ["$HITCOUNT"] = new(() => breakpoint.HitCount.ToString(System.Globalization.CultureInfo.InvariantCulture)),
         };
     }
@@ -600,7 +602,39 @@ public sealed partial class DebugEngine
     {
         try
         {
-            CorDebugILFrame current = RequireILFrame(frame);
+            return GetLogpointMethodName(RequireILFrame(frame));
+        }
+        catch (Exception error) when (error is COMException or DebuggerException)
+        {
+            Log?.Invoke("Logpoint function name unavailable: " + error.Message);
+            return "[Unnamed managed method in optimized code]";
+        }
+    }
+
+    private string GetLogpointCallerName(FrameRef frame)
+    {
+        CorDebugFrame? caller;
+        try
+        {
+            caller = RequireILFrame(frame).Caller;
+        }
+        catch (Exception error) when (error is COMException or DebuggerException)
+        {
+            Log?.Invoke("Logpoint caller unavailable: " + error.Message);
+            return "[Unknown Frame]";
+        }
+        return caller == null ? "[Unknown Frame]" : GetLogpointMethodName(caller);
+    }
+
+    private string GetLogpointMethodName(CorDebugFrame frame)
+    {
+        try
+        {
+            if (frame is not CorDebugILFrame current)
+            {
+                Log?.Invoke("Logpoint function name unavailable: frame has no managed IL frame.");
+                return "[Unnamed managed method in optimized code]";
+            }
             ModuleMetadata? metadata = GetMetadata(current.Function.Module);
             if (metadata != null)
             {

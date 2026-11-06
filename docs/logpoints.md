@@ -14,6 +14,7 @@ These case-sensitive special tokens are expanded only inside expression parts:
 | `$TID` | Current CLR thread ID, equivalent to `$tid` |
 | `$PID` | Current target process ID, equivalent to `$pid` |
 | `$TNAME` | Current thread name, as a string |
+| `$CALLER` | Immediate caller's method name, including its declaring type and parameters, as a string |
 | `$HITCOUNT` | This breakpoint's unsigned hit count after condition filtering and increment |
 
 For example:
@@ -33,15 +34,20 @@ hit). Substituted values are not scanned again. Outside braces, `$PID` and the
 other tokens remain literal text. Malformed expressions preserve the existing
 logpoint error rendering rather than stopping or silently dropping the message.
 
-Method and thread names are inspected only when their tokens occur in an
+Method, caller and thread names are inspected only when their tokens occur in an
 expression, once per hit. Method names reuse the user-facing metadata display,
 including concrete generic arguments and the original async method rather than
 its generated `MoveNext`. If method metadata is unavailable, the debugger logs
 a diagnostic and displays `[Unnamed managed method in optimized code]`.
+Caller names use the immediate CLR caller frame, not a filtered user-code or
+logical async stack walk. A caller in an async state machine uses its original
+method name; a missing or unresolvable caller frame displays `[Unknown Frame]`.
+An existing caller without usable method metadata uses the unnamed-method
+placeholder above.
 Thread names are read without calling a target property getter. An unnamed
 launch main thread is `Main Thread`; other unnamed or unknown threads use
 `<No name>`. Explicit thread names and subsequent renames are preserved.
-For expressions containing `$FUNCTION` or `$TNAME`, `nq` removes string
+For expressions containing `$FUNCTION`, `$CALLER` or `$TNAME`, `nq` removes string
 delimiters but retains escaped quotes and backslashes, matching native display.
 This also applies to concatenations with other tokens and string literals.
 Tokens embedded in a substituted thread name remain literal, not expanded.

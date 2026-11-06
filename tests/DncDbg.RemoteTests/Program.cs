@@ -70,6 +70,12 @@ if (args is [DncDbg.Engine.Launch.ConsoleCodePage.HelperOption, var consoleOwner
 using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(60));
 CancellationToken token = deadline.Token;
 int passed = 0;
+if (args is ["--desktop-only", var desktopFixture, var desktopSource, var desktopResults])
+{
+    await TestDesktopAsync(Path.GetFullPath(desktopFixture), Path.GetFullPath(desktopSource), Path.GetFullPath(desktopResults));
+    Console.WriteLine($"Passed {passed} focused desktop detach/continue assertions.");
+    return;
+}
 if (args is ["--detach-io", var ioFixture, var ioSource, var ioOutput])
 {
     await DetachIoProof.RunAsync(Path.GetFullPath(ioFixture), Path.GetFullPath(ioSource), Path.GetFullPath(ioOutput), Check, token);

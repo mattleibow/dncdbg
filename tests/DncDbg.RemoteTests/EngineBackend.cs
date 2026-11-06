@@ -36,8 +36,9 @@ internal sealed class EngineBackend(string program, string resultPath, string[]?
         if (started)
             throw new InvalidOperationException("Already started.");
         started = true;
-        engine.Log += message => Console.WriteLine("[desktop-fixture] " + message);
+        engine.Log += Trace;
         engine.Output += (category, text) => Console.Error.WriteLine($"[desktop-fixture {category}] {text}");
+        engine.ThreadChanged += (id, created) => Trace($"Thread {id}, created={created}.");
         engine.Stopped += OnStopped;
         engine.Exited += OnExited;
         subscribed = true;
@@ -58,12 +59,14 @@ internal sealed class EngineBackend(string program, string resultPath, string[]?
 
     private void OnStopped(StopInfo stop)
     {
+        Trace($"Stopped: reason={stop.Reason}, thread={stop.ThreadId}.");
         if (!stops.Writer.TryWrite(stop))
             engine.Continue();
     }
 
     private void OnExited(int code)
     {
+        Trace($"Engine exit: {code}.");
         targetExited = true;
         stops.Writer.TryComplete();
     }
@@ -104,7 +107,9 @@ internal sealed class EngineBackend(string program, string resultPath, string[]?
     {
         RequireStop(stop);
         frames.Invalidate();
+        Trace($"Continue stop {stop}: begin.");
         engine.Continue();
+        Trace($"Continue stop {stop}: returned.");
         currentStop = null;
         return ValueTask.CompletedTask;
     }
@@ -151,11 +156,18 @@ internal sealed class EngineBackend(string program, string resultPath, string[]?
         bool engineDisposed = false;
         try
         {
+            Trace($"Detach: begin, stop={currentStop?.Id}, targetExited={target?.HasExited}.");
             engine.Detach();
+            Trace("Detach: returned; engine disposal begins.");
             engine.Dispose();
             engineDisposed = true;
+            Trace($"Engine disposal: returned, targetExited={target?.HasExited}.");
             if (ioFence != null && target is { HasExited: false })
+            {
+                Trace("Releasing post-detach target I/O.");
                 await ioFence.ReleaseAsync(target);
+                Trace("Post-detach target I/O released.");
+            }
             if (afterRelinquished != null)
             {
                 await afterRelinquished();
@@ -181,4 +193,7 @@ internal sealed class EngineBackend(string program, string resultPath, string[]?
             target?.Dispose();
         }
     }
+
+    private void Trace(string message) =>
+        Console.WriteLine($"[desktop-fixture {DateTime.UtcNow:O} tid={Environment.CurrentManagedThreadId} pid={ProcessId}] {message}");
 }

@@ -35,17 +35,60 @@ jobs:
           global-json-file: global.json
       - name: Build exact-source fixture and provider
         run: dotnet build tests/DncDbg.RemoteTests -c Release --nologo
+      - name: Record runtime and enable bounded Windows crash evidence
+        shell: pwsh
+        run: |
+          $output = Join-Path $PWD "build/validation/windows-detach"
+          $dumps = New-Item -ItemType Directory -Force "$output/dumps"
+          dotnet --info | Set-Content "$output/dotnet-info.txt"
+          dotnet --list-runtimes | Set-Content "$output/runtimes.txt"
+          $key = "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\dotnet.exe"
+          New-Item -Force $key | Out-Null
+          New-ItemProperty -Path $key -Name DumpFolder -Value $dumps.FullName -PropertyType ExpandString -Force | Out-Null
+          New-ItemProperty -Path $key -Name DumpType -Value 2 -PropertyType DWord -Force | Out-Null
+          New-ItemProperty -Path $key -Name DumpCount -Value 8 -PropertyType DWord -Force | Out-Null
+          Get-ChildItem "C:/Program Files (x86)/Windows Kits" -Recurse -Filter cdb.exe -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty FullName | Set-Content "$output/cdb-paths.txt"
+      - name: Reproduce unchanged desktop assertions in isolated processes
+        shell: pwsh
+        run: |
+          $failed = 0
+          0..2 | ForEach-Object {
+            $output = "build/validation/windows-detach/focused-$_"
+            New-Item -ItemType Directory -Force $output | Out-Null
+            dotnet run --project tests/DncDbg.RemoteTests -c Release --no-build -- --desktop-only tests/RemoteBreakpointApp/bin/Release/net10.0/RemoteBreakpointApp.dll tests/RemoteBreakpointApp/Program.cs $output 2>&1 | Tee-Object "$output/proof.log"
+            if ($LASTEXITCODE -ne 0) { $failed++ }
+          }
+          if ($failed -ne 0) { throw "$failed of 3 unchanged focused desktop proofs failed; every failure is retained." }
       - name: Prove stopped detach and correctly owned pre/post-detach I/O
+        if: always()
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force build/validation/windows-detach | Out-Null
           dotnet run --project tests/DncDbg.RemoteTests -c Release --no-build -- --detach-io tests/RemoteBreakpointApp/bin/Release/net10.0/RemoteBreakpointApp.dll tests/RemoteBreakpointApp/Program.cs build/validation/windows-detach 2>&1 | Tee-Object build/validation/windows-detach/proof.log
           exit $LASTEXITCODE
       - name: Verify the full unchanged transport inspection and disconnect assertions
+        if: always()
         shell: pwsh
         run: |
           dotnet run --project tests/DncDbg.RemoteTests -c Release --no-build -- --desktop tests/RemoteBreakpointApp/bin/Release/net10.0/RemoteBreakpointApp.dll tests/RemoteBreakpointApp/Program.cs build/validation/windows-detach/desktop 2>&1 | Tee-Object build/validation/windows-detach/desktop.log
           exit $LASTEXITCODE
+      - name: Preserve Windows crash events and dump stacks
+        if: always()
+        shell: pwsh
+        run: |
+          $output = Join-Path $PWD "build/validation/windows-detach"
+          Get-WinEvent -FilterHashtable @{ LogName = "Application"; StartTime = (Get-Date).AddMinutes(-10) } -ErrorAction SilentlyContinue |
+            Where-Object { $_.Id -in 1000,1001,1026 } |
+            Select-Object TimeCreated,Id,ProviderName,Message |
+            ConvertTo-Json -Depth 4 | Set-Content "$output/crash-events.json"
+          $cdb = Get-Content "$output/cdb-paths.txt" | Where-Object { $_ -match '/x64/|\\x64\\' } | Select-Object -First 1
+          if ($cdb) {
+            Get-ChildItem "$output/dumps" -Filter *.dmp | ForEach-Object {
+              & $cdb -z $_.FullName -c ".symfix; .reload; !analyze -v; ~* k; q" 2>&1 |
+                Set-Content "$($_.FullName).stack.txt"
+            }
+          }
       - uses: actions/upload-artifact@v4
         if: always()
         with:

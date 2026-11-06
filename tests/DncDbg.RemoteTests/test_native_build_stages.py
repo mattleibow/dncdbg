@@ -18,19 +18,29 @@ ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "src/DncDbg.Remote.Target/build.py"
 
 
-class FlushedEvents(io.StringIO):
+class FlushedEvents:
     def __init__(self):
-        super().__init__()
-        self.visible = ""
+        self.file = tempfile.TemporaryFile()
 
-    def flush(self):
-        self.visible = self.getvalue()
+    def fileno(self):
+        return self.file.fileno()
+
+    def getvalue(self):
+        return os.pread(self.fileno(), os.fstat(self.fileno()).st_size, 0).decode()
+
+    def close(self):
+        self.file.close()
 
     def events(self):
-        return [json.loads(line) for line in self.visible.splitlines() if line.startswith("{")]
+        return [json.loads(line) for line in self.getvalue().splitlines() if line.startswith("{")]
 
 
 class NativeBuildStages(unittest.TestCase):
+    def events_stream(self):
+        stream = FlushedEvents()
+        self.addCleanup(stream.close)
+        return stream
+
     def setUp(self):
         self.root = Path(tempfile.mkdtemp(prefix="native-stages.", dir=ROOT / "build"))
         self.source = self.root / "src/DncDbg.Remote.Target"
@@ -88,7 +98,7 @@ class NativeBuildStages(unittest.TestCase):
         return calls
 
     def test_stage_entries_are_flushed_before_tools_and_identity_inputs_are_unchanged(self):
-        stream = FlushedEvents()
+        stream = self.events_stream()
         calls = self.execute(stream)
         events = stream.events()
         self.assertLessEqual(len(events), 32)
@@ -110,15 +120,15 @@ class NativeBuildStages(unittest.TestCase):
     def test_failed_tool_retains_the_exact_original_exception(self):
         original = RuntimeError("original compiler failure")
         with self.assertRaises(RuntimeError) as raised:
-            self.execute(FlushedEvents(), failure=original)
+            self.execute(self.events_stream(), failure=original)
         self.assertIs(raised.exception, original)
 
     def test_cache_miss_download_is_visible_before_the_unchanged_bounded_request(self):
-        self.execute(FlushedEvents(), cache=False)
+        self.execute(self.events_stream(), cache=False)
 
     def test_hash_failure_retains_the_original_rejection_before_any_tool(self):
         (self.deps / "json.hpp").write_bytes(b"wrong pinned content")
-        stream = FlushedEvents()
+        stream = self.events_stream()
         with self.assertRaisesRegex(SystemExit, "Pinned JSON dependency hash mismatch"):
             self.execute(stream)
         self.assertTrue(any(event["stage"] == "dependency-verify" and event["phase"] == "error"
@@ -126,8 +136,8 @@ class NativeBuildStages(unittest.TestCase):
 
     def test_diagnostic_writer_failure_cannot_mask_tool_failure_or_cancellation(self):
         class Broken(io.StringIO):
-            def write(self, text):
-                raise OSError("diagnostic disk full")
+            def fileno(self):
+                return -1
 
         for original in (RuntimeError("exact tool failure"), KeyboardInterrupt("exact cancellation")):
             with self.subTest(kind=type(original).__name__):

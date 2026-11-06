@@ -16,6 +16,9 @@ if "--configuration" in sys.argv:
     position = sys.argv.index("--configuration") + 1
     trace_context["configuration"] = (sys.argv[position]
         if position < len(sys.argv) and sys.argv[position] in ("Debug", "Release") else None)
+elif any(value.startswith("--configuration=") for value in sys.argv):
+    value = next(value.split("=", 1)[1] for value in sys.argv if value.startswith("--configuration="))
+    trace_context["configuration"] = value if value in ("Debug", "Release") else None
 
 
 def emit(stage, phase, **fields):
@@ -25,16 +28,18 @@ def emit(stage, phase, **fields):
     sequence += 1
     try:
         now = time.monotonic()
-        line = json.dumps({"sequence": sequence, "stage": stage, "phase": phase, "pid": os.getpid(),
-                           "monotonic": now, "elapsed": now - began, **trace_context, **fields}) + "\n"
-        if sys.stderr.write(line) != len(line):
-            raise OSError("Native stage diagnostic write was incomplete.")
-        sys.stderr.flush()
+        line = (json.dumps({"sequence": sequence, "stage": stage, "phase": phase, "pid": os.getpid(),
+                            "monotonic": now, "elapsed": now - began, **trace_context, **fields}) + "\n").encode()
+        descriptor = sys.stderr.fileno()
+        while line:
+            written = os.write(descriptor, line)
+            if written <= 0:
+                raise OSError("Native stage diagnostic write was incomplete.")
+            line = line[written:]
     except Exception:
         trace_failed = True
         try:
-            sys.stderr.write("Native stage diagnostics unavailable; build outcome is unchanged.\n")
-            sys.stderr.flush()
+            os.write(2, b"Native stage diagnostics unavailable; build outcome is unchanged.\n")
         except Exception:
             pass
 

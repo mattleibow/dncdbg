@@ -50,6 +50,7 @@ jobs:
           Get-ChildItem "C:/Program Files (x86)/Windows Kits" -Recurse -Filter cdb.exe -ErrorAction SilentlyContinue |
             Select-Object -ExpandProperty FullName | Set-Content "$output/cdb-paths.txt"
       - name: Reproduce pristine main without lifecycle instrumentation
+        if: github.event_name == 'workflow_dispatch'
         shell: pwsh
         run: |
           $baseline = "fb668b7c1c3a94ebb4bcd09ad6eb881efa0e783a"
@@ -68,6 +69,32 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             dotnet run --project tests/DncDbg.RemoteTests -c Release --no-build -- --desktop tests/RemoteBreakpointApp/bin/Release/net10.0/RemoteBreakpointApp.dll tests/RemoteBreakpointApp/Program.cs $output 2>&1 | Tee-Object "$output/proof.log"
             exit $LASTEXITCODE
+          } finally { Pop-Location }
+      - name: Capture the exact original PR21 failure without source changes
+        if: always() && github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        run: |
+          $baseline = "cdb360c2533e8b1ec81c6769bac76fef394f262f"
+          git fetch --depth=1 origin $baseline
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force build/windows-detach-original | Out-Null
+          git archive --format=tar --output=build/windows-detach-original.tar $baseline
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          tar -xf build/windows-detach-original.tar -C build/windows-detach-original
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $output = Join-Path $PWD "build/validation/windows-detach/original-pr21"
+          New-Item -ItemType Directory -Force $output | Out-Null
+          Push-Location build/windows-detach-original
+          try {
+            dotnet build tests/DncDbg.RemoteTests -c Release --nologo 2>&1 | Tee-Object "$output/build.log"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $failed = 0
+            0..2 | ForEach-Object {
+              $case = New-Item -ItemType Directory -Force "$output/case-$_"
+              dotnet run --project tests/DncDbg.RemoteTests -c Release --no-build -- --desktop tests/RemoteBreakpointApp/bin/Release/net10.0/RemoteBreakpointApp.dll tests/RemoteBreakpointApp/Program.cs $case.FullName 2>&1 | Tee-Object "$case/proof.log"
+              if ($LASTEXITCODE -ne 0) { $failed++ }
+            }
+            if ($failed -ne 0) { throw "$failed of 3 exact original PR21 witnesses failed; every failure is retained." }
           } finally { Pop-Location }
       - name: Reproduce unchanged desktop assertions in isolated processes
         if: always()

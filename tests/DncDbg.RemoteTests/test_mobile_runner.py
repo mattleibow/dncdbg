@@ -2028,6 +2028,36 @@ builtins.__import__ = guarded_import
             self.suite.run(sys.executable, "-c", "print('exact failure evidence'); raise SystemExit(7)")
         self.assertIn("exact failure evidence", next(self.output.glob("*.log")).read_text())
 
+    @unittest.skipUnless(os.name == "posix", "POSIX owned exec trampoline")
+    def test_exec_trampoline_does_not_load_parent_recovery_modules_before_target_start(self):
+        driver = """
+import builtins,runpy,sys
+original_import=builtins.__import__
+def guarded(name,*args,**kwargs):
+    if name in {"ctypes","selectors","socket","subprocess"}:
+        raise RuntimeError("Owned exec loaded unrelated parent recovery modules")
+    return original_import(name,*args,**kwargs)
+builtins.__import__=guarded
+sys.argv=sys.argv[1:]
+runpy.run_path(sys.argv[0],run_name="__main__")
+"""
+        read, write = os.pipe()
+        try:
+            with subprocess.Popen([sys.executable, "-I", "-c", driver, str(Path(process_tools.__file__)),
+                    "--restore-signal-mask", "", "--exec-error-fd", str(write), "--signal-dispositions", "13:0",
+                    "--", sys.executable, "-c", "print('exact build ready',flush=True)"],
+                    pass_fds=(write,), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as process:
+                os.close(write)
+                write = None
+                output, error = process.communicate(timeout=5)
+                self.assertEqual(process.returncode, 0, error)
+                self.assertEqual(output, "exact build ready\n")
+                self.assertEqual(os.read(read, 257), b"")
+        finally:
+            os.close(read)
+            if write is not None:
+                os.close(write)
+
     @unittest.skipUnless(os.name == "posix", "POSIX command ownership")
     def test_timeout_preserves_partial_output(self):
         with self.assertRaisesRegex(TimeoutError, "partial output"):

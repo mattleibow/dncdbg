@@ -11,7 +11,8 @@ dotnet run --project tests/DncDbg.RemoteTests -c Release
 `--desktop-only fixture.dll source.cs result-directory` runs the unchanged
 desktop breakpoint, inspection, continue/detach and stopped-disconnect assertions
 without the unrelated transport contracts. The Windows detach workflow retains
-each of three independent focused runs, timestamped provider lifecycle events,
+each of three independent focused runs, optional timestamped provider lifecycle events
+(`DNCDBG_DESKTOP_TRACE=1`),
 the selected SDK/runtime, Windows crash events and full WER dumps when available.
 A failed run remains a failure; repetitions do not retry away a crash.
 

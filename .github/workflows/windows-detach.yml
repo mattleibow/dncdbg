@@ -49,7 +49,28 @@ jobs:
           New-ItemProperty -Path $key -Name DumpCount -Value 8 -PropertyType DWord -Force | Out-Null
           Get-ChildItem "C:/Program Files (x86)/Windows Kits" -Recurse -Filter cdb.exe -ErrorAction SilentlyContinue |
             Select-Object -ExpandProperty FullName | Set-Content "$output/cdb-paths.txt"
+      - name: Reproduce pristine main without lifecycle instrumentation
+        shell: pwsh
+        run: |
+          $baseline = "fb668b7c1c3a94ebb4bcd09ad6eb881efa0e783a"
+          git fetch --depth=1 origin $baseline
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force build/windows-detach-baseline | Out-Null
+          git archive --format=tar --output=build/windows-detach-baseline.tar $baseline
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          tar -xf build/windows-detach-baseline.tar -C build/windows-detach-baseline
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $output = Join-Path $PWD "build/validation/windows-detach/pristine-main"
+          New-Item -ItemType Directory -Force $output | Out-Null
+          Push-Location build/windows-detach-baseline
+          try {
+            dotnet build tests/DncDbg.RemoteTests -c Release --nologo 2>&1 | Tee-Object "$output/build.log"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            dotnet run --project tests/DncDbg.RemoteTests -c Release --no-build -- --desktop tests/RemoteBreakpointApp/bin/Release/net10.0/RemoteBreakpointApp.dll tests/RemoteBreakpointApp/Program.cs $output 2>&1 | Tee-Object "$output/proof.log"
+            exit $LASTEXITCODE
+          } finally { Pop-Location }
       - name: Reproduce unchanged desktop assertions in isolated processes
+        if: always()
         shell: pwsh
         run: |
           $failed = 0

@@ -19,6 +19,7 @@ internal sealed class EngineBackend(string program, string resultPath, string[]?
     private Process? target;
     private DetachIoFence? ioFence;
     private volatile bool targetExited;
+    private readonly bool traceLifecycle = Environment.GetEnvironmentVariable("DNCDBG_DESKTOP_TRACE") == "1";
     public int ProcessId { get; private set; }
     public Exception? CleanupError { get; private set; }
     public RemoteCapabilities Capabilities { get; } = new(".NET desktop / public ICorDebug", "Desktop proof only", true, null);
@@ -36,9 +37,10 @@ internal sealed class EngineBackend(string program, string resultPath, string[]?
         if (started)
             throw new InvalidOperationException("Already started.");
         started = true;
-        engine.Log += Trace;
+        engine.Log += message => Console.WriteLine("[desktop-fixture] " + message);
         engine.Output += (category, text) => Console.Error.WriteLine($"[desktop-fixture {category}] {text}");
-        engine.ThreadChanged += (id, created) => Trace($"Thread {id}, created={created}.");
+        if (traceLifecycle)
+            engine.ThreadChanged += (id, created) => Trace($"Thread {id}, created={created}.");
         engine.Stopped += OnStopped;
         engine.Exited += OnExited;
         subscribed = true;
@@ -194,6 +196,9 @@ internal sealed class EngineBackend(string program, string resultPath, string[]?
         }
     }
 
-    private void Trace(string message) =>
-        Console.WriteLine($"[desktop-fixture {DateTime.UtcNow:O} tid={Environment.CurrentManagedThreadId} pid={ProcessId}] {message}");
+    private void Trace(string message)
+    {
+        if (traceLifecycle)
+            Console.WriteLine($"[desktop-fixture {DateTime.UtcNow:O} tid={Environment.CurrentManagedThreadId} pid={ProcessId}] {message}");
+    }
 }

@@ -118,7 +118,18 @@ public sealed class LocalTcpProxy(LocalTcpProxyOptions? options = null) : ITunne
         }
     }
 
-    internal static void CloseConnectionSocket(Socket socket) => socket.Dispose();
+    internal static void CloseConnectionSocket(Socket socket)
+    {
+        try
+        {
+            // Disposing with a pending receive otherwise requests an abortive close in the Unix BCL.
+            socket.Shutdown(SocketShutdown.Send);
+        }
+        catch (SocketException error) when (error.SocketErrorCode is SocketError.NotConnected or
+            SocketError.ConnectionReset or SocketError.ConnectionAborted or SocketError.Shutdown) { }
+        catch (ObjectDisposedException) { }
+        finally { socket.Dispose(); }
+    }
 
     private async Task PumpAsync(Socket source, Socket destination)
     {

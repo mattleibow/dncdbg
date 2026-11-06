@@ -499,8 +499,8 @@ public sealed partial class DebugEngine
     }
 
     // "{expression}" is replaced by its value; "{{" and "}}" are literal braces
-    /// <param name="quoteStrings">false for log messages, true for [DebuggerDisplay] (where ",nq" removes the quotes).</param>
-    private static string FormatLogMessage(string template, Evaluator evaluator, bool quoteStrings = false,
+    /// <param name="isDebuggerDisplay">Preserves [DebuggerDisplay]'s existing no-quotes and error formatting.</param>
+    private static string FormatLogMessage(string template, Evaluator evaluator, bool isDebuggerDisplay = false,
         IReadOnlyDictionary<string, Lazy<string>>? logpointTokens = null)
     {
         var sb = new System.Text.StringBuilder();
@@ -526,7 +526,7 @@ public sealed partial class DebugEngine
                     break;
                 }
                 string expression = template[(i + 1)..close];
-                if (!quoteStrings && expression.Contains('{'))
+                if (!isDebuggerDisplay && expression.Contains('{'))
                 {
                     sb.Append(template, i, close - i + 1);
                     i = close;
@@ -534,18 +534,13 @@ public sealed partial class DebugEngine
                 }
                 try
                 {
-                    bool hasTokens = logpointTokens != null && logpointTokens.Keys.Any(expression.Contains);
-                    bool hasNameTokens = hasTokens && (expression.Contains("$FUNCTION", StringComparison.Ordinal)
-                        || expression.Contains("$TNAME", StringComparison.Ordinal)
-                        || expression.Contains("$CALLER", StringComparison.Ordinal)
-                        || expression.Contains("$CALLSTACK", StringComparison.Ordinal));
-                    if (hasTokens)
-                        expression = ExpandLogpointTokens(expression, logpointTokens!);
-                    sb.Append(evaluator.EvaluateToText(expression, quoteStrings || hasTokens, escapeUnquotedStrings: hasNameTokens));
+                    if (logpointTokens != null)
+                        expression = ExpandLogpointTokens(expression, logpointTokens);
+                    sb.Append(evaluator.EvaluateToText(expression, quoteStrings: true, escapeUnquotedStrings: !isDebuggerDisplay));
                 }
                 catch (DebuggerException e)
                 {
-                    if (quoteStrings)
+                    if (isDebuggerDisplay)
                         sb.Append("<error: ").Append(e.Message).Append('>');
                     else
                         sb.Append("{error: ").Append(e.Message.TrimEnd('.')).Append('}');

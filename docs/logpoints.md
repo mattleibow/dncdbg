@@ -24,8 +24,11 @@ For example:
 At {$FILEPOS,nq}, process {$PID}, thread {$TID}, hit {$HITCOUNT}
 ```
 
-String-valued token expressions use quoted, escaped display text by default;
-`,nq` removes the quotes. Existing [format specifiers](evaluation_format_specifiers.md)
+String-valued expressions use quoted, escaped display text by default;
+`,nq` removes the quotes but retains escaped newlines, quotes and backslashes.
+This applies equally to tokens, string literals, locals and compound expressions.
+Literal text outside expression braces is not string-value escaped.
+Existing [format specifiers](evaluation_format_specifiers.md)
 can be used. Tokens also work in compound expressions such as
 `{$HITCOUNT + 10}` and `{$PID == $pid}`.
 
@@ -67,11 +70,9 @@ the extended managed DAP stack view is unchanged.
 Thread names are read without calling a target property getter. An unnamed
 launch main thread is `Main Thread`; other unnamed or unknown threads use
 `<No name>`. Explicit thread names and subsequent renames are preserved.
-For expressions containing `$FUNCTION`, `$CALLER`, `$CALLSTACK` or `$TNAME`, `nq`
-removes string delimiters but retains escaped newlines, quotes and backslashes,
-matching native display.
-This also applies to concatenations with other tokens and string literals.
 Tokens embedded in a substituted thread name remain literal, not expanded.
+Logpoint string formatting does not change ordinary DAP evaluation or
+`DebuggerDisplay` formatting.
 
 File paths and address strings are inserted using C# verbatim literal syntax.
 The managed evaluator supports `@"..."` with doubled quotes and literal

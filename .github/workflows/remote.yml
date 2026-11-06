@@ -55,7 +55,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.401
+          dotnet-version: 10.0.403
       - name: Materialize owned diagnostic scripts outside tested source
         run: |
           cat > "$DIAG_ROOT/driver.py" <<'PY'
@@ -121,7 +121,11 @@ jobs:
           def prepare():
               head = source()
               version = subprocess.check_output(["dotnet", "--version"], cwd=ROOT, text=True).strip()
-              assert version == "10.0.401", version
+              assert version == "10.0.403", version
+              metadata = json.loads(subprocess.check_output([
+                  "dotnet", "msbuild", "tests/DncDbg.NativeHostTests/Payload/Payload.csproj",
+                  "-getProperty:NetCoreRoot,NETCoreSdkVersion"], cwd=ROOT, text=True))
+              assert metadata["Properties"]["NETCoreSdkVersion"] == "10.0.403", metadata
               runtimes = subprocess.check_output(["dotnet", "--list-runtimes"], cwd=ROOT, text=True)
               versions = [line.split()[1] for line in runtimes.splitlines()
                           if line.startswith("Microsoft.NETCore.App 10.")]
@@ -133,7 +137,7 @@ jobs:
               assert Path(state["runtime"]).name == "11.0.0-rc.1.26425.128", state
               (DIAG / "prepared.json").write_text(json.dumps(state, indent=2))
               identity = {
-                  "testedSource": head, "dirty": False, "sdk": version, "runtimes": runtimes,
+                  "testedSource": head, "dirty": False, "sdk": version, "msbuild": metadata, "runtimes": runtimes,
                   "os": platform.platform(), "architecture": platform.machine(),
                   "sourceBlobs": {name: subprocess.check_output(["git", "rev-parse", f"HEAD:{name}"],
                                   cwd=ROOT, text=True).strip() for name in (

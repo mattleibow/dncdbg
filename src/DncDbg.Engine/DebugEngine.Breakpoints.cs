@@ -537,7 +537,8 @@ public sealed partial class DebugEngine
                     bool hasTokens = logpointTokens != null && logpointTokens.Keys.Any(expression.Contains);
                     bool hasNameTokens = hasTokens && (expression.Contains("$FUNCTION", StringComparison.Ordinal)
                         || expression.Contains("$TNAME", StringComparison.Ordinal)
-                        || expression.Contains("$CALLER", StringComparison.Ordinal));
+                        || expression.Contains("$CALLER", StringComparison.Ordinal)
+                        || expression.Contains("$CALLSTACK", StringComparison.Ordinal));
                     if (hasTokens)
                         expression = ExpandLogpointTokens(expression, logpointTokens!);
                     sb.Append(evaluator.EvaluateToText(expression, quoteStrings || hasTokens, escapeUnquotedStrings: hasNameTokens));
@@ -594,6 +595,7 @@ public sealed partial class DebugEngine
             ["$PID"] = new(() => "$pid"),
             ["$TNAME"] = new(() => VerbatimLiteral(GetLogpointThreadName(frame.ThreadId))),
             ["$CALLER"] = new(() => VerbatimLiteral(GetLogpointCallerName(frame))),
+            ["$CALLSTACK"] = new(() => VerbatimLiteral(GetLogpointCallStack(frame.ThreadId))),
             ["$HITCOUNT"] = new(() => breakpoint.HitCount.ToString(System.Globalization.CultureInfo.InvariantCulture)),
         };
     }
@@ -624,6 +626,75 @@ public sealed partial class DebugEngine
             return "[Unknown Frame]";
         }
         return caller == null ? "[Unknown Frame]" : GetLogpointMethodName(caller);
+    }
+
+    private string GetLogpointCallStack(int threadId)
+    {
+        try
+        {
+            // JMC/metadata inspection can invalidate an in-progress CLR frame enumeration.
+            List<CorDebugFrame> frames = EnumerateManagedFrames(threadId).ToList();
+            int lastRegular = frames.FindLastIndex(f => f is not CorDebugInternalFrame);
+            var names = new List<string>();
+            for (int i = 0; i < frames.Count; i++)
+            {
+                CorDebugFrame frame = frames[i];
+                string name;
+                if (frame is CorDebugInternalFrame internalFrame)
+                {
+                    CorDebugInternalFrameType kind = internalFrame.FrameType;
+                    if (kind == CorDebugInternalFrameType.STUBFRAME_NONE
+                        || (i < lastRegular && kind is CorDebugInternalFrameType.STUBFRAME_EXCEPTION
+                            or CorDebugInternalFrameType.STUBFRAME_M2U or CorDebugInternalFrameType.STUBFRAME_U2M))
+                        continue;
+                    name = kind switch
+                    {
+                        CorDebugInternalFrameType.STUBFRAME_M2U => "[Managed to Native Transition]",
+                        CorDebugInternalFrameType.STUBFRAME_U2M => "[Native to Managed Transition]",
+                        CorDebugInternalFrameType.STUBFRAME_APPDOMAIN_TRANSITION => "[Appdomain Transition]",
+                        CorDebugInternalFrameType.STUBFRAME_LIGHTWEIGHT_FUNCTION => "[Lightweight function]",
+                        CorDebugInternalFrameType.STUBFRAME_FUNC_EVAL => "[Func Eval]",
+                        CorDebugInternalFrameType.STUBFRAME_INTERNALCALL => "[Internal Call]",
+                        CorDebugInternalFrameType.STUBFRAME_CLASS_INIT => "[Class Init]",
+                        CorDebugInternalFrameType.STUBFRAME_EXCEPTION => "[Exception]",
+                        CorDebugInternalFrameType.STUBFRAME_SECURITY => "[Security]",
+                        CorDebugInternalFrameType.STUBFRAME_JIT_COMPILATION => "[JIT Compilation]",
+                        _ => "[Unknown]",
+                    };
+                }
+                else if (frame is CorDebugRuntimeUnwindableFrame)
+                {
+                    continue;
+                }
+                else if (frame is CorDebugILFrame current)
+                {
+                    if (current.IP.pMappingResult is CorDebugMappingResult.MAPPING_UNMAPPED_ADDRESS or CorDebugMappingResult.MAPPING_NO_INFO)
+                        continue;
+                    ModuleMetadata? metadata = GetMetadata(current.Function.Module);
+                    name = GetLogpointMethodName(current);
+                    if (metadata?.GetAsyncBody((int)current.Function.Token.Value) != null
+                        || name.StartsWith("System.Runtime.CompilerServices.AsyncMethodBuilderCore", StringComparison.Ordinal)
+                        || name.StartsWith("System.Runtime.CompilerServices.AsyncTaskMethodBuilder", StringComparison.Ordinal))
+                        continue;
+                }
+                else
+                {
+                    name = frame is CorDebugNativeFrame ? "[CLR Native Frame]" : "[Unknown Frame]";
+                }
+                if (_justMyCode && (frame is not CorDebugILFrame userFrame || !IsUserCode(userFrame.Function)))
+                    name = ExternalCode;
+                if (name != ExternalCode || names.Count == 0 || names[^1] != ExternalCode)
+                    names.Add(name);
+            }
+            if (names.Count > 0)
+                return string.Join('\n', names);
+            Log?.Invoke("Logpoint call stack unavailable: no physical frames.");
+        }
+        catch (Exception error) when (error is COMException or DebuggerException)
+        {
+            Log?.Invoke("Logpoint call stack unavailable: " + error.Message);
+        }
+        return "[Unknown Stack]";
     }
 
     private string GetLogpointMethodName(CorDebugFrame frame)

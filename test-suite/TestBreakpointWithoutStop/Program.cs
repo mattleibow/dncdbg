@@ -1,5 +1,4 @@
 ﻿using System;
-using System.Threading;
 
 using DbgTest;
 using DbgTest.DAP;
@@ -28,15 +27,16 @@ class Program
                 Context.WasEntryPointHit(@"__FILE__:__LINE__");
                 Context.Continue(@"__FILE__:__LINE__");
 
-                System.Threading.Thread.Sleep(5000);
-
                 Context.AddBreakpoint(@"__FILE__:__LINE__", "bp");
                 Context.SetBreakpoints(@"__FILE__:__LINE__");
                 Context.AddFunctionBreakpoint("testfunc");
                 Context.SetFunctionBreakpoints(@"__FILE__:__LINE__");
+                Context.CalcExpressionWithStatusOnlyCheck(@"__FILE__:__LINE__", 0, "go", true);
             });
 
-        System.Threading.Thread.Sleep(15000);
+        // Stay running, but do not reach either breakpoint until both requests have completed.
+        if (Console.ReadLine() != "go")
+            throw new InvalidOperationException("The running target was not released.");
 
         Console.WriteLine("A breakpoint \"bp\" is set on this line");           Label.Breakpoint("bp");
 

@@ -1011,6 +1011,30 @@ elif sys.argv[2] == "list":
         self.suite.env["DNCDBG_TEST_PROCESS_RECORD"] = str(record)
         return record
 
+    def test_trivial_ios_tool_fakes_do_not_import_the_timeout_process_fixture(self):
+        self.ios_deadline_helper("boot")
+        helper = self.output / "xcrun"
+        guard = """
+import builtins
+original_import = builtins.__import__
+def guarded_import(name, *args, **kwargs):
+    if name == "test_mobile_processes":
+        raise RuntimeError("Trivial simctl stub loaded the unrelated timeout fixture")
+    return original_import(name, *args, **kwargs)
+builtins.__import__ = guarded_import
+"""
+        helper.write_text(helper.read_text().replace("import os, sys", guard + "\nimport os, sys"))
+        name = "dncdbg" + uuid.uuid4().hex
+        for arguments in (
+            ("create", name, self.suite.ios["deviceType"], self.suite.ios["runtime"]),
+            ("list", "devices", "-j"),
+            ("boot", "12345678-1234-1234-1234-123456789abc"),
+        ):
+            with self.subTest(operation=arguments[0]):
+                result = subprocess.run([str(helper), "simctl", *arguments], env=self.suite.env,
+                                        capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
     def assert_ios_deadline_owned_processes_gone(self, record):
         self.assertTrue(record.is_file(), "The real parent/child must reach the timeout path.")
         owned = json.loads(record.read_text())

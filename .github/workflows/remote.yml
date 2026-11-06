@@ -1,102 +1,397 @@
-name: Remote architecture
+# Isolated diagnostic branch only: do not merge this replacement into main.
+name: Bare Linux native exit diagnostic
+run-name: Bare x64 exit baseline aae6894 (workflow ${{ github.sha }})
 
 on:
-  pull_request:
-    branches: [main]
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: remote-${{ github.ref }}
-  cancel-in-progress: true
+  group: native-exit-diagnostic-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  device:
-    name: Remote external Linux device (x64)
+  baseline:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/mattleibow-cuddly-tribble'
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 20
+    env:
+      TESTED_SOURCE_SHA: aae6894abb5813294c95f98b7227a280ecdab28e
+      TESTED_ROOT: ${{ github.workspace }}/source
+      WORKFLOW_SOURCE_SHA: ${{ github.workflow_sha }}
+      WORKFLOW_SOURCE_REF: ${{ github.workflow_ref }}
+      DISPATCH_SHA: ${{ github.sha }}
+      DOTNET_MULTILEVEL_LOOKUP: "0"
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_NOLOGO: "1"
+      DOTNET_CLI_USE_MSBUILD_SERVER: "0"
+      MSBUILDDISABLENODEREUSE: "1"
+      UseSharedCompilation: "false"
+      BPFTRACE_MAX_STRLEN: "128"
+      NO_COLOR: "1"
     steps:
+      - name: Record workflow identity separately from tested source
+        run: |
+          export DIAG_ROOT="$RUNNER_TEMP/native-exit-diagnostic"
+          printf 'DIAG_ROOT=%s\nDOTNET_INSTALL_DIR=%s\nDOTNET_ROOT=%s\n' \
+            "$DIAG_ROOT" "$RUNNER_TEMP/native-exit-dotnet" "$RUNNER_TEMP/native-exit-dotnet" >> "$GITHUB_ENV"
+          mkdir -p "$DIAG_ROOT/evidence"
+          python3 - <<'PY'
+          import json, os, platform
+          from pathlib import Path
+          keys = ("WORKFLOW_SOURCE_SHA", "WORKFLOW_SOURCE_REF", "DISPATCH_SHA", "TESTED_SOURCE_SHA")
+          context = {key: os.environ[key] for key in keys}
+          context.update(os=platform.platform(), architecture=platform.machine())
+          Path(os.environ["DIAG_ROOT"], "evidence/workflow-context.json").write_text(json.dumps(context, indent=2))
+          assert platform.system() == "Linux" and platform.machine() == "x86_64", context
+          assert not Path("/.dockerenv").exists(), "Diagnostic requires the bare GitHub runner, not Docker."
+          PY
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: aae6894abb5813294c95f98b7227a280ecdab28e
+          path: source
           persist-credentials: false
       - uses: actions/setup-dotnet@v4
         with:
-          global-json-file: global.json
-      - name: Prove generic deployment, SSH forwarding and debugging on a real Linux device
-        run: >-
-          dotnet run --project tests/DncDbg.DeviceTests -c Release --
-          --require-docker --output build/validation/device-ci
-      - name: Recover only this run's verified Docker resources
+          dotnet-version: 10.0.401
+      - name: Materialize owned diagnostic scripts outside tested source
+        run: |
+          cat > "$DIAG_ROOT/driver.py" <<'PY'
+          import argparse
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import platform
+          import shutil
+          import subprocess
+          import sys
+          import traceback
+
+          ROOT = Path(os.environ["TESTED_ROOT"]).resolve()
+          DIAG = Path(os.environ["DIAG_ROOT"]).resolve()
+          PREPARE = ROOT / "build/native-exit-prepare"
+          OUTPUT = ROOT / "build/native-exit-diagnostic"
+          EXPECTED = "aae6894abb5813294c95f98b7227a280ecdab28e"
+          sys.path.insert(0, str(ROOT / "tests/DncDbg.NativeHostTests"))
+          import run_tests
+
+          def source():
+              head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+              dirty = subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True).strip()
+              assert head == EXPECTED and not dirty, (head, dirty)
+              return head
+
+          def trace(path, strict=True):
+              lines = path.read_text().splitlines()
+              errors = [line for line in lines if "lost" in line.lower() or line.startswith(("ERROR:", "WARNING:"))]
+              if strict:
+                  assert not errors, errors
+              return [json.loads(line) for line in lines if line.startswith('{"event":')]
+
+          def kernel(rows, pid):
+              return {
+                  "exitGroup": [r for r in rows if r["event"] == "exit_group" and r.get("ns_pid") == pid],
+                  "kernelFinal": [r for r in rows if r["event"] == "kernel-process-exit" and r.get("ns_pid") == pid],
+                  "wait4": [r for r in rows if r["event"] == "wait4" and r.get("child") == pid],
+              }
+
+          def require_seven(observed):
+              exits, final, waits = (observed[key] for key in ("exitGroup", "kernelFinal", "wait4"))
+              assert len(exits) == 1 and exits[0]["code"] == 7, observed
+              assert len(final) == 1 and final[0]["raw_status"] == 1792 and final[0]["group_status"] == 1792, observed
+              assert len(waits) == 1 and waits[0]["raw_status"] == 1792, observed
+              assert exits[0]["ns"] < final[0]["ns"] < waits[0]["ns"], observed
+
+          def control():
+              child = subprocess.Popen(["/bin/sh", "-c", "exit 7"])
+              code = child.wait(timeout=5)
+              (DIAG / "control-process.json").write_text(json.dumps({"pid": child.pid, "exitCode": code}))
+              assert code == 7, code
+
+          def verify_control():
+              process = json.loads((DIAG / "control-process.json").read_text())
+              assert process["exitCode"] == 7, process
+              observed = kernel(trace(DIAG / "control.log"), process["pid"])
+              (DIAG / "evidence/control-correlation.json").write_text(json.dumps(observed, indent=2))
+              require_seven(observed)
+
+          def prepare():
+              head = source()
+              version = subprocess.check_output(["dotnet", "--version"], cwd=ROOT, text=True).strip()
+              assert version == "10.0.401", version
+              runtimes = subprocess.check_output(["dotnet", "--list-runtimes"], cwd=ROOT, text=True)
+              versions = [line.split()[1] for line in runtimes.splitlines()
+                          if line.startswith("Microsoft.NETCore.App 10.")]
+              assert versions and max(tuple(map(int, v.split("."))) for v in versions) == (10, 0, 14), runtimes
+              proof = run_tests.Proof(argparse.Namespace(output=PREPARE, runtime_directory=None, cleanup=False))
+              proof.build()
+              state = {name: str(getattr(proof, name)) for name in
+                       ("runtime", "host", "agent", "adapter", "fault_adapter", "payload", "bin")}
+              assert Path(state["runtime"]).name == "11.0.0-rc.1.26425.128", state
+              (DIAG / "prepared.json").write_text(json.dumps(state, indent=2))
+              identity = {
+                  "testedSource": head, "dirty": False, "sdk": version, "runtimes": runtimes,
+                  "os": platform.platform(), "architecture": platform.machine(),
+                  "sourceBlobs": {name: subprocess.check_output(["git", "rev-parse", f"HEAD:{name}"],
+                                  cwd=ROOT, text=True).strip() for name in (
+                      "src/DncDbg.Dap/NativeHostProvider.cs", "src/DncDbg.Dap/RemoteLifecycle.cs",
+                      "src/DncDbg.Dap/RemoteSession.cs", "src/DncDbg.TargetHost/main.cpp",
+                      "tests/DncDbg.NativeHostTests/run_tests.py")},
+                  "runtimeSha256": {name: hashlib.sha256((Path(state["runtime"]) / name).read_bytes()).hexdigest()
+                                    for name in ("libcoreclr.so", "libmscordbi.so", "libmscordaccore.so")},
+              }
+              (DIAG / "evidence/tested-source.json").write_text(json.dumps(identity, indent=2))
+              source()
+
+          def run():
+              source()
+              proof = run_tests.Proof(argparse.Namespace(output=OUTPUT, runtime_directory=None, cleanup=False))
+              for name, value in json.loads((DIAG / "prepared.json").read_text()).items():
+                  setattr(proof, name, Path(value))
+              passed = False
+              try:
+                  for attempt in range(60):
+                      proof.natural_completion("directLoopback", 7, attempt)
+                  passed = True
+              finally:
+                  failure = sys.exception()
+                  if failure:
+                      (OUTPUT / "failure.log").write_text("".join(traceback.format_exception(failure)))
+                  try:
+                      proof.emergency_cleanup()
+                  finally:
+                      error = sys.exception() or failure
+                      proof.evidence(passed and error is None, repr(error) if error else None)
+
+          def correlate():
+              rows = trace(DIAG / "trace.log", strict=False)
+              cases = []
+              for case in sorted(OUTPUT.glob("natural-*"), key=lambda p: int(p.name.rsplit("-", 1)[1])):
+                  for session in sorted((case / "targets").glob("*")):
+                      process_file = session / "process.json"
+                      if not process_file.exists():
+                          cases.append({"case": case.name, "missing": [str(process_file)]})
+                          continue
+                      process = json.loads(process_file.read_text())
+                      data = {"case": case.name, "process": process, "kernel": kernel(rows, process["pid"]), "missing": []}
+                      for name, path in {
+                          "provider": session / "process-exit.json",
+                          "dap": case / "dap.json", "journal": session / "lifecycle/ownership.json",
+                      }.items():
+                          if path.exists():
+                              data[name] = json.loads(path.read_text())
+                          else:
+                              data["missing"].append(str(path))
+                      if "dap" in data:
+                          data["dap"] = [m for m in data["dap"] if m.get("event") in ("exited", "terminated")]
+                      native = session / "native-report.jsonl"
+                      if native.exists():
+                          phases = [json.loads(line) for line in native.read_text().splitlines()]
+                          data["cleanup"] = {name: sum(p["Phase"] == name and p["HResult"] == "0x00000000" for p in phases)
+                                             for name in ("cleanup-stop-return", "cleanup-detach-return", "terminate-return", "owner-finished")}
+                      else:
+                          data["missing"].append(str(native))
+                      cases.append(data)
+              result = {"traceEvents": len(rows), "cases": cases,
+                        "traceErrors": [line for line in (DIAG / "trace.log").read_text().splitlines()
+                                        if "lost" in line.lower() or line.startswith(("ERROR:", "WARNING:"))],
+                        "classification": "Original hosted failure remains unmatched unless a mismatch is captured here."}
+              (DIAG / "evidence/kernel-provider-correlation.json").write_text(json.dumps(result, indent=2))
+              return cases
+
+          def verify():
+              trace(DIAG / "trace.log")
+              cases = correlate()
+              manifest = json.loads((OUTPUT / "evidence/manifest.json").read_text())
+              assert manifest["head"] == EXPECTED and not manifest["dirty"], manifest
+              assert manifest["passed"] and len(manifest["gates"]) == 60 and len(cases) == 60, manifest
+              for case in cases:
+                  assert not case["missing"], case
+                  require_seven(case["kernel"])
+                  assert case["provider"]["ExitCode"] == 7, case
+                  assert [event["event"] for event in case["dap"]] == ["exited", "terminated"], case
+                  assert case["dap"][0]["body"]["exitCode"] == 7, case
+                  assert all(count == 1 for count in case["cleanup"].values()), case
+                  assert [e["Action"] for e in case["journal"]["Entries"]][-2:] == ["detached", "closed"], case
+              source()
+
+          def collect():
+              destination = DIAG / "evidence"
+              for name in ("driver.py", "trace.bt", "prepared.json", "control-process.json",
+                           "capabilities.log", "build.log", "prepare.log", "control.log", "trace.log", "cleanup.log"):
+                  path = DIAG / name
+                  if path.exists():
+                      shutil.copy2(path, destination / name)
+              if (DIAG / "trace.log").exists():
+                  correlate()
+              for name, directory in (("native", OUTPUT / "evidence"), ("preparation", PREPARE)):
+                  if directory.exists():
+                      for path in directory.rglob("*") if name == "native" else directory.glob("*.log"):
+                          if path.is_file():
+                              target = destination / name / path.relative_to(directory)
+                              target.parent.mkdir(parents=True, exist_ok=True)
+                              shutil.copy2(path, target)
+              total = 0
+              hashes = {}
+              for path in sorted(destination.rglob("*")):
+                  if not path.is_file():
+                      continue
+                  data = path.read_bytes()
+                  total += len(data)
+                  assert len(data) <= 8 * 1024 * 1024 and total <= 100 * 1024 * 1024, path
+                  # Avoid flagging the archived scanner's own source literals.
+                  assert all(b'"' + word + b'"' not in data for word in (b"To" + b"ken", b"to" + b"ken")), path
+                  hashes[str(path.relative_to(destination))] = hashlib.sha256(data).hexdigest()
+              (destination / "artifact-hashes.json").write_text(json.dumps(hashes, indent=2))
+
+          modes = {"prepare": prepare, "control": control, "verify-control": verify_control,
+                   "run": run, "verify": verify, "collect": collect}
+          parser = argparse.ArgumentParser()
+          parser.add_argument("mode", choices=modes)
+          modes[parser.parse_args().mode]()
+          PY
+          cat > "$DIAG_ROOT/trace.bt" <<'BPF'
+          BEGIN
+          {
+              @owned[cpid] = 1;
+              printf("{\"event\":\"trace-start\",\"root\":%d,\"ns\":%llu}\n", cpid, nsecs);
+          }
+          tracepoint:sched:sched_process_fork
+          /@owned[args.parent_pid]/
+          {
+              @owned[args.child_pid] = 1;
+          }
+          tracepoint:syscalls:sys_enter_execve
+          {
+              if (str(args.argv[1]) == str($1)) {
+                  @owned[tid] = 1;
+              }
+          }
+          tracepoint:sched:sched_process_exec
+          /@owned[tid]/
+          {
+              $task = (struct task_struct *)curtask;
+              $identity = $task->group_leader->thread_pid;
+              $number = (struct upid *)((uint64)$identity + offsetof(struct pid, numbers) + (uint64)$identity->level * sizeof(struct upid));
+              printf("{\"event\":\"exec\",\"pid\":%d,\"ns_pid\":%d,\"tid\":%d,\"ns\":%llu,\"file\":\"%s\"}\n",
+                     pid, $number->nr, tid, nsecs, str(args.filename));
+          }
+          tracepoint:syscalls:sys_enter_exit_group
+          /@owned[tid]/
+          {
+              $task = (struct task_struct *)curtask;
+              $identity = $task->group_leader->thread_pid;
+              $number = (struct upid *)((uint64)$identity + offsetof(struct pid, numbers) + (uint64)$identity->level * sizeof(struct upid));
+              printf("{\"event\":\"exit_group\",\"pid\":%d,\"ns_pid\":%d,\"tid\":%d,\"ns\":%llu,\"code\":%d}\n",
+                     pid, $number->nr, tid, nsecs, args.error_code);
+          }
+          tracepoint:syscalls:sys_enter_wait4
+          /@owned[tid]/
+          {
+              @wait_status[tid] = (uint64)args.stat_addr;
+              @wait_pid[tid] = args.upid;
+          }
+          tracepoint:syscalls:sys_exit_wait4
+          /@owned[tid]/
+          {
+              if (args.ret > 0) {
+                  $status = @wait_status[tid] ? *(int32 *)uptr(@wait_status[tid]) : -1;
+                  printf("{\"event\":\"wait4\",\"pid\":%d,\"tid\":%d,\"ns\":%llu,\"child\":%ld,\"raw_status\":%d}\n",
+                         pid, tid, nsecs, args.ret, $status);
+              } else if (args.ret < 0) {
+                  printf("{\"event\":\"wait4-error\",\"pid\":%d,\"tid\":%d,\"ns\":%llu,\"requested\":%ld,\"result\":%ld}\n",
+                         pid, tid, nsecs, @wait_pid[tid], args.ret);
+              }
+              delete(@wait_status[tid]);
+              delete(@wait_pid[tid]);
+          }
+          tracepoint:syscalls:sys_enter_waitid
+          /@owned[tid]/
+          {
+              @waitid_pid[tid] = args.upid;
+              @waitid_options[tid] = args.options;
+          }
+          tracepoint:syscalls:sys_exit_waitid
+          /@owned[tid]/
+          {
+              printf("{\"event\":\"waitid\",\"pid\":%d,\"tid\":%d,\"ns\":%llu,\"requested\":%ld,\"options\":%ld,\"result\":%ld}\n",
+                     pid, tid, nsecs, @waitid_pid[tid], @waitid_options[tid], args.ret);
+              delete(@waitid_pid[tid]);
+              delete(@waitid_options[tid]);
+          }
+          tracepoint:sched:sched_process_exit
+          /@owned[tid]/
+          {
+              if (pid == tid) {
+                  $task = (struct task_struct *)curtask;
+                  $identity = $task->group_leader->thread_pid;
+                  $number = (struct upid *)((uint64)$identity + offsetof(struct pid, numbers) + (uint64)$identity->level * sizeof(struct upid));
+                  printf("{\"event\":\"kernel-process-exit\",\"pid\":%d,\"ns_pid\":%d,\"tid\":%d,\"ns\":%llu,\"raw_status\":%d,\"group_status\":%d}\n",
+                         pid, $number->nr, tid, nsecs, $task->exit_code, $task->signal->group_exit_code);
+              }
+              delete(@owned[tid]);
+          }
+          END
+          {
+              clear(@owned);
+              clear(@wait_status);
+              clear(@wait_pid);
+              clear(@waitid_pid);
+              clear(@waitid_options);
+          }
+          BPF
+      - name: Build pristine source normally before kernel tracing
+        working-directory: source
+        run: |
+          dotnet --info > "$DIAG_ROOT/evidence/dotnet-info.log"
+          dotnet build tests/DncDbg.NativeHostTests -c Release --nologo -v:q > "$DIAG_ROOT/build.log" 2>&1
+          python3 "$DIAG_ROOT/driver.py" prepare > "$DIAG_ROOT/prepare.log" 2>&1
+      - name: Require actual kernel tracing capability
+        run: |
+          if ! command -v bpftrace; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq bpftrace
+          fi
+          if ! mountpoint -q /sys/kernel/tracing; then
+            sudo mount -t tracefs tracefs /sys/kernel/tracing
+          fi
+          test -r /sys/kernel/btf/vmlinux
+          sudo test -r /sys/kernel/tracing/events/syscalls/sys_enter_exit_group/format
+          sudo test -r /sys/kernel/tracing/events/syscalls/sys_enter_wait4/format
+          sudo test -r /sys/kernel/tracing/events/sched/sched_process_exit/format
+          sudo bpftrace --info > "$DIAG_ROOT/capabilities.log" 2>&1
+      - name: Validate kernel and wait4 tracing with a known exit-7 control
+        run: |
+          command="/usr/sbin/runuser -u $(id -un) -- /usr/bin/env PATH=$PATH DOTNET_ROOT=$DOTNET_ROOT TESTED_ROOT=$TESTED_ROOT DIAG_ROOT=$DIAG_ROOT /usr/bin/python3 $DIAG_ROOT/driver.py control"
+          sudo env BPFTRACE_MAX_STRLEN=128 bpftrace -q -c "$command" "$DIAG_ROOT/trace.bt" "$DIAG_ROOT/driver.py" > "$DIAG_ROOT/control.log" 2>&1
+          python3 "$DIAG_ROOT/driver.py" verify-control
+      - name: Trace at most sixty unchanged attached direct-exit-7 cases
+        run: |
+          command="/usr/sbin/runuser -u $(id -un) -- /usr/bin/env PATH=$PATH DOTNET_ROOT=$DOTNET_ROOT TESTED_ROOT=$TESTED_ROOT DIAG_ROOT=$DIAG_ROOT /usr/bin/python3 $DIAG_ROOT/driver.py run"
+          sudo env BPFTRACE_MAX_STRLEN=128 bpftrace -q -c "$command" "$DIAG_ROOT/trace.bt" "$DIAG_ROOT/driver.py" > "$DIAG_ROOT/trace.log" 2>&1
+          python3 "$DIAG_ROOT/driver.py" verify
+      - name: Recover only this run's journaled owned processes
         if: always()
-        timeout-minutes: 3
-        run: >-
-          dotnet run --project tests/DncDbg.DeviceTests -c Release --no-build --
-          --output build/validation/device-ci --cleanup
-      - name: Upload bounded external-device evidence
+        timeout-minutes: 2
+        run: |
+          output="$TESTED_ROOT/build/native-exit-diagnostic"
+          if test -d "$output"; then
+            python3 "$TESTED_ROOT/tests/DncDbg.NativeHostTests/run_tests.py" --output "$output" --cleanup > "$DIAG_ROOT/cleanup.log" 2>&1
+          fi
+      - name: Collect bounded sanitized evidence even after failure
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: remote-external-device-x64-${{ github.run_attempt }}
-          path: build/validation/device-ci/evidence/
-          retention-days: 7
-          if-no-files-found: error
-  native:
-    name: Remote native host (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, macos-26]
-        include:
-          - os: ubuntu-24.04
-            rid: linux-x64
-          - os: macos-26
-            rid: osx-arm64
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          persist-credentials: false
-      - uses: actions/setup-dotnet@v4
-        with:
-          global-json-file: global.json
-      - name: Prove generic remote architecture with the real C++ target agent
-        run: >-
-          dotnet run --project tests/DncDbg.NativeHostTests -c Release --
-          --output build/validation/native-host-ci
-      - name: Recover only journaled native-host resources after interruption
+        run: |
+          if test -f "$DIAG_ROOT/driver.py"; then
+            python3 "$DIAG_ROOT/driver.py" collect
+          fi
+      - uses: actions/upload-artifact@v4
         if: always()
-        timeout-minutes: 3
-        run: >-
-          dotnet run --project tests/DncDbg.NativeHostTests -c Release --no-build --
-          --output build/validation/native-host-ci --cleanup
-      - name: Assert ordinary Release adapter has no target agent or test hooks
-        run: python3 tests/DncDbg.RemoteTests/assert_artifacts.py src/DncDbg.Dap/bin/Release
-      - name: Publish explicit qualified RID deployment assets
-        run: >-
-          python3 src/DncDbg.Remote.Target/publish.py --rid ${{ matrix.rid }}
-          --include-runtime --payload-directory tests/DncDbg.NativeHostTests/Payload/bin/Debug/net10.0
-          --output build/target-package-${{ matrix.rid }}
-      - name: Upload explicit target deployment package
-        uses: actions/upload-artifact@v4
         with:
-          name: dncdbg-target-${{ matrix.rid }}
-          path: build/target-package-${{ matrix.rid }}/
-          include-hidden-files: true
-          retention-days: 7
-          if-no-files-found: error
-      - name: Upload bounded native-host architecture evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: remote-native-host-${{ matrix.os }}-${{ github.run_attempt }}
-          path: build/validation/native-host-ci/evidence/
+          name: bare-linux-native-exit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-exit-diagnostic/evidence/
           retention-days: 7
           if-no-files-found: error
           compression-level: 6

@@ -201,6 +201,21 @@ class MemberAnchoringTests(unittest.TestCase):
                 owner.process.wait(timeout=5)
             shutil.rmtree(directory)
 
+    def test_expiring_operation_does_not_start_a_new_member_probe(self):
+        directory = Path(tempfile.mkdtemp(prefix="member-budget.", dir=ROOT / "build"))
+        suite = Suite(Namespace(platform="contracts", output=directory, xcode_dir=None))
+        suite.state = {"platform": "contracts", "source": {"head": "a" * 40, "dirty": False}}
+        try:
+            with patch.object(suite, "capture_command_members",
+                              side_effect=AssertionError("No sampling admission near command expiry")) as sample:
+                with self.assertRaises(TimeoutError):
+                    suite.run(sys.executable, "-c", "import time;time.sleep(30)",
+                              timeout=0.25, progress=True, progress_interval=0.05)
+            sample.assert_not_called()
+            self.assertTrue(suite.recovery_fallback.complete)
+        finally:
+            shutil.rmtree(directory)
+
 
 if __name__ == "__main__":
     unittest.main()

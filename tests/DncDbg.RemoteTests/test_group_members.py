@@ -138,6 +138,23 @@ class MemberAnchoringTests(unittest.TestCase):
                 group.send(signal.SIGTERM, time.monotonic() + 1)
         send.assert_not_called()
 
+    def test_leader_exit_during_durable_write_cannot_publish_member_authority(self):
+        group, leader = self.ownership()
+        child = leader | {"pid": 123457, "startIdentity": "compiler"}
+
+        def persist(proof):
+            self.assertFalse(group.anchors_complete)
+            group.recovery.process.poll.return_value = 0
+
+        with patch("process_tools.process_identity", side_effect=lambda pid: leader if pid == leader["pid"] else child), \
+                patch("process_tools.subprocess.run", return_value=subprocess.CompletedProcess(
+                    ["ps"], 0, "123456\n123457\n", "")), patch("process_tools.os.killpg") as send:
+            with self.assertRaisesRegex(RuntimeError, "leader"):
+                group.capture_members(time.monotonic() + 1, persist)
+        self.assertFalse(group.anchors_complete)
+        self.assertNotIn(child["pid"], group.members)
+        send.assert_not_called()
+
     def test_real_compiler_like_child_is_owned_after_original_leader_exit(self):
         directory = Path(tempfile.mkdtemp(prefix="member-anchor.", dir=ROOT / "build"))
         record, release = directory / "child.json", directory / "release.fifo"

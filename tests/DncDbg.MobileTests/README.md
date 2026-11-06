@@ -227,6 +227,15 @@ group. No process command lines/environment, global ancestry scan or inferred
 shared-service kill is used. iOS creation shares the same existing 600-second
 provisioning clock rather than starting an extra budget before boot.
 
+At the existing build progress cadence, member birth identities are read twice
+under the exact still-live original leader and durably recorded before they
+become authorization evidence. Sampling stays inside the same command deadline,
+with at most 1,024 anchors and 128 samples. After leader exit, every currently
+observed member must match a prior anchor; one known member never authorizes an
+unknown or reused member. Sampling/probe/journal failure is sticky and refuses
+signals; an independently empty group can still prove absence. Exited transient
+children are not an individual-PID cleanup list.
+
 Birth capture is immutable and happens once during protected Popen publication,
 with candidate/read-only birth observations and nonblocking Popen polls proving
 the retained child is still alive before publication. Its state is explicitly verified, unverified or not

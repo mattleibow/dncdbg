@@ -2,6 +2,7 @@
 import os
 import ctypes
 import errno
+import hashlib
 import json
 import selectors
 import signal
@@ -63,6 +64,9 @@ class ProcessGroupOwnership:
         self.original = None
         self.capture_state = "not-applicable"
         self.members = {}
+        self.anchors_complete = True
+        self.anchor_failed = False
+        self.member_samples = []
         self.observations = []
         self.signals = []
         self.uid, self.euid = os.getuid(), os.geteuid()
@@ -132,10 +136,67 @@ class ProcessGroupOwnership:
         if any(row["pgid"] != group or row["sid"] != self.original["sid"] or row["uid"] != self.original["uid"]
                for row in rows):
             raise RuntimeError("Scoped group observation contains a different group/session/UID.")
-        if not any(row["pid"] in self.members and self.same(row, self.members[row["pid"]]) for row in rows):
-            raise RuntimeError("No exact original or journaled member identity authorizes the group.")
-        self.members.update((row["pid"], row) for row in rows)
+        alive = leader is not None and leader["state"] not in ("Z", 5) and process.poll() is None
+        if not alive and any(row["pid"] not in self.members or not self.same(row, self.members[row["pid"]])
+                             for row in rows):
+            raise RuntimeError("No exact journaled birth identity authorizes every current group member.")
         return rows
+
+    def capture_members(self, deadline, persist):
+        process = self.recovery.process
+        if process.poll() is not None:
+            return False
+        self.anchors_complete = False
+        try:
+            if self.anchor_failed or self.capture_state != "verified":
+                raise RuntimeError("Original group member anchoring is incomplete or unverified.")
+            if len(self.member_samples) >= 128:
+                raise RuntimeError("Owned member sampling evidence bound exhausted.")
+
+            def leader_alive():
+                identity = process_identity(process.pid)
+                if (identity is None or identity["state"] in ("Z", 5) or
+                        not self.same(identity, self.original) or process.poll() is not None):
+                    raise RuntimeError("Original leader exited or changed during member capture.")
+
+            leader_alive()
+            rows = self.observe(deadline)
+            if not any(self.same(row, self.original) for row in rows):
+                raise RuntimeError("Verified original leader is missing from its scoped group.")
+            fingerprint = getattr(self, "fingerprint", None) or getattr(self.recovery, "command_intent", {}).get("fingerprint")
+            if not isinstance(fingerprint, str) or len(fingerprint) != 64:
+                raise RuntimeError("Member capture requires the redacted owned-command fingerprint.")
+            candidate = dict(self.members)
+            for row in rows:
+                current = process_identity(row["pid"])
+                if current is None or current["state"] in ("Z", 5):
+                    continue
+                if not self.same(row, current):
+                    raise RuntimeError("Member birth/group/session/UID changed during capture.")
+                previous = candidate.get(row["pid"])
+                if previous is not None and not self.same(previous, row):
+                    raise RuntimeError("A previously anchored member PID was reused.")
+                member = {key: row[key] for key in ("pid", "pgid", "sid", "uid", "startIdentity")}
+                member["fingerprint"] = hashlib.sha256(
+                    (fingerprint + json.dumps(member, sort_keys=True)).encode()).hexdigest()
+                candidate[row["pid"]] = member
+            if len(candidate) > 1024:
+                raise RuntimeError("Owned member anchor bound exhausted.")
+            leader_alive()
+            sample = {"at": time.monotonic(), "members": list(candidate.values()), "complete": False}
+            persist(sample)
+            if time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(process.args, 0)
+            leader_alive()
+            self.members = candidate
+            self.anchors_complete = True
+            self.member_samples.append({"at": time.monotonic(), "members": len(candidate), "complete": True})
+            return True
+        except BaseException as error:
+            self.anchor_failed = True
+            if len(self.member_samples) < 128:
+                self.member_samples.append({"at": time.monotonic(), "complete": False, "error": type(error).__name__})
+            raise
 
     def send(self, value, deadline):
         group = self.recovery.process.pid
@@ -144,6 +205,8 @@ class ProcessGroupOwnership:
         before = self.observe(deadline)
         if not before:
             return False
+        if not self.anchors_complete or self.anchor_failed:
+            raise RuntimeError("Owned group member anchoring is incomplete; refusing every signal.")
         attempt = {"at": time.monotonic(), "signal": int(value), "before": before,
                    "after": None, "errno": None, "returnCodeBefore": self.recovery.process.returncode}
         self.signals.append(attempt)
@@ -173,6 +236,8 @@ class ProcessGroupOwnership:
                 "identityCapture": self.capture_state,
                 "ownerCreatedMonotonic": self.created, "originalIdentity": self.original,
                 "memberIdentities": list(self.members.values()), "groupObservations": self.observations,
+                "memberCaptureComplete": self.capture_state == "verified" and self.anchors_complete and not self.anchor_failed,
+                "memberSamples": self.member_samples,
                 "signalAttempts": self.signals, "popenReturnCode": process.returncode if process else None,
                 "operationDeadlineMonotonic": self.recovery.deadline,
                 "recoveryDeadlineMonotonic": self.recovery.recovery_deadline}

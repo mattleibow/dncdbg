@@ -348,7 +348,34 @@ class Suite:
             "originalIdentity": r.group_ownership.original if r.group_ownership is not None else None,
             "identityCapture": r.group_ownership.capture_state if r.group_ownership is not None else "not-applicable",
             "fingerprint": getattr(r, "command_intent", {}).get("fingerprint"),
+            "memberAnchors": list(r.group_ownership.members.values()) if r.group_ownership is not None else [],
+            "memberCaptureComplete": (r.group_ownership.capture_state == "verified" and
+                                      r.group_ownership.anchors_complete and not r.group_ownership.anchor_failed)
+                                     if r.group_ownership is not None else False,
+            "memberSamples": r.group_ownership.member_samples if r.group_ownership is not None else [],
         } for r in self.owned_recoveries()]
+
+    def capture_command_members(self, owner):
+        group = owner.group_ownership
+
+        def persist(sample):
+            owner.command_intent.update(memberAnchors=sample["members"], memberCaptureComplete=False,
+                                        memberSampleMonotonic=sample["at"])
+            self.state["processRecovery"] = self.recovery_state()
+            self.save()
+
+        try:
+            if group.capture_members(owner.deadline, persist):
+                owner.command_intent.update(memberAnchors=list(group.members.values()), memberCaptureComplete=True)
+                self.state["processRecovery"] = self.recovery_state()
+                self.save()
+        except BaseException as error:
+            group.anchors_complete = False
+            group.anchor_failed = True
+            if group.member_samples:
+                group.member_samples[-1].update(complete=False, error=type(error).__name__)
+            owner.command_intent["memberCaptureComplete"] = False
+            raise
 
     def prepare_command(self, owner, command):
         executable = Path(str(command[0])).name
@@ -513,6 +540,7 @@ class Suite:
                                 raise TimeoutError(
                                     f"{command[0]} exceeded {timeout}s; partial output: {log.relative_to(ROOT)}") from error
                             if interval is not None:
+                                self.capture_command_members(owner)
                                 lines = log.read_text(errors="replace").splitlines()
                                 print(f"BUILD still running: {time.monotonic() - started:.1f}/{timeout}s; "
                                       f"last output: {lines[-1] if lines else '<none yet>'}; log: {log.relative_to(ROOT)}", flush=True)
@@ -1207,6 +1235,7 @@ def contracts(suite):
     for path in ("src/DncDbg.Remote/generate_contract.py", "tests/DncDbg.RemoteTests/test_dap.py",
                  "tests/DncDbg.RemoteTests/test_mobile_processes.py", "tests/DncDbg.RemoteTests/test_mobile_runner.py",
                  "tests/DncDbg.RemoteTests/test_journal_durability.py",
+                 "tests/DncDbg.RemoteTests/test_group_members.py",
                  "tests/DncDbg.RemoteTests/test_android_provisioning.py"):
         options = ["--check"] if "generate_contract" in path else ["--parallel"] if path.endswith("test_dap.py") else []
         suite.run(sys.executable, path, *options, timeout=180)

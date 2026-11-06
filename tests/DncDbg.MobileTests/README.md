@@ -296,6 +296,14 @@ are removed from build children before binary logging. These diagnostics are
 subject to the same 8 MiB/file and 100 MiB/run evidence bounds. A build timeout
 remains a red gate, never a successful skip.
 
+Native helper builds additionally emit at most 32 flushed JSONL stage records
+on stderr: script entry, dependency/cache/hash, build ID, SDK probe, native
+compile, archive and final manifest/hash. These report fixed roles, monotonic
+elapsed time and RID/configuration/fault flags, never argv/environment/content.
+Diagnostics preserve the original stdout asset path and tool/hash/cancellation
+failure; writer errors cannot replace a primary build error. Compiler options,
+identity inputs, pins and all existing deadlines are unchanged.
+
 [`mobile.yml`](../../.github/workflows/mobile.yml) runs unconditionally for
 `pull_request` targeting `main` and pushes to `main` (no path filters or
 `continue-on-error`):

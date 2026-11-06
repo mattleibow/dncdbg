@@ -12,6 +12,7 @@ POSIX fake-device DAP/ADB contracts, native ownership fakes, process/listener
 ownership, artifact-isolation and mobile-runner regressions live alongside this
 project (`test_dap.py`, `fake_adb.py`, `NativeContracts.cpp`,
 `test_mobile_processes.py`, `test_mobile_runner.py`, `test_journal_durability.py`, `test_group_members.py`,
+`test_native_build_stages.py`,
 shared `process_tools.py`). Journal contracts exercise real concurrent writers,
 active-run exclusion, crash-released locks and ordered directory/file syncing.
 `--tunnel-contracts` additionally runs real socket fragmentation, half-close,

@@ -2,12 +2,15 @@
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import runpy
+import selectors
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -45,10 +48,12 @@ class NativeBuildStages(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.root)
 
-    def execute(self, stream, failure=None, cache=True):
+    def execute(self, stream, failure=None, cache=True, observe=True):
         calls = []
 
         def entered(stage):
+            if not observe:
+                return
             self.assertTrue(any(event["stage"] == stage and event["phase"] == "begin"
                                 for event in stream.events()), f"Unflushed {stage} entry before blocking tool")
 
@@ -110,6 +115,75 @@ class NativeBuildStages(unittest.TestCase):
 
     def test_cache_miss_download_is_visible_before_the_unchanged_bounded_request(self):
         self.execute(FlushedEvents(), cache=False)
+
+    def test_hash_failure_retains_the_original_rejection_before_any_tool(self):
+        (self.deps / "json.hpp").write_bytes(b"wrong pinned content")
+        stream = FlushedEvents()
+        with self.assertRaisesRegex(SystemExit, "Pinned JSON dependency hash mismatch"):
+            self.execute(stream)
+        self.assertTrue(any(event["stage"] == "dependency-verify" and event["phase"] == "error"
+                            for event in stream.events()))
+
+    def test_diagnostic_writer_failure_cannot_mask_tool_failure_or_cancellation(self):
+        class Broken(io.StringIO):
+            def write(self, text):
+                raise OSError("diagnostic disk full")
+
+        for original in (RuntimeError("exact tool failure"), KeyboardInterrupt("exact cancellation")):
+            with self.subTest(kind=type(original).__name__):
+                with self.assertRaises(type(original)) as raised:
+                    self.execute(Broken(), failure=original, observe=False)
+                self.assertIs(raised.exception, original)
+
+    def test_real_stderr_pipe_exposes_sdk_entry_before_barrier_release(self):
+        worker = f"""
+import runpy,subprocess,sys
+from pathlib import Path
+from unittest.mock import patch
+def sdk(*args,**kwargs):
+    print("READY",flush=True)
+    sys.stdin.readline()
+    return "/fixture-sdk"
+def run(command,**kwargs):
+    output=Path(command[3] if command[:2]==["xcrun","ar"] else command[command.index("-o")+1])
+    output.write_bytes(b"fixture native output")
+    return subprocess.CompletedProcess(command,0)
+sys.argv=[{str(self.source / "build.py")!r},"iossimulator-x64","--configuration","Debug"]
+with patch("subprocess.check_output",sdk),patch("subprocess.run",run):
+    runpy.run_path(sys.argv[0],run_name="__main__")
+"""
+        process = subprocess.Popen([sys.executable, "-I", "-c", worker], stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdout, selectors.EVENT_READ)
+                self.assertTrue(selector.select(5), "SDK barrier was not reached")
+            self.assertEqual(process.stdout.readline().strip(), "READY")
+            observed = []
+            data = b""
+            deadline = time.monotonic() + 5
+            os.set_blocking(process.stderr.fileno(), False)
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stderr, selectors.EVENT_READ)
+                while not any(event["stage"] == "sdk-probe" and event["phase"] == "begin" for event in observed):
+                    self.assertTrue(selector.select(max(0, deadline - time.monotonic())), "Missing flushed SDK entry")
+                    part = os.read(process.stderr.fileno(), 65536)
+                    self.assertTrue(part, "Native stage stream closed before SDK entry")
+                    data += part
+                    while b"\n" in data:
+                        line, data = data.split(b"\n", 1)
+                        observed.append(json.loads(line))
+            os.set_blocking(process.stderr.fileno(), True)
+            self.assertIsNone(process.poll())
+            output, error = process.communicate("\n", timeout=5)
+            self.assertEqual(process.returncode, 0, error)
+            self.assertIn("libdncdbg_target.a", output)
+            observed += [json.loads(line) for line in error.splitlines() if line.startswith("{")]
+            self.assertLessEqual(len(observed), 32)
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.communicate(timeout=5)
 
 
 if __name__ == "__main__":

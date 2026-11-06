@@ -1236,6 +1236,7 @@ def contracts(suite):
                  "tests/DncDbg.RemoteTests/test_mobile_processes.py", "tests/DncDbg.RemoteTests/test_mobile_runner.py",
                  "tests/DncDbg.RemoteTests/test_journal_durability.py",
                  "tests/DncDbg.RemoteTests/test_group_members.py",
+                 "tests/DncDbg.RemoteTests/test_native_build_stages.py",
                  "tests/DncDbg.RemoteTests/test_android_provisioning.py"):
         options = ["--check"] if "generate_contract" in path else ["--parallel"] if path.endswith("test_dap.py") else []
         suite.run(sys.executable, path, *options, timeout=180)

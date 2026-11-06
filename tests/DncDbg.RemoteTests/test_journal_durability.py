@@ -310,6 +310,52 @@ raise SystemExit(run_suite.main())
                 if timeout:
                     self.assertIn("original operation timeout", manifest["error"])
 
+    def test_released_lease_and_competing_cleanup_never_observe_final_success(self):
+        directory = self.output / "release-handoff"
+        script = f"""
+import sys
+from pathlib import Path
+sys.path.insert(0,{str(ROOT / "tests/DncDbg.MobileTests")!r})
+sys.path.insert(0,{str(ROOT / "tests/DncDbg.RemoteTests")!r})
+import run_suite
+run_suite.contracts = lambda suite: None
+close = run_suite.JournalLease.close
+attempted = False
+def release(lease):
+    global attempted
+    if not attempted:
+        attempted = True
+        close(lease)
+        print("READY",flush=True)
+        sys.stdin.readline()
+        raise OSError("release failed after unlock")
+    return close(lease)
+run_suite.JournalLease.close = release
+sys.argv = ["run_suite.py","--platform","contracts","--output",sys.argv[1]]
+raise SystemExit(run_suite.main())
+"""
+        runner = self.worker(script, directory)
+        command = [sys.executable, str(ROOT / "tests/DncDbg.MobileTests/run_suite.py"),
+                   "--platform", "contracts", "--cleanup", "--output", str(directory)]
+        try:
+            self.ready(runner)
+            state_before = (directory / "state.json").read_bytes()
+            manifest_before = (directory / "evidence/manifest.json").read_bytes()
+            cleanup = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=10)
+            self.assertFalse(json.loads(state_before)["cleanupDone"])
+            self.assertFalse(json.loads(manifest_before)["passed"])
+            self.assertNotEqual(cleanup.returncode, 0)
+            self.assertEqual((directory / "state.json").read_bytes(), state_before)
+            self.assertEqual((directory / "evidence/manifest.json").read_bytes(), manifest_before)
+            runner.stdin.write("\n")
+            runner.stdin.flush()
+            runner.wait(timeout=5)
+            self.assertEqual(runner.returncode, 1, runner.stderr.read())
+            self.assertFalse(json.loads((directory / "state.json").read_text())["cleanupDone"])
+            self.assertFalse(json.loads((directory / "evidence/manifest.json").read_text())["passed"])
+        finally:
+            self.finish(runner)
+
     def test_durable_directory_creation_refuses_symlink_components(self):
         actual = self.output / "actual"
         actual.mkdir()

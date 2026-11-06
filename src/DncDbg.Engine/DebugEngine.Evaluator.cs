@@ -121,10 +121,13 @@ public sealed partial class DebugEngine
         public object? EvaluateToHost(string expression) => ToHost(Run(expression));
 
         /// <summary>Display text of the value; <paramref name="quoteStrings"/> is what ",nq" would turn off anyway.</summary>
-        public string EvaluateToText(string expression, bool quoteStrings)
+        public string EvaluateToText(string expression, bool quoteStrings, bool escapeUnquotedStrings = false)
         {
             (string code, DisplayOptions options) = SplitFormatSpecifiers(expression, new DisplayOptions(NoQuotes: !quoteStrings));
-            return ToVariable(expression, Run(code), options).Value;
+            bool escapedNoQuotes = escapeUnquotedStrings && options.NoQuotes;
+            VariableInfo result = ToVariable(expression, Run(code), escapedNoQuotes ? options with { NoQuotes = false } : options);
+            return escapedNoQuotes && result.Type == "string" && result.Value.StartsWith('"') && result.Value.EndsWith('"')
+                ? result.Value[1..^1] : result.Value;
         }
 
         // "expression,h" / ",nq" / ",raw" / ",d": the debugger's format specifiers, which are not C#
@@ -163,21 +166,14 @@ public sealed partial class DebugEngine
         private static int LastTopLevelComma(string text)
         {
             int depth = 0, last = -1;
-            for (int i = 0; i < text.Length; i++)
+            foreach (SyntaxToken token in SyntaxFactory.ParseTokens(text))
             {
-                char c = text[i];
-                if (c is '"' or '\'')
-                {
-                    for (i++; i < text.Length && text[i] != c; i++)
-                        if (text[i] == '\\')
-                            i++;
-                }
-                else if (c is '(' or '[' or '{')
+                if (token.Kind() is SyntaxKind.OpenParenToken or SyntaxKind.OpenBracketToken or SyntaxKind.OpenBraceToken)
                     depth++;
-                else if (c is ')' or ']' or '}')
+                else if (token.Kind() is SyntaxKind.CloseParenToken or SyntaxKind.CloseBracketToken or SyntaxKind.CloseBraceToken)
                     depth--;
-                else if (c == ',' && depth <= 0)
-                    last = i;
+                else if (token.IsKind(SyntaxKind.CommaToken) && depth <= 0)
+                    last = token.SpanStart;
             }
             return last;
         }

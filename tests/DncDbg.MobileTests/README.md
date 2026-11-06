@@ -242,7 +242,20 @@ inventory. Pending intent recovery is read-only until exactly one owned
 identity is verified, or exact absence is recorded; duplicate, mismatched or
 unavailable inventory never authorizes deletion or a clean journal.
 State and core manifest commits sync file contents before atomic replacement
-and sync the containing directory before returning. Original source head/dirty
+and sync the containing directory before returning. Each save writes and syncs
+its own exclusively created same-directory temporary, preserving the prior
+file's permissions and removing only that temporary on failure. Output and
+evidence directory components are created one at a time with their parent
+directory synced before continuing; interrupted creation is synced again before
+reuse. Owned journal paths reject symlink components.
+
+The runner exclusively locks the persistent `.journal.lock` inode before its
+initial state, retaining the lock through commands, resource cleanup, evidence
+and final process settlement. The lock records the run nonce, PID, public kernel
+birth identity and original source. Concurrent `--cleanup` refuses without
+mutating the active journal. A crashed owner's advisory lock is released by the
+OS; recovery never guesses ownership from a stale PID or deletes the lock file.
+Original source head/dirty
 provenance is durable and never replaced with a later checkout during recovery.
 A failed core manifest, including the redacted pending command intent, is written
 before optional collection, retaining source/tuple/phases/recovery/resource

@@ -1,5 +1,7 @@
 """Internal POSIX device orchestration. Public entrypoint: dotnet run --project tests/DncDbg.MobileTests."""
 import argparse
+import errno
+import fcntl
 import hashlib
 import json
 import os
@@ -9,8 +11,10 @@ import random
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 import uuid
@@ -18,7 +22,7 @@ import uuid
 from mobile_tools import ROOT, adb_path, android_sdk, tool_environment
 
 from process_tools import (OwnedProcessRecovery, OwnedProcessSettlementError, ProcessGroupOwnership,
-                           original_cancellation, run_owned, start_owned, stop_owned)
+                           original_cancellation, process_identity, run_owned, start_owned, stop_owned)
 
 PIN = json.loads(Path(__file__).with_name("tuple.json").read_text())
 FIXTURE = ROOT / "tests/DncDbg.MauiTestApp"
@@ -51,39 +55,159 @@ def properties(path):
     return {key.strip(): value.strip() for line in path.read_text().splitlines() if "=" in line
             for key, value in [line.split("=", 1)]}
 
+def owned_directory(path):
+    identity = path.lstat()
+    require(stat.S_ISDIR(identity.st_mode) and not stat.S_ISLNK(identity.st_mode) and identity.st_uid == os.geteuid(),
+            f"Journal directory is not an owned nonsymlink directory: {path}")
+
+
+def journal_components(path):
+    path = Path(os.path.abspath(path))
+    require(path.is_relative_to(ROOT / "build"), "Journal directories must remain under this checkout's build/.")
+    current = ROOT
+    components = []
+    for name in path.relative_to(ROOT).parts:
+        current = current / name
+        components.append(current)
+    return components
+
+
+def sync_directory(path):
+    directory = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+def durable_mkdir(path, fresh=False):
+    components = journal_components(path)
+    for directory in components:
+        if directory.exists() or directory.is_symlink():
+            owned_directory(directory)
+            require(not (fresh and directory == components[-1]),
+                    f"Evidence output already exists; choose a fresh path: {directory}")
+            # An existing component may have survived an interrupted creator's failed parent sync.
+            sync_directory(directory.parent)
+            continue
+        try:
+            directory.mkdir()
+        except FileExistsError:
+            owned_directory(directory)
+            require(not (fresh and directory == components[-1]),
+                    f"Evidence output already exists; choose a fresh path: {directory}")
+        sync_directory(directory.parent)
+        owned_directory(directory)
+
+
 def atomic_json(path, value):
-    pending = path.with_name(path.name + ".pending")
+    owned_directory(path.parent)
+    pending = None
     failure = None
     try:
+        require(not path.is_symlink(), "Journal files must not be symlinks.")
         mode = path.stat().st_mode & 0o777 if path.exists() else 0o600
-        pending.write_text(json.dumps(value, indent=2))
-        pending.chmod(mode)
-        with pending.open("r+b") as stream:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                         prefix=path.name + ".", suffix=".pending", delete=False) as stream:
+            pending = Path(stream.name)
+            os.fchmod(stream.fileno(), mode)
+            json.dump(value, stream, indent=2)
             stream.flush()
             os.fsync(stream.fileno())
         pending.replace(path)
-        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        sync_directory(path.parent)
     except BaseException as error:
         failure = error
         raise
     finally:
         try:
-            pending.unlink(missing_ok=True)
+            if pending is not None:
+                pending.unlink(missing_ok=True)
         except BaseException as cleanup:
             if failure is not None:
                 raise failure from cleanup
             raise
 
 
+class JournalLease:
+    def __init__(self, directory):
+        self.directory = directory
+        self.descriptor = None
+
+    def acquire(self):
+        directory = self.directory
+        durable_mkdir(directory)
+        path = directory / ".journal.lock"
+        descriptor = None
+        try:
+            try:
+                descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            except FileExistsError:
+                descriptor = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
+            identity = os.fstat(descriptor)
+            require(stat.S_ISREG(identity.st_mode) and identity.st_uid == os.geteuid() and identity.st_nlink == 1,
+                    "Journal lock is not an owned regular file.")
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as error:
+                raise RuntimeError("An active runner already owns this output journal; cleanup refused without mutation.") from error
+            live = path.lstat()
+            require((live.st_dev, live.st_ino) == (identity.st_dev, identity.st_ino),
+                    "Journal lock identity changed during acquisition.")
+            os.fsync(descriptor)
+            sync_directory(directory)
+            self.identity = (identity.st_dev, identity.st_ino)
+            self.descriptor = descriptor
+            descriptor = None
+        finally:
+            if descriptor is not None:
+                self.descriptor = None
+                os.close(descriptor)
+
+    def record(self, nonce, source):
+        identity = process_identity(os.getpid())
+        require(identity is not None, "Cannot record the active journal owner's kernel identity.")
+        payload = json.dumps({"runNonce": nonce, "pid": os.getpid(), "owner": identity, "source": source}).encode()
+        os.ftruncate(self.descriptor, 0)
+        os.lseek(self.descriptor, 0, os.SEEK_SET)
+        while payload:
+            written = os.write(self.descriptor, payload)
+            require(written > 0, "Journal owner metadata write made no progress.")
+            payload = payload[written:]
+        os.fsync(self.descriptor)
+
+    def close(self):
+        if self.descriptor is not None:
+            os.close(self.descriptor)
+            self.descriptor = None
+
+    def reclaim(self):
+        if self.descriptor is not None:
+            try:
+                identity = os.fstat(self.descriptor)
+            except OSError as error:
+                if error.errno != errno.EBADF:
+                    raise
+                self.descriptor = None
+            else:
+                if (identity.st_dev, identity.st_ino) != self.identity:
+                    self.descriptor = None
+                else:
+                    fcntl.flock(self.descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    live = (self.directory / ".journal.lock").lstat()
+                    require((live.st_dev, live.st_ino) == self.identity,
+                            "Journal lock changed before failure evidence could be committed.")
+                    return
+        self.acquire()
+
+
 class Suite:
     def __init__(self, args):
         self.args = args
-        self.output = args.output.resolve()
-        require(self.output.is_relative_to((ROOT / "build").resolve()), "Evidence must be under this checkout's build/.")
+        self.output = Path(os.path.abspath(args.output))
+        for directory in journal_components(self.output):
+            if directory.exists() or directory.is_symlink():
+                owned_directory(directory)
         self.state_path = self.output / "state.json"
         self.env = sdk_environment(os.environ)
         self.state = {}
@@ -985,7 +1109,7 @@ class Suite:
 
     def persist_evidence_core(self):
         destination = self.output / "evidence"
-        destination.mkdir(exist_ok=True)
+        durable_mkdir(destination)
         atomic_json(destination / "manifest.json", self.evidence_core)
 
     def evidence(self, passed, error):
@@ -1006,7 +1130,7 @@ class Suite:
             if path.suffix != ".binlog":
                 require(b'"Token"' not in data and b'"token"' not in data, f"Credential-shaped evidence refused: {relative}")
             target = destination / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
+            durable_mkdir(target.parent)
             target.write_bytes(data)
             manifest["files"][str(relative)] = hashlib.sha256(data).hexdigest()
         manifest["error"] = error
@@ -1024,6 +1148,7 @@ def contracts(suite):
     suite.run("dotnet", "tests/DncDbg.RemoteTests/bin/Release/net10.0/DncDbg.RemoteTests.dll", "--fixture-control-contracts")
     for path in ("src/DncDbg.Remote/generate_contract.py", "tests/DncDbg.RemoteTests/test_dap.py",
                  "tests/DncDbg.RemoteTests/test_mobile_processes.py", "tests/DncDbg.RemoteTests/test_mobile_runner.py",
+                 "tests/DncDbg.RemoteTests/test_journal_durability.py",
                  "tests/DncDbg.RemoteTests/test_android_provisioning.py"):
         options = ["--check"] if "generate_contract" in path else ["--parallel"] if path.endswith("test_dap.py") else []
         suite.run(sys.executable, path, *options, timeout=180)
@@ -1043,7 +1168,7 @@ def main():
     args = parser.parse_args()
     args.output = args.output or ROOT / "build/mobile-tests" / f"{args.platform}-{uuid.uuid4().hex}"
     suite = Suite(args)
-    passed, primary, cancellation = False, None, None
+    passed, primary, cancellation, lease, report_ready = False, None, None, None, False
 
     def remember(failure):
         nonlocal primary, cancellation
@@ -1071,9 +1196,36 @@ def main():
     def interrupted(_signal, _frame):
         raise KeyboardInterrupt("Mobile run interrupted")
 
+    def final_report(message):
+        try:
+            print(message, file=sys.stderr)
+        except BaseException as error:
+            remember(error)
+
+    def final_failure(failure):
+        nonlocal passed
+        passed = False
+        remember(failure)
+        suite.state["cleanupDone"] = False
+        suite.state.setdefault("cleanupErrors", []).append(f"Final journal settlement: {failure!r}")
+        if suite.evidence_core is not None:
+            suite.evidence_core.update(passed=False, cleanup=False,
+                error=f"{primary!r}\nFinal journal settlement: {failure!r}",
+                cleanupErrors=suite.state["cleanupErrors"])
+            for persist in (suite.save, suite.persist_evidence_core):
+                try:
+                    persist()
+                except BaseException as error:
+                    remember(error)
+                    final_report(f"Final failure evidence unavailable: {error!r}")
+
     signal.signal(signal.SIGTERM, interrupted)
     try:
         if args.cleanup:
+            if not suite.output.exists():
+                return 0
+            lease = JournalLease(suite.output)
+            lease.acquire()
             if not suite.state_path.exists():
                 return 0
             suite.state = json.loads(suite.state_path.read_text())
@@ -1081,6 +1233,7 @@ def main():
                 "head": suite.state.get("commandIntent", {}).get("sourceHead") or
                         suite.state.get("simulatorCreate", {}).get("sourceHead"),
                 "dirty": None, "sourceUnavailable": True}
+            lease.record(suite.run_nonce, suite.source)
             require(suite.state["platform"] == args.platform, "Cleanup platform does not match the journal.")
             if (suite.state.get("cleanupDone") and suite.state.get("buildGroupSettled", True) and
                     not suite.state.get("commandRecoveryRequired", False) and
@@ -1093,10 +1246,12 @@ def main():
             except BaseException as failure:
                 remember(failure)
         else:
-            require(not suite.output.exists(), f"Evidence output already exists; choose a fresh path: {suite.output}")
-            suite.output.mkdir(parents=True)
+            durable_mkdir(suite.output, fresh=True)
+            lease = JournalLease(suite.output)
+            lease.acquire()
             suite.state = {"platform": args.platform, "cleanupDone": False}
             suite.source_record()
+            lease.record(suite.run_nonce, suite.source)
             suite.save()
             try:
                 if args.platform == "contracts":
@@ -1146,8 +1301,7 @@ def main():
                 suite.state.setdefault("evidenceErrors", []).append(repr(write_error))
                 print(f"Evidence failure: {write_error}", file=sys.stderr)
             print(error, file=sys.stderr)
-        print(f"{'PASS' if passed and primary is None else 'FAIL'}: {args.platform}; "
-              f"evidence: {suite.output.relative_to(ROOT)}/evidence")
+        report_ready = True
     except BaseException as failure:
         remember(failure)
         try:
@@ -1160,7 +1314,44 @@ def main():
             settle(suite.recovery_fallback)
             for recovery in suite.process_recoveries:
                 settle(recovery)
+            if primary is not None and passed and lease is not None:
+                try:
+                    final_failure(primary)
+                except BaseException as failure:
+                    remember(failure)
+                    final_report("Final settlement evidence could not be completed.")
         finally:
+            try:
+                if lease is not None:
+                    try:
+                        lease.close()
+                    except BaseException as failure:
+                        established = primary
+                        remember(failure)
+                        passed = False
+                        try:
+                            lease.reclaim()
+                            final_failure(failure)
+                        except BaseException as recovery_error:
+                            remember(recovery_error)
+                            final_report(f"Journal release recovery refused: {recovery_error!r}")
+                        finally:
+                            try:
+                                lease.close()
+                            except BaseException as cleanup_error:
+                                remember(cleanup_error)
+                                final_report(f"Journal release remains unverified: {cleanup_error!r}")
+                        if not report_ready and established is None and cancellation is None:
+                            raise
+            finally:
+                if cancellation is not None:
+                    raise cancellation
+    if report_ready:
+        try:
+            print(f"{'PASS' if passed and primary is None else 'FAIL'}: {args.platform}; "
+                  f"evidence: {suite.output.relative_to(ROOT)}/evidence")
+        except BaseException as failure:
+            remember(failure)
             if cancellation is not None:
                 raise cancellation
     return 0 if primary is None and (args.cleanup or passed) else 1

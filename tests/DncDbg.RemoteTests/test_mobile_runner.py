@@ -895,27 +895,23 @@ class MobileRunnerTests(unittest.TestCase):
     def test_state_commit_is_atomic_and_keeps_the_previous_pending_intent_on_write_failure(self):
         self.suite.state = {"phase": "pending", "cleanupDone": False}
         self.suite.save()
-        write = Path.write_text
-
-        def partial(path, *args, **kwargs):
-            if path.name.endswith(".pending"):
-                write(path, "{partial")
-                raise OSError("interrupted atomic state commit")
-            return write(path, *args, **kwargs)
+        def partial(value, stream, *args, **kwargs):
+            stream.write("{partial")
+            raise OSError("interrupted atomic state commit")
 
         self.suite.state["phase"] = "complete"
-        with patch.object(Path, "write_text", partial), self.assertRaises(OSError):
+        with patch("run_suite.json.dump", side_effect=partial), self.assertRaises(OSError):
             self.suite.save()
         self.assertEqual(json.loads(self.suite.state_path.read_text())["phase"], "pending")
 
     def test_state_intent_is_fsynced_before_replace_and_directory_is_fsynced_before_return(self):
         self.suite.state = {"phase": "pending", "cleanupDone": False}
-        write, replace, sync = Path.write_text, Path.replace, os.fsync
+        dump, replace, sync = json.dump, Path.replace, os.fsync
         events = []
 
-        def writing(path, *args, **kwargs):
+        def writing(value, stream, *args, **kwargs):
             events.append("write")
-            return write(path, *args, **kwargs)
+            return dump(value, stream, *args, **kwargs)
 
         def replacing(path, target):
             events.append("replace")
@@ -925,11 +921,11 @@ class MobileRunnerTests(unittest.TestCase):
             events.append("fsync-dir" if os.fstat(fd).st_mode & 0o170000 == 0o040000 else "fsync-file")
             return sync(fd)
 
-        with patch.object(Path, "write_text", writing), patch.object(Path, "replace", replacing), \
+        with patch("run_suite.json.dump", side_effect=writing), patch.object(Path, "replace", replacing), \
                 patch("run_suite.os.fsync", side_effect=syncing):
             self.suite.save()
         self.assertEqual(events, ["write", "fsync-file", "replace", "fsync-dir"])
-        self.assertFalse(self.suite.state_path.with_name("state.json.pending").exists())
+        self.assertFalse(list(self.output.glob("*.pending")))
         self.assertEqual(json.loads(self.suite.state_path.read_text())["phase"], "pending")
 
     def test_failed_intent_fsync_prevents_any_command_launch(self):
@@ -1346,13 +1342,16 @@ elif sys.argv[2] == "list":
     def test_evidence_write_failure_never_loses_owner_or_original_cancellation(self):
         original = KeyboardInterrupt("cancel with full disk")
         real_start = process_tools.start_owned
-        write = Path.write_text
+        dump = json.dump
         journals = [0]
 
         def full_disk(path, *args, **kwargs):
-            if path.name == "state.json.pending" and journals[0] < 2:
+            raise OSError("evidence disk full")
+
+        def journal(value, stream, *args, **kwargs):
+            if Path(stream.name).name.startswith("state.json.") and journals[0] < 2:
                 journals[0] += 1
-                return write(path, *args, **kwargs)
+                return dump(value, stream, *args, **kwargs)
             raise OSError("evidence disk full")
 
         def start(*args, **kwargs):
@@ -1369,6 +1368,7 @@ elif sys.argv[2] == "list":
             return process
 
         with patch("process_tools.start_owned", side_effect=start), \
+                patch("run_suite.json.dump", side_effect=journal), \
                 patch.object(Path, "write_text", full_disk):
             try:
                 self.suite.run(sys.executable, "-c", "print('output before cancellation')",
@@ -1388,13 +1388,16 @@ elif sys.argv[2] == "list":
 
     def test_incomplete_recovery_owner_survives_unwritable_logs_and_state(self):
         real_start = process_tools.start_owned
-        write = Path.write_text
+        dump = json.dump
         journals = [0]
 
         def unwritable(path, *args, **kwargs):
-            if path.name == "state.json.pending" and journals[0] < 2:
+            raise OSError("unwritable evidence")
+
+        def journal(value, stream, *args, **kwargs):
+            if Path(stream.name).name.startswith("state.json.") and journals[0] < 2:
                 journals[0] += 1
-                return write(path, *args, **kwargs)
+                return dump(value, stream, *args, **kwargs)
             raise OSError("unwritable evidence")
 
         def start(*args, **kwargs):
@@ -1411,6 +1414,7 @@ elif sys.argv[2] == "list":
             return process
 
         with patch("process_tools.start_owned", side_effect=start), \
+                patch("run_suite.json.dump", side_effect=journal), \
                 patch.object(Path, "write_text", unwritable):
             with self.assertRaises(process_tools.OwnedProcessSettlementError) as caught:
                 self.suite.run(sys.executable, "-c", "pass", deadline=time.monotonic() + 1)
@@ -2196,18 +2200,18 @@ elif sys.argv[2] == "list":
 
     @unittest.skipUnless(os.name == "posix", "POSIX publication ownership")
     def test_progress_owner_is_retained_before_the_first_postlaunch_journal_write(self):
-        write = Path.write_text
+        dump = json.dump
         writes = [0]
         original = KeyboardInterrupt("journal failed after publication")
 
-        def fail_journal(path, *args, **kwargs):
-            if path == self.suite.state_path.with_name(self.suite.state_path.name + ".pending"):
+        def fail_journal(value, stream, *args, **kwargs):
+            if Path(stream.name).name.startswith("state.json."):
                 writes[0] += 1
                 if writes[0] >= 2:
                     raise original
-            return write(path, *args, **kwargs)
+            return dump(value, stream, *args, **kwargs)
 
-        with patch.object(Path, "write_text", fail_journal):
+        with patch("run_suite.json.dump", side_effect=fail_journal):
             with self.assertRaises(KeyboardInterrupt) as raised:
                 self.suite.run(sys.executable, "-c", "import time;time.sleep(30)",
                                timeout=2, progress=True, progress_interval=0.1)
@@ -2268,7 +2272,7 @@ elif sys.argv[2] == "list":
         destination = self.output / ("phase-contract-" + uuid.uuid4().hex)
         suite = Suite(Namespace(platform="ios", output=destination, xcode_dir=None))
         calls = []
-        collect, make, write = suite.evidence, Path.mkdir, Path.write_text
+        collect, make, dump = suite.evidence, Path.mkdir, json.dump
         failures = [0]
 
         def build(configuration="Debug", faults=False):
@@ -2309,11 +2313,11 @@ elif sys.argv[2] == "list":
                 raise OSError("controlled evidence mkdir failure")
             return make(path, *args, **kwargs)
 
-        def write_text(path, *args, **kwargs):
-            if evidence_failure == "write" and path.name == "manifest.json.pending" and not failures[0]:
+        def write_json(value, stream, *args, **kwargs):
+            if evidence_failure == "write" and Path(stream.name).name.startswith("manifest.json.") and not failures[0]:
                 failures[0] += 1
                 raise OSError("controlled core manifest write failure")
-            return write(path, *args, **kwargs)
+            return dump(value, stream, *args, **kwargs)
 
         def evidence(passed, error):
             if evidence_failure in ("mock", "late-cancel"):
@@ -2333,7 +2337,7 @@ elif sys.argv[2] == "list":
                     patch.object(suite, "build", side_effect=build), patch.object(suite, "fixture_proof", side_effect=fixture), \
                     patch.object(suite, "proof", side_effect=lambda helper, *a: calls.append(("proof", helper))), \
                     patch.object(suite, "cleanup", side_effect=cleanup), patch.object(suite, "evidence", side_effect=evidence), \
-                    patch.object(Path, "mkdir", mkdir), patch.object(Path, "write_text", write_text):
+                    patch.object(Path, "mkdir", mkdir), patch("run_suite.json.dump", side_effect=write_json):
                 result = run_suite.main()
         finally:
             signal.signal(signal.SIGTERM, previous)

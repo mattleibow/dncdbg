@@ -450,6 +450,34 @@ raise SystemExit(run_suite.main())
         self.assertEqual(suite.state_path.read_bytes(), before)
         self.assertEqual((self.output / "evidence/manifest.json").read_bytes(), core)
 
+    def test_missing_pending_or_mismatched_core_cannot_use_the_completed_state_shortcut(self):
+        for kind in ("missing", "pending", "mismatched"):
+            with self.subTest(kind=kind):
+                directory = self.output / kind
+                run_suite.durable_mkdir(directory)
+                suite = run_suite.Suite(Namespace(platform="contracts", output=directory, xcode_dir=None))
+                suite.state = {"platform": "contracts", "cleanupDone": True,
+                               "source": {"head": "a" * 40, "dirty": False}}
+                suite.publication_pending = True
+                suite.prepare_evidence(None)
+                suite.arm_handoff()
+                suite.finish_handoff(True, None)
+                core_path = directory / "evidence/manifest.json"
+                if kind == "missing":
+                    core_path.unlink()
+                else:
+                    core = json.loads(core_path.read_text())
+                    if kind == "pending":
+                        core["leaseReleasePending"] = True
+                    else:
+                        core["finalization"]["nonce"] = "b" * 32
+                    run_suite.atomic_json(core_path, core)
+                with patch("run_suite.process_identity", return_value=None):
+                    suite.admit_recovery()
+                self.assertFalse(suite.state["cleanupDone"])
+                self.assertEqual(suite.state["finalization"]["status"], "abandoned")
+                self.assertTrue(suite.state["evidenceErrors"])
+
     def test_durable_directory_creation_refuses_symlink_components(self):
         actual = self.output / "actual"
         actual.mkdir()

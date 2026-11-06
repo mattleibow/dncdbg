@@ -233,9 +233,24 @@ class Suite:
         current = process_identity(finalization["owner"]["pid"])
         require(current is None or current["startIdentity"] != finalization["owner"]["startIdentity"],
                 "The original journal owner is still finalizing; cleanup refused without mutation.")
-        if finalization["status"] != "complete":
+        matching_core = False
+        if finalization["status"] == "complete" and not self.state.get("leaseReleasePending", True):
+            path = self.output / "evidence/manifest.json"
+            if path.parent.exists() or path.parent.is_symlink():
+                owned_directory(path.parent)
+            require(not path.is_symlink(), "Journal core must not be a symlink.")
+            if path.exists():
+                core = json.loads(path.read_text())
+                matching_core = (isinstance(core, dict) and core.get("finalization") == finalization and
+                                 not core.get("leaseReleasePending", True) and
+                                 core.get("head") == self.source["head"] and
+                                 core.get("dirty") == self.source["dirty"] and
+                                 core.get("cleanup") == bool(self.state.get("cleanupDone", False)))
+        if not matching_core:
             self.state["cleanupDone"] = False
             finalization["status"] = "abandoned"
+            self.state.setdefault("evidenceErrors", []).append(
+                "Missing, pending or mismatched final core; recovering the generation without qualification.")
 
     def arm_handoff(self):
         owner = process_identity(os.getpid())

@@ -266,6 +266,10 @@ can still finalize, including between the state and manifest commits. Once the
 owner exits, cleanup can recover an abandoned generation under its own advisory
 lease without qualifying the interrupted run. Birth lookup is read-only and
 never authorizes signaling or adoption of a reused PID.
+The already-clean recovery shortcut also requires a matching completed core
+manifest with the same generation and original source and no pending handoff.
+A completed state alone cannot bypass repair of a missing, pending or mismatched
+final core.
 Original source head/dirty
 provenance is durable and never replaced with a later checkout during recovery.
 A failed core manifest, including the redacted pending command intent, is written

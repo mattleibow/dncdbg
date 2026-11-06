@@ -235,6 +235,10 @@ observed member must match a prior anchor; one known member never authorizes an
 unknown or reused member. Sampling/probe/journal failure is sticky and refuses
 signals; an independently empty group can still prove absence. Exited transient
 children are not an individual-PID cleanup list.
+Sampling is not admitted when fewer than the existing two-second probe bound
+remain; the operation deadline is never extended. The isolated child exec path
+also runs before parent-only recovery imports, retaining the same errno pipe,
+descriptor and signal-mask/disposition contract without startup warmups.
 
 Birth capture is immutable and happens once during protected Popen publication,
 with candidate/read-only birth observations and nonblocking Popen polls proving

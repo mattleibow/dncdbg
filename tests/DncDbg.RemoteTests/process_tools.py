@@ -1,14 +1,36 @@
 """Owned POSIX commands shared by remote/native/mobile test entrypoints."""
 import os
+import json
+import signal
+import sys
+
+# The child exec path does not need the parent's recovery/probing modules.
+if __name__ == "__main__":
+    if (len(sys.argv) < 9 or sys.argv[1] != "--restore-signal-mask" or sys.argv[3] != "--exec-error-fd"
+            or sys.argv[5] != "--signal-dispositions" or sys.argv[7] != "--"):
+        raise SystemExit("Internal owned-command exec trampoline.")
+    error_fd = int(sys.argv[4])
+    try:
+        os.set_inheritable(error_fd, False)
+        for item in sys.argv[6].split(","):
+            number, disposition = item.split(":")
+            signal.signal(int(number), int(disposition))
+        signal.pthread_sigmask(signal.SIG_SETMASK, {int(value) for value in sys.argv[2].split(",") if value})
+        os.execvpe(sys.argv[8], sys.argv[8:], os.environ)
+    except OSError as error:
+        try:
+            message = json.dumps({"version": 1, "errno": error.errno}).encode()
+            while message:
+                message = message[os.write(error_fd, message):]
+        finally:
+            os._exit(255)
+
 import ctypes
 import errno
 import hashlib
-import json
 import selectors
-import signal
 import socket
 import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -628,24 +650,3 @@ def run_owned(*args, env=None, check=True, input=None, timeout=180, log=None, cw
     if check and result.returncode:
         raise RuntimeError(f"{args[0]} failed ({result.returncode}): {(result.stdout + result.stderr)[-4000:]}")
     return result
-
-
-if __name__ == "__main__":
-    if (len(sys.argv) < 9 or sys.argv[1] != "--restore-signal-mask" or sys.argv[3] != "--exec-error-fd"
-            or sys.argv[5] != "--signal-dispositions" or sys.argv[7] != "--"):
-        raise SystemExit("Internal owned-command exec trampoline.")
-    error_fd = int(sys.argv[4])
-    try:
-        os.set_inheritable(error_fd, False)
-        for item in sys.argv[6].split(","):
-            number, disposition = item.split(":")
-            signal.signal(int(number), int(disposition))
-        signal.pthread_sigmask(signal.SIG_SETMASK, {int(value) for value in sys.argv[2].split(",") if value})
-        os.execvpe(sys.argv[8], sys.argv[8:], os.environ)
-    except OSError as error:
-        try:
-            message = json.dumps({"version": 1, "errno": error.errno}).encode()
-            while message:
-                message = message[os.write(error_fd, message):]
-        finally:
-            os._exit(255)

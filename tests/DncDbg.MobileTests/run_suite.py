@@ -540,7 +540,8 @@ class Suite:
                                 raise TimeoutError(
                                     f"{command[0]} exceeded {timeout}s; partial output: {log.relative_to(ROOT)}") from error
                             if interval is not None:
-                                self.capture_command_members(owner)
+                                if owner.deadline - time.monotonic() > 2:
+                                    self.capture_command_members(owner)
                                 lines = log.read_text(errors="replace").splitlines()
                                 print(f"BUILD still running: {time.monotonic() - started:.1f}/{timeout}s; "
                                       f"last output: {lines[-1] if lines else '<none yet>'}; log: {log.relative_to(ROOT)}", flush=True)

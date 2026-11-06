@@ -129,6 +129,15 @@ These tests preserve observable native behavior, not assumptions about DAP synta
 | `TestInnerExceptionLimit` | Preserve the upstream 65-node fixture's default first/last inner messages (`level 62`/`level 31`) and assert every node's type/message plus the exact 32-inner cutoff. Twenty-two additional launch/attach sessions prove zero, small and unsigned-maximum limits, invalid/overflow fallback, complete unsigned-decimal parsing, request overrides and reset to the default. Trailing characters (`2suffix`, `2 `) now require the default 32 in both launch and attach, intentionally replacing the former prefix contract. These include the upstream 50-inner cutoff (`level 62`/`level 13`) and limit 100 exposing the complete finite chain (`level 62`/`innermost`). Fully populated terminal nodes are required without empty placeholders. |
 
 These are bounded scenarios, not full coverage of hit conditions or exception handling.
+`TestBreakpointWithoutStop` uses target stdin as a synchronization gate: after the
+entry continue, both source and function breakpoints are installed while the
+target is running, then a running-target evaluate request releases stdin. It
+still requires the exact source stop, function-entry stop and successful exit
+with the existing receive deadline. The former 15-second target sleep and
+5-second controller sleep raced that 10-second deadline; no debugger callback
+could guarantee arriving before it. This fixture uses no timing sleeps or
+retries and runs unchanged against the native and managed debuggers.
+
 The evaluation recovery contract is proven against preserved native master
 `fc643dfc`. `.github/workflows/evaluation.yml` pins the same Linux .NET 10.0.14
 container/runtime for native and managed debugging, proves the immutable pre-fix

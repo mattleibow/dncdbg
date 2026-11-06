@@ -2,7 +2,7 @@
 Upcoming changes compared to the previous version.
 
 #### DAP
-- Add source-logpoint expression tokens `$FILEPOS`, `$FUNCTION`, `$ADDRESS`, `$TID`, `$PID`, `$TNAME` and `$HITCOUNT`, with ordinal left-to-right expansion, quoted string display, format specifiers and existing count/filter/restart semantics. Resolve method/thread names only when expanded; method signatures include declaring types and parameters, including generic and async user methods.
+- Add source-logpoint expression tokens `$FILEPOS`, `$FUNCTION`, `$ADDRESS`, `$TID`, `$PID`, `$TNAME`, `$CALLER` and `$HITCOUNT`, with ordinal left-to-right expansion, quoted string display, format specifiers and existing count/filter/restart semantics. Resolve method/caller/thread names only when expanded; method signatures include declaring types and parameters, including generic and async user methods. An unavailable immediate caller uses `[Unknown Frame]`.
 - Add native-proven verbatim string-literal coverage, including literal backslashes, doubled quotes and `u8`/`U8` suffix handling; the existing managed evaluator already supports these cases.
 - Report invalid supported debugger environment settings to the debug console as newline-terminated `stderr` output events as well as engine logs. Preserve parse/range-specific messages, fallback defaults and successful session configuration.
 - Apply nonempty `applicationUrl` from launch-settings profiles as target `ASPNETCORE_URLS` for ordinary program launches as well as managed project launches. Request `env` and profile `environmentVariables` take precedence, including explicitly empty values; no browser is opened.

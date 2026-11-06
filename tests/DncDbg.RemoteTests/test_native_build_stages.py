@@ -185,6 +185,33 @@ with patch("subprocess.check_output",sdk),patch("subprocess.run",run):
                 process.kill()
             process.communicate(timeout=5)
 
+    def test_broken_diagnostic_pipe_cannot_change_success_at_interpreter_shutdown(self):
+        worker = f"""
+import runpy,subprocess,sys
+from pathlib import Path
+from unittest.mock import patch
+def run(command,**kwargs):
+    output=Path(command[3] if command[:2]==["xcrun","ar"] else command[command.index("-o")+1])
+    output.write_bytes(b"fixture native output")
+    return subprocess.CompletedProcess(command,0)
+sys.argv=[{str(self.source / "build.py")!r},"iossimulator-x64","--configuration","Debug"]
+with patch("subprocess.check_output",return_value="/fixture-sdk"),patch("subprocess.run",run):
+    runpy.run_path(sys.argv[0],run_name="__main__")
+"""
+        read, write = os.pipe()
+        os.close(read)
+        try:
+            with subprocess.Popen([sys.executable, "-I", "-c", worker], stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.PIPE, stderr=write, text=True) as process:
+                os.close(write)
+                write = None
+                output, _ = process.communicate(timeout=5)
+                self.assertEqual(process.returncode, 0)
+                self.assertIn("libdncdbg_target.a", output)
+        finally:
+            if write is not None:
+                os.close(write)
+
 
 if __name__ == "__main__":
     unittest.main()

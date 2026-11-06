@@ -146,7 +146,10 @@ public sealed partial class DebugEngine
                     break;
                 Func<CorDebugValue?> stable = Stabilize(getter);
                 string typeName = _values.GetTypeName(exception);
-                string? message = _values.ReadString(_values.GetFieldByName(exception, "_message"));
+                string? message = null;
+                foreach ((string name, CorDebugValue? value) in _values.EnumerateFields(exception))
+                    if (name == "_message" && _values.ReadString(value) is { } text)
+                        message = text;
                 string? stackTrace = _values.ReadString(_values.GetFieldByName(stable()!, "_stackTraceString"));
                 if (stackTrace == null && evalThreadId is { } threadId)
                     stackTrace = ReadStackTraceProperty(stable, threadId);

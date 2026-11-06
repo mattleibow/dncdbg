@@ -15,6 +15,7 @@ These case-sensitive special tokens are expanded only inside expression parts:
 | `$PID` | Current target process ID, equivalent to `$pid` |
 | `$TNAME` | Current thread name, as a string |
 | `$CALLER` | Immediate caller's method name, including its declaring type and parameters, as a string |
+| `$CALLSTACK` | Newline-separated physical call stack, starting with the current frame, as a string |
 | `$HITCOUNT` | This breakpoint's unsigned hit count after condition filtering and increment |
 
 For example:
@@ -34,7 +35,7 @@ hit). Substituted values are not scanned again. Outside braces, `$PID` and the
 other tokens remain literal text. Malformed expressions preserve the existing
 logpoint error rendering rather than stopping or silently dropping the message.
 
-Method, caller and thread names are inspected only when their tokens occur in an
+Method, caller, stack and thread names are inspected only when their tokens occur in an
 expression, once per hit. Method names reuse the user-facing metadata display,
 including concrete generic arguments and the original async method rather than
 its generated `MoveNext`. If method metadata is unavailable, the debugger logs
@@ -44,11 +45,31 @@ logical async stack walk. A caller in an async state machine uses its original
 method name; a missing or unresolvable caller frame displays `[Unknown Frame]`.
 An existing caller without usable method metadata uses the unnamed-method
 placeholder above.
+Call stacks use physical CLR frames with the native stack display's async kickoff
+and builder-frame filtering. Just My Code collapses consecutive non-user frames
+into one `[External Code]` entry. With Just My Code disabled, physical framework
+frames remain visible. Logical async continuations and `[Async Call Stack]`
+labels from the debugger's extended stack view are not appended. An unavailable
+or empty stack logs a diagnostic and displays `[Unknown Stack]`.
+After an exception's first pass finds no catch, foreign frames from a
+cross-thread rethrow precede the physical stack with an `[Exception] ` prefix.
+They are not added while an exception has a catch handler.
+
+`DNCDBG_STACKTRACE_LIMIT` bounds CALLSTACK to 250 eligible physical/foreign frames
+by default, before Just My Code collapse. Async and internal-frame filtering
+happens first. An additional frame beyond the limit adds a final
+`[Truncated Stack Trace]`; an exact-limit stack has no marker. Zero displays
+only that marker for a nonempty stack. The setting accepts a complete unsigned
+32-bit decimal value. Invalid values emit a diagnostic and use 250. Each
+launch/attach/restart resets to the cached debugger-process value before
+applying request environment overrides. This setting applies to CALLSTACK;
+the extended managed DAP stack view is unchanged.
 Thread names are read without calling a target property getter. An unnamed
 launch main thread is `Main Thread`; other unnamed or unknown threads use
 `<No name>`. Explicit thread names and subsequent renames are preserved.
-For expressions containing `$FUNCTION`, `$CALLER` or `$TNAME`, `nq` removes string
-delimiters but retains escaped quotes and backslashes, matching native display.
+For expressions containing `$FUNCTION`, `$CALLER`, `$CALLSTACK` or `$TNAME`, `nq`
+removes string delimiters but retains escaped newlines, quotes and backslashes,
+matching native display.
 This also applies to concatenations with other tokens and string literals.
 Tokens embedded in a substituted thread name remain literal, not expanded.
 

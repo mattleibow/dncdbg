@@ -80,13 +80,7 @@ public sealed partial class DebugEngine
             return;
         try
         {
-            CorDebugValue? value = RequireThread(threadId).CurrentException;
-            if (value == null || ValueInspector.Unwrap(value, out _) is not { } target)
-                return;
-            CorDebugExceptionObjectStackFrame[] frames = new CorDebugExceptionObjectValue(
-                (ICorDebugExceptionObjectValue)target.Raw).ExceptionCallStacks;
-            int lastForeign = Array.FindLastIndex(frames, f => f.isLastForeignExceptionFrame);
-            foreach (CorDebugExceptionObjectStackFrame frame in frames.Take(lastForeign + 1))
+            foreach (CorDebugExceptionObjectStackFrame frame in GetForeignExceptionFrames(RequireThread(threadId)))
             {
                 var module = new CorDebugModule(frame.pModule);
                 ModuleMetadata? metadata = GetMetadata(module);
@@ -115,7 +109,18 @@ public sealed partial class DebugEngine
         }
     }
 
-    private IEnumerable<CorDebugILFrame> EnumerateILFrames(int threadId)
+    private static CorDebugExceptionObjectStackFrame[] GetForeignExceptionFrames(CorDebugThread thread)
+    {
+        CorDebugValue? value = thread.CurrentException;
+        if (value == null || ValueInspector.Unwrap(value, out _) is not { } target)
+            return [];
+        CorDebugExceptionObjectStackFrame[] frames = new CorDebugExceptionObjectValue(
+            (ICorDebugExceptionObjectValue)target.Raw).ExceptionCallStacks;
+        int lastForeign = Array.FindLastIndex(frames, f => f.isLastForeignExceptionFrame);
+        return frames[..(lastForeign + 1)];
+    }
+
+    private IEnumerable<CorDebugFrame> EnumerateManagedFrames(int threadId)
     {
         CorDebugThread thread = RequireThread(threadId);
         foreach (CorDebugChain chain in thread.Chains)
@@ -123,12 +128,12 @@ public sealed partial class DebugEngine
             if (!chain.IsManaged)
                 continue;
             foreach (CorDebugFrame frame in chain.Frames)
-            {
-                if (frame is CorDebugILFrame ilFrame)
-                    yield return ilFrame;
-            }
+                yield return frame;
         }
     }
+
+    private IEnumerable<CorDebugILFrame> EnumerateILFrames(int threadId) =>
+        EnumerateManagedFrames(threadId).OfType<CorDebugILFrame>();
 
     // frames of the async call stack: there is no real frame, the state lives in a state machine object
     private readonly Dictionary<int, (int ThreadId, Func<CorDebugValue?> StateMachine)> _logicalFrames = [];

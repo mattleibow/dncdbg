@@ -27,7 +27,7 @@ class Program
         });
 
         GC.KeepAlive(args);                                           Label.Breakpoint("main");
-        Thread.CurrentThread.Name = "named \"$PID\"\\thread";
+        Thread.CurrentThread.Name = "named \"$PID\"\\thread\\";
         Named(42, "value");
         var worker = new Thread(Worker);
         worker.Start();
@@ -99,11 +99,11 @@ partial class Context
     public void CheckNameTokenOutput(string callerTrace)
     {
         CheckNameTokenLine(callerTrace, "main", "Main(string[] args)", "Main Thread", 1);
-        CheckNameTokenLine(callerTrace, "named", "Named(int number, string text)", "named \"$PID\"\\thread", 1);
+        CheckNameTokenLine(callerTrace, "named", "Named(int number, string text)", "named \"$PID\"\\thread\\", 1);
         CheckNameTokenLine(callerTrace, "unnamed", "Worker()", "<No name>", 1);
         CheckNameTokenLine(callerTrace, "renamed", "Worker()", "worker \"$FUNCTION\"\\name", 1);
         CheckNameTokenLine(callerTrace, "renamed", "Worker()", "worker \"$FUNCTION\"\\name", 2);
-        CheckNameTokenLine(callerTrace, "generic", "Generic<int>(int value)", "named \"$PID\"\\thread", 1);
+        CheckNameTokenLine(callerTrace, "generic", "Generic<int>(int value)", "named \"$PID\"\\thread\\", 1);
         string function = "TestLogpointNames.Program.Async(int number, string text)";
         WasOutputEvent(callerTrace, "console", "async=" + JsonConvert.SerializeObject(function) + "|plain=" + function + "\n");
     }

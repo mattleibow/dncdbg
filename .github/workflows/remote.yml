@@ -146,6 +146,10 @@ jobs:
                       "tests/DncDbg.NativeHostTests/run_tests.py")},
                   "runtimeSha256": {name: hashlib.sha256((Path(state["runtime"]) / name).read_bytes()).hexdigest()
                                     for name in ("libcoreclr.so", "libmscordbi.so", "libmscordaccore.so")},
+                  "preparedBinarySha256": {
+                      str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
+                      for path in (proof.host, proof.agent, proof.adapter, proof.fault_adapter,
+                                   proof.payload / "Payload.dll", proof.payload / "Payload.pdb")},
               }
               (DIAG / "evidence/tested-source.json").write_text(json.dumps(identity, indent=2))
               source()
@@ -277,20 +281,14 @@ jobs:
           tracepoint:sched:sched_process_exec
           /@owned[tid]/
           {
-              $task = (struct task_struct *)curtask;
-              $identity = $task->group_leader->thread_pid;
-              $number = (struct upid *)((uint64)$identity + offsetof(struct pid, numbers) + (uint64)$identity->level * sizeof(struct upid));
               printf("{\"event\":\"exec\",\"pid\":%d,\"ns_pid\":%d,\"tid\":%d,\"ns\":%llu,\"file\":\"%s\"}\n",
-                     pid, $number->nr, tid, nsecs, str(args.filename));
+                     pid, pid, tid, nsecs, str(args.filename));
           }
           tracepoint:syscalls:sys_enter_exit_group
           /@owned[tid]/
           {
-              $task = (struct task_struct *)curtask;
-              $identity = $task->group_leader->thread_pid;
-              $number = (struct upid *)((uint64)$identity + offsetof(struct pid, numbers) + (uint64)$identity->level * sizeof(struct upid));
               printf("{\"event\":\"exit_group\",\"pid\":%d,\"ns_pid\":%d,\"tid\":%d,\"ns\":%llu,\"code\":%d}\n",
-                     pid, $number->nr, tid, nsecs, args.error_code);
+                     pid, pid, tid, nsecs, args.error_code);
           }
           tracepoint:syscalls:sys_enter_wait4
           /@owned[tid]/
@@ -331,10 +329,8 @@ jobs:
           {
               if (pid == tid) {
                   $task = (struct task_struct *)curtask;
-                  $identity = $task->group_leader->thread_pid;
-                  $number = (struct upid *)((uint64)$identity + offsetof(struct pid, numbers) + (uint64)$identity->level * sizeof(struct upid));
                   printf("{\"event\":\"kernel-process-exit\",\"pid\":%d,\"ns_pid\":%d,\"tid\":%d,\"ns\":%llu,\"raw_status\":%d,\"group_status\":%d}\n",
-                         pid, $number->nr, tid, nsecs, $task->exit_code, $task->signal->group_exit_code);
+                         pid, pid, tid, nsecs, $task->exit_code, $task->signal->group_exit_code);
               }
               delete(@owned[tid]);
           }

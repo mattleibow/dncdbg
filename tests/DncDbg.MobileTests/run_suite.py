@@ -1,6 +1,5 @@
 """Internal POSIX device orchestration. Public entrypoint: dotnet run --project tests/DncDbg.MobileTests."""
 import argparse
-import errno
 import fcntl
 import hashlib
 import json
@@ -156,7 +155,6 @@ class JournalLease:
                     "Journal lock identity changed during acquisition.")
             os.fsync(descriptor)
             sync_directory(directory)
-            self.identity = (identity.st_dev, identity.st_ino)
             self.descriptor = descriptor
             descriptor = None
         finally:
@@ -177,29 +175,9 @@ class JournalLease:
         os.fsync(self.descriptor)
 
     def close(self):
-        if self.descriptor is not None:
-            os.close(self.descriptor)
-            self.descriptor = None
-
-    def reclaim(self):
-        if self.descriptor is not None:
-            try:
-                identity = os.fstat(self.descriptor)
-            except OSError as error:
-                if error.errno != errno.EBADF:
-                    raise
-                self.descriptor = None
-            else:
-                if (identity.st_dev, identity.st_ino) != self.identity:
-                    self.descriptor = None
-                else:
-                    fcntl.flock(self.descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    live = (self.directory / ".journal.lock").lstat()
-                    require((live.st_dev, live.st_ino) == self.identity,
-                            "Journal lock changed before failure evidence could be committed.")
-                    return
-        self.acquire()
-
+        descriptor, self.descriptor = self.descriptor, None
+        if descriptor is not None:
+            os.close(descriptor)
 
 class Suite:
     def __init__(self, args):
@@ -221,6 +199,8 @@ class Suite:
         self.run_nonce = uuid.uuid4().hex
         self.source = None
         self.evidence_core = None
+        self.publication_pending = False
+        self.handoff = None
         self.android = PIN["androidX64" if getattr(args, "android_abi", "arm64-v8a") == "x86_64" else "android"]
         self.ios = PIN["iosX64" if getattr(args, "ios_architecture", "arm64") == "x64" else "ios"]
 
@@ -231,7 +211,71 @@ class Suite:
             yield self.recovery_fallback
 
     def save(self):
-        atomic_json(self.state_path, self.state)
+        snapshot = dict(self.state)
+        if self.publication_pending:
+            snapshot.update(cleanupDone=False, cleanupVerified=bool(self.state.get("cleanupDone", False)),
+                            leaseReleasePending=True)
+        atomic_json(self.state_path, snapshot)
+
+    def admit_recovery(self):
+        finalization = self.state.get("finalization")
+        if finalization is None:
+            return
+        require(isinstance(finalization, dict) and
+                uuid.UUID(finalization["nonce"]).hex == finalization["nonce"] and
+                finalization["sourceHead"] == self.source["head"] and
+                finalization["status"] in ("pending", "complete", "failed", "abandoned") and
+                all(type(finalization["owner"][key]) is int and finalization["owner"][key] > 0
+                    for key in ("pid", "pgid", "sid")) and
+                finalization["owner"]["uid"] == os.geteuid() and
+                isinstance(finalization["owner"]["startIdentity"], str) and finalization["owner"]["startIdentity"],
+                "Journal finalization generation is invalid; refusing mutations.")
+        current = process_identity(finalization["owner"]["pid"])
+        require(current is None or current["startIdentity"] != finalization["owner"]["startIdentity"],
+                "The original journal owner is still finalizing; cleanup refused without mutation.")
+        if finalization["status"] != "complete":
+            self.state["cleanupDone"] = False
+            finalization["status"] = "abandoned"
+
+    def arm_handoff(self):
+        owner = process_identity(os.getpid())
+        require(owner is not None, "Cannot publish the finalization owner's exact kernel identity.")
+        self.handoff = {"nonce": self.run_nonce, "owner": owner, "sourceHead": self.source_record()["head"]}
+        self.state["finalization"] = self.handoff | {"status": "pending"}
+        self.save()
+        self.evidence_core.update(passed=False, cleanup=False, leaseReleasePending=True,
+                                  cleanupVerified=bool(self.state.get("cleanupDone", False)),
+                                  finalization=dict(self.state["finalization"]))
+        self.persist_evidence_core()
+
+    def verify_handoff(self):
+        require(self.handoff is not None, "No durable journal finalization generation is owned.")
+        recorded = json.loads(self.state_path.read_text()).get("finalization", {})
+        require(all(recorded.get(key) == value for key, value in self.handoff.items()),
+                "Journal finalization generation changed; refusing an unlocked commit.")
+        current = process_identity(os.getpid())
+        require(current is not None and all(current[key] == self.handoff["owner"][key]
+                for key in ("pid", "pgid", "sid", "uid", "startIdentity")),
+                "The finalization owner's kernel identity no longer matches.")
+
+    def finish_handoff(self, passed, error):
+        self.verify_handoff()
+        self.publication_pending = False
+        self.state["leaseReleasePending"] = False
+        self.state["cleanupVerified"] = bool(self.state.get("cleanupDone", False))
+        self.state["finalization"]["status"] = "complete"
+        self.save()
+        self.evidence_core.update(passed=self.qualifies(passed), error=error,
+                                  cleanup=bool(self.state.get("cleanupDone", False)),
+                                  cleanupVerified=self.state["cleanupVerified"], leaseReleasePending=False,
+                                  finalization=dict(self.state["finalization"]))
+        self.persist_evidence_core()
+
+    def qualifies(self, passed):
+        return (passed and not self.publication_pending and self.state.get("cleanupDone", False) and
+                self.state.get("buildGroupSettled", True) and not self.state.get("commandRecoveryRequired", False) and
+                not self.state.get("simulatorCreate", {}).get("pending", False) and
+                (self.args.platform == "contracts" or self.state.get("phasesComplete", False)))
 
     def source_record(self):
         if self.source is None:
@@ -1091,7 +1135,10 @@ class Suite:
                     "phases": {"required": self.state.get("requiredPhases", []),
                                "completed": self.state.get("completedPhases", []),
                                "complete": self.state.get("phasesComplete", False)},
-                    "cleanup": self.state.get("cleanupDone", False),
+                    "cleanup": self.state.get("cleanupDone", False) and not self.publication_pending,
+                    "cleanupVerified": bool(self.state.get("cleanupDone", False)),
+                    "leaseReleasePending": self.publication_pending,
+                    "finalization": self.state.get("finalization"),
                     "buildGroupSettled": self.state.get("buildGroupSettled", True),
                     "simulatorJournalClean": self.state.get("simulatorJournalClean", False),
                     "resourceJournalClean": self.state.get("resourceJournalClean", self.state.get("cleanupDone", False)),
@@ -1134,11 +1181,7 @@ class Suite:
             target.write_bytes(data)
             manifest["files"][str(relative)] = hashlib.sha256(data).hexdigest()
         manifest["error"] = error
-        manifest["passed"] = (passed and self.state.get("cleanupDone", False) and
-                              self.state.get("buildGroupSettled", True) and
-                              not self.state.get("commandRecoveryRequired", False) and
-                              not self.state.get("simulatorCreate", {}).get("pending", False) and
-                              (self.args.platform == "contracts" or self.state.get("phasesComplete", False)))
+        manifest["passed"] = self.qualifies(passed)
         self.persist_evidence_core()
 
 
@@ -1169,6 +1212,7 @@ def main():
     args.output = args.output or ROOT / "build/mobile-tests" / f"{args.platform}-{uuid.uuid4().hex}"
     suite = Suite(args)
     passed, primary, cancellation, lease, report_ready = False, None, None, None, False
+    handoff_armed, released = False, False
 
     def remember(failure):
         nonlocal primary, cancellation
@@ -1206,12 +1250,17 @@ def main():
         nonlocal passed
         passed = False
         remember(failure)
+        if suite.handoff is not None:
+            suite.verify_handoff()
+            suite.publication_pending = True
+            suite.state["finalization"]["status"] = "failed"
         suite.state["cleanupDone"] = False
         suite.state.setdefault("cleanupErrors", []).append(f"Final journal settlement: {failure!r}")
         if suite.evidence_core is not None:
             suite.evidence_core.update(passed=False, cleanup=False,
                 error=f"{primary!r}\nFinal journal settlement: {failure!r}",
-                cleanupErrors=suite.state["cleanupErrors"])
+                cleanupErrors=suite.state["cleanupErrors"], leaseReleasePending=True,
+                finalization=suite.state.get("finalization"))
             for persist in (suite.save, suite.persist_evidence_core):
                 try:
                     persist()
@@ -1233,14 +1282,16 @@ def main():
                 "head": suite.state.get("commandIntent", {}).get("sourceHead") or
                         suite.state.get("simulatorCreate", {}).get("sourceHead"),
                 "dirty": None, "sourceUnavailable": True}
-            lease.record(suite.run_nonce, suite.source)
+            suite.admit_recovery()
             require(suite.state["platform"] == args.platform, "Cleanup platform does not match the journal.")
+            lease.record(suite.run_nonce, suite.source)
             if (suite.state.get("cleanupDone") and suite.state.get("buildGroupSettled", True) and
                     not suite.state.get("commandRecoveryRequired", False) and
                     not suite.state.get("simulatorCreate", {}).get("pending", False) and
                     all(r.get("identityCapture") != "unverified" and all(r.get(key, False) for key in
                         ("leaderReaped", "groupAbsent", "drainComplete")) for r in suite.state.get("processRecovery", []))):
                 return 0
+            suite.publication_pending = True
             try:
                 suite.cleanup()
             except BaseException as failure:
@@ -1249,6 +1300,7 @@ def main():
             durable_mkdir(suite.output, fresh=True)
             lease = JournalLease(suite.output)
             lease.acquire()
+            suite.publication_pending = True
             suite.state = {"platform": args.platform, "cleanupDone": False}
             suite.source_record()
             lease.record(suite.run_nonce, suite.source)
@@ -1320,18 +1372,27 @@ def main():
                 except BaseException as failure:
                     remember(failure)
                     final_report("Final settlement evidence could not be completed.")
+            if report_ready and lease is not None:
+                try:
+                    suite.arm_handoff()
+                    handoff_armed = True
+                except BaseException as failure:
+                    remember(failure)
+                    passed = False
+                    final_report(f"Journal handoff could not be committed: {failure!r}")
         finally:
             try:
                 if lease is not None:
                     try:
                         lease.close()
+                        released = True
                     except BaseException as failure:
                         established = primary
                         remember(failure)
                         passed = False
                         try:
-                            lease.reclaim()
-                            final_failure(failure)
+                            if handoff_armed:
+                                final_failure(failure)
                         except BaseException as recovery_error:
                             remember(recovery_error)
                             final_report(f"Journal release recovery refused: {recovery_error!r}")
@@ -1346,12 +1407,34 @@ def main():
             finally:
                 if cancellation is not None:
                     raise cancellation
+    if handoff_armed and released:
+        try:
+            error = repr(primary) if primary is not None else None
+            if args.cleanup and error is None:
+                error = "Recovery after an interrupted mobile run; rerun all gates on a fresh output."
+            suite.finish_handoff(passed and primary is None, error)
+        except BaseException as failure:
+            remember(failure)
+            passed = False
+            try:
+                final_failure(failure)
+            except BaseException as recording_error:
+                remember(recording_error)
+                final_report(f"Finalization failure evidence unavailable: {recording_error!r}")
+            if cancellation is not None:
+                raise cancellation
     if report_ready:
         try:
             print(f"{'PASS' if passed and primary is None else 'FAIL'}: {args.platform}; "
                   f"evidence: {suite.output.relative_to(ROOT)}/evidence")
         except BaseException as failure:
             remember(failure)
+            passed = False
+            if handoff_armed:
+                try:
+                    final_failure(failure)
+                except BaseException as recording_error:
+                    remember(recording_error)
             if cancellation is not None:
                 raise cancellation
     return 0 if primary is None and (args.cleanup or passed) else 1

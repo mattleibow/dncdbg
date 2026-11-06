@@ -255,6 +255,17 @@ and final process settlement. The lock records the run nonce, PID, public kernel
 birth identity and original source. Concurrent `--cleanup` refuses without
 mutating the active journal. A crashed owner's advisory lock is released by the
 OS; recovery never guesses ownership from a stale PID or deletes the lock file.
+Terminal state and evidence remain `cleanupDone=false`, `passed=false` and
+`leaseReleasePending=true` while the lifecycle lease can still fail, with
+`cleanupVerified` preserving the independently completed resource facts.
+A durable finalization generation contains the run nonce, original source and
+public kernel birth identity. After confirmed lease release, only that exact
+live generation may commit the final state and manifest. Concurrent cleanup
+must check the generation before writing, and refuses while its original owner
+can still finalize, including between the state and manifest commits. Once the
+owner exits, cleanup can recover an abandoned generation under its own advisory
+lease without qualifying the interrupted run. Birth lookup is read-only and
+never authorizes signaling or adoption of a reused PID.
 Original source head/dirty
 provenance is durable and never replaced with a later checkout during recovery.
 A failed core manifest, including the redacted pending command intent, is written

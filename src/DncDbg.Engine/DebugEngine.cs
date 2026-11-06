@@ -135,6 +135,7 @@ public sealed partial class DebugEngine : IDisposable
         {
             IReadOnlyDictionary<string, string?>? debuggerEnvironment = options.DebuggerEnvironment ?? options.Environment;
             ConfigureExceptionDetails(debuggerEnvironment);
+            ConfigureLogpointStack(debuggerEnvironment);
             NoDebug = options.NoDebug;
             if (_processId != 0 || _launching)
                 throw new DebuggerException("A debuggee is already running.");
@@ -258,6 +259,7 @@ public sealed partial class DebugEngine : IDisposable
         lock (_lock)
         {
             ConfigureExceptionDetails(environment);
+            ConfigureLogpointStack(environment);
             if (_processId != 0)
                 throw new DebuggerException("A debuggee is already running.");
             ProcessBitness.VerifyProcess(processId);

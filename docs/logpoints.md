@@ -51,6 +51,19 @@ into one `[External Code]` entry. With Just My Code disabled, physical framework
 frames remain visible. Logical async continuations and `[Async Call Stack]`
 labels from the debugger's extended stack view are not appended. An unavailable
 or empty stack logs a diagnostic and displays `[Unknown Stack]`.
+After an exception's first pass finds no catch, foreign frames from a
+cross-thread rethrow precede the physical stack with an `[Exception] ` prefix.
+They are not added while an exception has a catch handler.
+
+`DNCDBG_STACKTRACE_LIMIT` bounds CALLSTACK to 250 eligible physical/foreign frames
+by default, before Just My Code collapse. Async and internal-frame filtering
+happens first. An additional frame beyond the limit adds a final
+`[Truncated Stack Trace]`; an exact-limit stack has no marker. Zero displays
+only that marker for a nonempty stack. The setting accepts a complete unsigned
+32-bit decimal value. Invalid values emit a diagnostic and use 250. Each
+launch/attach/restart resets to the cached debugger-process value before
+applying request environment overrides. This setting applies to CALLSTACK;
+the extended managed DAP stack view is unchanged.
 Thread names are read without calling a target property getter. An unnamed
 launch main thread is `Main Thread`; other unnamed or unknown threads use
 `<No name>`. Explicit thread names and subsequent renames are preserved.

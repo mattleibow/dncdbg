@@ -628,14 +628,90 @@ public sealed partial class DebugEngine
         return caller == null ? "[Unknown Frame]" : GetLogpointMethodName(caller);
     }
 
+    private const string StackTraceLimitVariable = "DNCDBG_STACKTRACE_LIMIT";
+    private const uint DefaultStackTraceLimit = 250;
+    private uint? _initialLogpointStackTraceLimit;
+    private uint _logpointStackTraceLimit = DefaultStackTraceLimit;
+
+    private void ConfigureLogpointStack(IReadOnlyDictionary<string, string?>? environment)
+    {
+        _initialLogpointStackTraceLimit ??= ParseEnvironmentNumber(Environment.GetEnvironmentVariable(StackTraceLimitVariable),
+            StackTraceLimitVariable, DefaultStackTraceLimit);
+        _logpointStackTraceLimit = environment?.TryGetValue(StackTraceLimitVariable, out string? value) == true
+            ? ParseEnvironmentNumber(value, StackTraceLimitVariable, DefaultStackTraceLimit)
+            : _initialLogpointStackTraceLimit.Value;
+    }
+
+    private List<(string Name, bool IsUser)> GetLogpointForeignExceptionFrames(int threadId)
+    {
+        var result = new List<(string, bool)>();
+        try
+        {
+            CorDebugThread thread = RequireThread(threadId);
+            // ClrDebug retains the original HadUnhandledException name for this Thread4 slot.
+            HRESULT status = thread.TryHadUnhandledException();
+            if (status != HRESULT.S_OK)
+            {
+                if (status != HRESULT.S_FALSE)
+                    Log?.Invoke("Logpoint exception stack state unavailable: " + status);
+                return result;
+            }
+            CorDebugExceptionObjectStackFrame[] frames = GetForeignExceptionFrames(thread);
+            for (int i = 0; i < frames.Length; i++)
+            {
+                CorDebugExceptionObjectStackFrame frame = frames[i];
+                var module = new CorDebugModule(frame.pModule);
+                CorDebugCode code = module.GetFunctionFromToken(frame.methodDef).NativeCode;
+                if ((ulong)frame.ip < code.Address.Value)
+                    continue;
+                ulong offset = (ulong)frame.ip - code.Address.Value;
+                COR_DEBUG_IL_TO_NATIVE_MAP[] mappings = code.ILToNativeMapping;
+                if (mappings.Length == 0)
+                    continue;
+                int ilOffset = mappings.Where(m => m.ilOffset >= 0 && (ulong)m.nativeStartOffset <= offset)
+                    .OrderByDescending(m => m.nativeStartOffset).Select(m => m.ilOffset).FirstOrDefault();
+                ModuleMetadata? metadata = GetMetadata(module);
+                bool isUser = metadata?.GetSourceLocation((int)frame.methodDef.Value, ilOffset, out _) != null;
+                if (!isUser && i != frames.Length - 1)
+                    continue;
+                string name = metadata == null ? "[Unnamed managed method in optimized code]"
+                    : metadata.GetMethodName((int)frame.methodDef.Value) + metadata.GetParameterDisplay((int)frame.methodDef.Value);
+                if (metadata == null)
+                    Log?.Invoke("Logpoint exception method name unavailable: method metadata not found.");
+                result.Add(("[Exception] " + name, isUser));
+                if ((ulong)result.Count > _logpointStackTraceLimit)
+                    break;
+            }
+        }
+        catch (Exception error) when (error is COMException or DebuggerException)
+        {
+            Log?.Invoke("Logpoint exception call stack unavailable: " + error.Message);
+        }
+        return result;
+    }
+
     private string GetLogpointCallStack(int threadId)
     {
         try
         {
-            // JMC/metadata inspection can invalidate an in-progress CLR frame enumeration.
-            List<CorDebugFrame> frames = EnumerateManagedFrames(threadId).ToList();
-            int lastRegular = frames.FindLastIndex(f => f is not CorDebugInternalFrame);
             var names = new List<string>();
+            uint count = 0;
+            bool truncated = false;
+            foreach ((string name, bool isUser) in GetLogpointForeignExceptionFrames(threadId))
+            {
+                if (count == _logpointStackTraceLimit)
+                {
+                    truncated = true;
+                    break;
+                }
+                count++;
+                string display = _justMyCode && !isUser ? ExternalCode : name;
+                if (display != ExternalCode || names.Count == 0 || names[^1] != ExternalCode)
+                    names.Add(display);
+            }
+            // JMC/metadata inspection can invalidate an in-progress CLR frame enumeration.
+            List<CorDebugFrame> frames = truncated ? [] : EnumerateManagedFrames(threadId).ToList();
+            int lastRegular = frames.FindLastIndex(f => f is not CorDebugInternalFrame);
             for (int i = 0; i < frames.Count; i++)
             {
                 CorDebugFrame frame = frames[i];
@@ -681,11 +757,19 @@ public sealed partial class DebugEngine
                 {
                     name = frame is CorDebugNativeFrame ? "[CLR Native Frame]" : "[Unknown Frame]";
                 }
+                if (count == _logpointStackTraceLimit)
+                {
+                    truncated = true;
+                    break;
+                }
+                count++;
                 if (_justMyCode && (frame is not CorDebugILFrame userFrame || !IsUserCode(userFrame.Function)))
                     name = ExternalCode;
                 if (name != ExternalCode || names.Count == 0 || names[^1] != ExternalCode)
                     names.Add(name);
             }
+            if (truncated)
+                names.Add("[Truncated Stack Trace]");
             if (names.Count > 0)
                 return string.Join('\n', names);
             Log?.Invoke("Logpoint call stack unavailable: no physical frames.");

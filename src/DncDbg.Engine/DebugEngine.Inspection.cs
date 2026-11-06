@@ -80,13 +80,7 @@ public sealed partial class DebugEngine
             return;
         try
         {
-            CorDebugValue? value = RequireThread(threadId).CurrentException;
-            if (value == null || ValueInspector.Unwrap(value, out _) is not { } target)
-                return;
-            CorDebugExceptionObjectStackFrame[] frames = new CorDebugExceptionObjectValue(
-                (ICorDebugExceptionObjectValue)target.Raw).ExceptionCallStacks;
-            int lastForeign = Array.FindLastIndex(frames, f => f.isLastForeignExceptionFrame);
-            foreach (CorDebugExceptionObjectStackFrame frame in frames.Take(lastForeign + 1))
+            foreach (CorDebugExceptionObjectStackFrame frame in GetForeignExceptionFrames(RequireThread(threadId)))
             {
                 var module = new CorDebugModule(frame.pModule);
                 ModuleMetadata? metadata = GetMetadata(module);
@@ -113,6 +107,17 @@ public sealed partial class DebugEngine
         {
             Log?.Invoke("Exception call stack not available: " + e.Message);
         }
+    }
+
+    private static CorDebugExceptionObjectStackFrame[] GetForeignExceptionFrames(CorDebugThread thread)
+    {
+        CorDebugValue? value = thread.CurrentException;
+        if (value == null || ValueInspector.Unwrap(value, out _) is not { } target)
+            return [];
+        CorDebugExceptionObjectStackFrame[] frames = new CorDebugExceptionObjectValue(
+            (ICorDebugExceptionObjectValue)target.Raw).ExceptionCallStacks;
+        int lastForeign = Array.FindLastIndex(frames, f => f.isLastForeignExceptionFrame);
+        return frames[..(lastForeign + 1)];
     }
 
     private IEnumerable<CorDebugFrame> EnumerateManagedFrames(int threadId)

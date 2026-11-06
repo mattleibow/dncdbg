@@ -243,9 +243,12 @@ partial class Context
 
     public void CheckForeignCallStacks(string callerTrace)
     {
-        foreach (bool unhandled in new[] { true, false })
+        foreach (var scenario in new (bool Unhandled, string? Limit)[] { (true, null), (false, null), (true, "2") })
         {
+            bool unhandled = scenario.Unhandled;
             Initialize(callerTrace);
+            if (scenario.Limit != null)
+                AddEnvMapEntry("DNCDBG_STACKTRACE_LIMIT", scenario.Limit);
             AddArgsListEntry(unhandled ? "foreign" : "caught");
             AddExceptionBreakpointFilterUnhandledWithConditions("!*");
             SetExceptionBreakpoints(callerTrace);
@@ -258,21 +261,26 @@ partial class Context
             Continue(callerTrace);
             WasExit(callerTrace, checkExitCode: unhandled ? null : 0);
             const string prefix = "TestLogpointCallStack.Program.";
-            string stack = unhandled
-                ? "[Exception] " + prefix + "ThrowOrigin()\n[Exception] " + prefix + "CaptureOrigin()\n" +
-                    prefix + "OnUnhandled(object sender, System.UnhandledExceptionEventArgs args)\n[External Code]\n"
-                : prefix + "OnCaughtFinally()\n";
-            stack += prefix + "ForeignException(bool unhandled)\n" + prefix + "Main(string[] args)";
+            string stack = unhandled ? "[Exception] " + prefix + "ThrowOrigin()\n[Exception] " + prefix + "CaptureOrigin()\n" : "";
+            if (scenario.Limit != null)
+                stack += "[Truncated Stack Trace]";
+            else
+            {
+                stack += unhandled ? prefix + "OnUnhandled(object sender, System.UnhandledExceptionEventArgs args)\n[External Code]\n"
+                    : prefix + "OnCaughtFinally()\n";
+                stack += prefix + "ForeignException(bool unhandled)\n" + prefix + "Main(string[] args)";
+            }
             WasOutputEvent(callerTrace, "console", label + "=" + JsonConvert.SerializeObject(stack) + "\n");
         }
     }
 
     public void CheckCallStackLimits(string callerTrace)
     {
-        var cases = new (string? Value, uint Limit)[]
+        var cases = new (string? Value, uint Limit, bool Attach)[]
         {
-            ("0", 0), ("1", 1), ("2", 2), ("262", 262), ("263", 263),
-            ("4294967295", uint.MaxValue), ("2 ", 250), ("4294967296", 250), (null, 250),
+            ("0", 0, false), ("1", 1, false), ("2", 2, false), ("262", 262, false), ("263", 263, false),
+            ("2 ", 250, false), ("4294967296", 250, false), ("2", 2, true),
+            ("4294967295", uint.MaxValue, false), (null, 250, false),
         };
         foreach (var scenario in cases)
         {
@@ -283,7 +291,10 @@ partial class Context
             AddBreakpoint(callerTrace, "deepHidden", logMessage: "hiddenDeepLength={$CALLSTACK.Length}|onlyMarker={$CALLSTACK == @\"[Truncated Stack Trace]\"}");
             SetBreakpoints(callerTrace);
             ConfigurationDone(callerTrace);
-            Launch(callerTrace);
+            if (scenario.Attach)
+                StartTargetAndAttach(callerTrace, startSuspend: true, stopAtEntry: true);
+            else
+                Launch(callerTrace);
             WasEntryPointHit(callerTrace);
             Continue(callerTrace);
             WasExit(callerTrace);

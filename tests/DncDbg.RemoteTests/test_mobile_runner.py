@@ -992,12 +992,12 @@ import os, sys
 import json
 from pathlib import Path
 sys.path.insert(0, {str(ROOT / "tests/DncDbg.RemoteTests")!r})
-from test_mobile_processes import waiting_parent
 created = Path({str(self.output / "created-simulator.json")!r})
 if sys.argv[2] == "create":
     created.write_text(json.dumps({{"name":sys.argv[3],"type":sys.argv[4],"runtime":sys.argv[5]}}))
     print("12345678-1234-1234-1234-123456789abc")
 elif sys.argv[2] == "bootstatus" or {mode!r} == "cleanup":
+    from test_mobile_processes import waiting_parent
     waiting_parent(os.environ["DNCDBG_TEST_PROCESS_RECORD"], ignore_term=True)
 elif sys.argv[2] == "list":
     identity = json.loads(created.read_text())

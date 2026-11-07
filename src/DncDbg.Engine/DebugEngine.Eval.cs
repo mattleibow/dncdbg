@@ -59,7 +59,7 @@ public sealed partial class DebugEngine : IEvalHost
         _implicitScope++;
         try
         {
-            return FormatLogMessage(template, new Evaluator(this, context.Frame!, allowCalls: true, self), quoteStrings: true);
+            return FormatLogMessage(template, new Evaluator(this, context.Frame!, allowCalls: true, self), isDebuggerDisplay: true);
         }
         finally
         {

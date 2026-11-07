@@ -15,6 +15,7 @@ class Program
             Context Context = (Context)context;
             Context.Initialize(@"__FILE__:__LINE__");
             Context.AddBreakpoint(@"__FILE__:__LINE__", "tokens", logMessage: Context.TokenLogTemplate());
+            Context.AddBreakpoint(@"__FILE__:__LINE__", "literal", logMessage: "literal=$FILEPOS\\tail\"quoted\"");
             Context.AddBreakpoint(@"__FILE__:__LINE__", "after");
             Context.SetBreakpoints(@"__FILE__:__LINE__");
             Context.ConfigurationDone(@"__FILE__:__LINE__");
@@ -24,9 +25,11 @@ class Program
             Context.Continue(@"__FILE__:__LINE__");
         });
 
+        string logText = "text \"quoted\"\\tail\nnext\tend";
         for (int i = 0; i < 2; i++)
         {
-            GC.KeepAlive(args);                                       Label.Breakpoint("tokens");
+            GC.KeepAlive(logText);                                    Label.Breakpoint("tokens");
+            GC.KeepAlive(args);                                       Label.Breakpoint("literal");
         }
         GC.KeepAlive(args);                                           Label.Breakpoint("after");
 
@@ -73,12 +76,17 @@ partial class Context
 
     public string TokenLogTemplate() =>
         "literal=$PID|file={$FILEPOS}|plain={$FILEPOS,nq}|address={$ADDRESS}|same={$ADDRESS == $ADDRESS}" +
-        "|tid={$TID}|pid={$PID}|count={$HITCOUNT}|joined={$HITCOUNT$HITCOUNT}|math={$HITCOUNT + 10}|lower={$pid}";
+        "|tid={$TID}|pid={$PID}|count={$HITCOUNT}|joined={$HITCOUNT$HITCOUNT}|math={$HITCOUNT + 10}|lower={$pid}" +
+        "|fileTail={$FILEPOS + @\"\\tail\" + '\"',nq}|quotedFileTail={$FILEPOS + @\"\\tail\" + '\"'}" +
+        "|addressTail={$ADDRESS + @\"\\tail\" + '\"',nq}|countTail={$HITCOUNT + @\"\\tail\" + '\"',nq}" +
+        "|text={logText,nq}|textTail={logText + @\"\\tail\",nq}|verbatim={@\"C:\\tail\" + '\"',nq}" +
+        "|quotedText={logText}";
 
     public void CheckTokenLogOutput(string callerTrace)
     {
         var breakpoint = (LineBreakpoint)m_controlInfo.Breakpoints["tokens"];
         string source = m_controlInfo.SourceFilesPath!.Split(';')[0] + ":" + breakpoint.NumLine;
+        string quotedSource = JsonConvert.SerializeObject(source);
         for (int count = 1; count <= 2; count++)
         {
             string output = "";
@@ -91,10 +99,10 @@ partial class Context
                 return output.StartsWith("literal=");
             }), callerTrace);
             string[] parts = output.TrimEnd('\n').Split('|');
-            Assert.Equal(11, parts.Length, callerTrace + ": " + output);
+            Assert.Equal(19, parts.Length, callerTrace + ": " + output);
             Assert.Equal("literal=$PID", parts[0], callerTrace);
-            Assert.Equal("file=" + JsonConvert.SerializeObject(source), parts[1], callerTrace);
-            Assert.Equal("plain=" + source, parts[2], callerTrace);
+            Assert.Equal("file=" + quotedSource, parts[1], callerTrace);
+            Assert.Equal("plain=" + quotedSource.Substring(1, quotedSource.Length - 2), parts[2], callerTrace);
             string address = parts[3].Substring("address=".Length);
             Assert.True(address.StartsWith("\"0x") && address.EndsWith("\"") && address.Length == 20, callerTrace);
             Assert.True(ulong.Parse(address.Substring(3, 16), System.Globalization.NumberStyles.HexNumber) != 0, callerTrace);
@@ -105,7 +113,20 @@ partial class Context
             Assert.Equal("joined=" + count + count, parts[8], callerTrace);
             Assert.Equal("math=" + (count + 10), parts[9], callerTrace);
             Assert.Equal("lower=" + TokenProcessId, parts[10], callerTrace);
+            string quotedFileTail = JsonConvert.SerializeObject(source + "\\tail\"");
+            Assert.Equal("fileTail=" + quotedFileTail.Substring(1, quotedFileTail.Length - 2), parts[11], callerTrace);
+            Assert.Equal("quotedFileTail=" + quotedFileTail, parts[12], callerTrace);
+            string quotedAddressTail = JsonConvert.SerializeObject(address.Substring(1, address.Length - 2) + "\\tail\"");
+            Assert.Equal("addressTail=" + quotedAddressTail.Substring(1, quotedAddressTail.Length - 2), parts[13], callerTrace);
+            Assert.Equal("countTail=" + count + "\\\\tail\\\"", parts[14], callerTrace);
+            string quotedText = JsonConvert.SerializeObject("text \"quoted\"\\tail\nnext\tend");
+            Assert.Equal("text=" + quotedText.Substring(1, quotedText.Length - 2), parts[15], callerTrace);
+            string quotedTextTail = JsonConvert.SerializeObject("text \"quoted\"\\tail\nnext\tend\\tail");
+            Assert.Equal("textTail=" + quotedTextTail.Substring(1, quotedTextTail.Length - 2), parts[16], callerTrace);
+            Assert.Equal("verbatim=C:\\\\tail\\\"", parts[17], callerTrace);
+            Assert.Equal("quotedText=" + quotedText, parts[18], callerTrace);
             Assert.True(output.EndsWith("\n") && !output.EndsWith("\n\n"), callerTrace);
+            WasOutputEvent(callerTrace, "console", "literal=$FILEPOS\\tail\"quoted\"\n");
         }
     }
 }

@@ -207,11 +207,8 @@ public static class TerminalHelper
         return new SuspendedProcess
         {
             ProcessId = pid,
-            Resume = () =>
-            {
-                dbgShim.ResumeProcess(result.ResumeHandle);
-                dbgShim.CloseResumeHandle(result.ResumeHandle);
-            },
+            Resume = () => ProcessLauncher.ResumeProcessAndCloseHandle(result.ResumeHandle,
+                dbgShim.TryResumeProcess, dbgShim.TryCloseResumeHandle),
             WaitForExit = () =>
             {
                 while (true)

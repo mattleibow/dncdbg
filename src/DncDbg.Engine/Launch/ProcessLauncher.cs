@@ -86,6 +86,21 @@ internal static class ProcessLauncher
     internal static string BuildCommandLine(string program, IReadOnlyList<string> args) =>
         string.Join(' ', BuildArguments(program, args).Select(QuoteArgument));
 
+    internal static void ResumeProcessAndCloseHandle(IntPtr handle, ResumeProcessDelegate resume, CloseResumeHandleDelegate close)
+    {
+        HRESULT resumeStatus, closeStatus;
+        try
+        {
+            resumeStatus = resume(handle);
+        }
+        finally
+        {
+            closeStatus = close(handle);
+        }
+        resumeStatus.ThrowOnNotOK();
+        closeStatus.ThrowOnNotOK();
+    }
+
     private static List<string> BuildArguments(string program, IReadOnlyList<string> args)
     {
         var argv = new List<string>();
@@ -371,10 +386,7 @@ internal static class ProcessLauncher
                 }
             }
             if (!noDebug)
-            {
-                dbgShim.ResumeProcess(result.ResumeHandle);
-                dbgShim.CloseResumeHandle(result.ResumeHandle);
-            }
+                ResumeProcessAndCloseHandle(result.ResumeHandle, dbgShim.TryResumeProcess, dbgShim.TryCloseResumeHandle);
 
             var reader = new StreamReader(controlStream, Encoding.ASCII, false, 64, leaveOpen: true);
             Task<string?> first = Task.Run(reader.ReadLine);

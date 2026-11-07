@@ -48,13 +48,18 @@ if (args is ["--launch-arguments"])
     Console.WriteLine($"Passed {LaunchArgumentChecks.Run()} launch argument checks.");
     return;
 }
+if (args is ["--resume-handles"])
+{
+    Console.WriteLine($"Passed {ResumeHandleChecks.Run()} resume handle checks.");
+    return;
+}
 
 if (args.Length != 1)
     throw new ArgumentException("Supply the path to the dncdbg-dap apphost.");
 string executable = Path.GetFullPath(args[0]);
 string logDirectory = Path.GetFullPath("build/validation/cli-smoke");
 Directory.CreateDirectory(logDirectory);
-int passed = EvaluationChecks.Run() + LaunchArgumentChecks.Run();
+int passed = EvaluationChecks.Run() + LaunchArgumentChecks.Run() + ResumeHandleChecks.Run();
 
 foreach (string option in new[] { "--help", "-h", "--version", "--buildinfo" })
 {

@@ -80,6 +80,14 @@ target: notification abort fallback, terminal completion with queued callbacks,
 and rejection of late or unrelated notifications. Run just these deterministic
 contracts with `dotnet run --project tests/DncDbg.SmokeTests -- --evaluation`.
 
+Resume-handle ownership checks require exactly one close after successful or
+failed resume, preserve the original resume HRESULT when cleanup also fails,
+and report a close failure after successful resume. They also cover exception
+cleanup. Run them with
+`dotnet run --project tests/DncDbg.SmokeTests -- --resume-handles`.
+The shared operation is used by both Unix launch paths, including the terminal
+helper; Windows thread-handle launch semantics are unchanged.
+
 The self-hosted safety fixtures are separate from the unchanged acceptance
 suite. A surviving detached fixture is explicitly cleaned up by the smoke runner.
 

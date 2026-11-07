@@ -24,8 +24,9 @@ class Program
                 Context.Continue(@"__FILE__:__LINE__");
             });
 
+        int chainDepth = args.Length == 0 ? 64 : int.Parse(args[0]);
         var e = new InvalidOperationException("innermost");
-        for (int i = 0; i < 64; ++i)
+        for (int i = 0; i < chainDepth; ++i)
         {
             e = new InvalidOperationException("level " + i, e);
         }
@@ -57,7 +58,7 @@ namespace DbgTest.Script
 {
 partial class Context
 {
-    public void CheckInnerExceptionCount(string callerTrace, int expected)
+    public void CheckInnerExceptionCount(string callerTrace, int expected, int chainDepth = 64)
     {
         var request = new ExceptionInfoRequest();
         request.arguments.threadId = m_threadId;
@@ -69,7 +70,7 @@ partial class Context
         for (int depth = 0; ; depth++)
         {
             Assert.Equal("System.InvalidOperationException", node.fullTypeName, callerTrace);
-            Assert.Equal(depth == 64 ? "innermost" : "level " + (63 - depth), node.message, callerTrace);
+            Assert.Equal(depth == chainDepth ? "innermost" : "level " + (chainDepth - 1 - depth), node.message, callerTrace);
             int children = node.innerException?.Count ?? 0;
             Assert.Equal(depth == expected ? 0 : 1, children, callerTrace);
             if (depth == expected)
@@ -104,6 +105,8 @@ partial class Context
             ("2", 2, true),
             ("2suffix", 32, true),
             ("2 ", 32, true),
+            ("16", 16, false),
+            ("128", 64, false),
         };
         foreach (var scenario in cases)
         {
@@ -124,7 +127,36 @@ partial class Context
                 TestInnerExceptionMessages(callerTrace, expectedFirst: "level 62", expectedLast: "level 13");
             if (scenario.Limit == "100")
                 TestInnerExceptionMessages(callerTrace, expectedFirst: "level 62", expectedLast: "innermost");
+            if (scenario.Limit == "16")
+                TestInnerExceptionMessages(callerTrace, expectedFirst: "level 62", expectedLast: "level 47");
+            if (scenario.Limit == "128")
+                TestInnerExceptionMessages(callerTrace, expectedFirst: "level 62", expectedLast: "innermost");
             CheckInnerExceptionCount(callerTrace, scenario.Expected);
+            Continue(callerTrace);
+            WasExit(callerTrace);
+        }
+
+        var upstreamCases = new (string? Limit, int Expected, string Last)[]
+        {
+            (null, 32, "level 17"),
+            ("16", 16, "level 33"),
+            ("100", 50, "innermost"),
+        };
+        foreach (var scenario in upstreamCases)
+        {
+            Initialize(callerTrace);
+            AddArgsListEntry("50");
+            if (scenario.Limit != null)
+                AddEnvMapEntry("DNCDBG_INNER_EXCEPTION_WALK_LIMIT", scenario.Limit);
+            AddExceptionBreakpointFilterAll();
+            SetExceptionBreakpoints(callerTrace);
+            ConfigurationDone(callerTrace);
+            Launch(callerTrace, jmc: true);
+            WasEntryPointHit(callerTrace);
+            Continue(callerTrace);
+            WasExceptionBreakpointHit(callerTrace, "point1", "CLR", "always", "System.InvalidOperationException");
+            TestInnerExceptionMessages(callerTrace, expectedFirst: "level 48", expectedLast: scenario.Last);
+            CheckInnerExceptionCount(callerTrace, scenario.Expected, chainDepth: 50);
             Continue(callerTrace);
             WasExit(callerTrace);
         }

@@ -1,10 +1,8 @@
 using System;
 using System.Diagnostics;
-using System.Globalization;
 using DbgTest;
 using DbgTest.DAP;
 using DbgTest.Script;
-using Newtonsoft.Json.Linq;
 
 namespace TestLogpointTicks
 {
@@ -71,7 +69,7 @@ partial class Context
             string output = "";
             Assert.True(m_dapDebugger.IsNotStopEventReceived(json =>
             {
-                var message = JObject.Parse(json);
+                var message = Newtonsoft.Json.Linq.JObject.Parse(json);
                 if ((string?)message["event"] != "output" || (string?)message["body"]?["category"] != "console")
                     return false;
                 output = (string?)message["body"]?["output"] ?? "";
@@ -82,12 +80,12 @@ partial class Context
             Assert.Equal(5, parts.Length, callerTrace + ": " + output);
             Assert.Equal("literal=$TICK", parts[0], callerTrace);
             Assert.True(parts[1].StartsWith("value=", StringComparison.Ordinal), callerTrace);
-            Assert.True(long.TryParse(parts[1].Substring("value=".Length), NumberStyles.None,
-                CultureInfo.InvariantCulture, out long tick), callerTrace + ": " + output);
+            Assert.True(long.TryParse(parts[1].Substring("value=".Length), System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out long tick), callerTrace + ": " + output);
             Assert.True(tick >= 0, callerTrace);
-            Assert.Equal("repeat=" + tick.ToString(CultureInfo.InvariantCulture), parts[2], callerTrace);
+            Assert.Equal("repeat=" + tick.ToString(System.Globalization.CultureInfo.InvariantCulture), parts[2], callerTrace);
             Assert.Equal("difference=0", parts[3], callerTrace);
-            Assert.Equal("plus=" + (tick + 1).ToString(CultureInfo.InvariantCulture), parts[4], callerTrace);
+            Assert.Equal("plus=" + (tick + 1).ToString(System.Globalization.CultureInfo.InvariantCulture), parts[4], callerTrace);
             Assert.True(output.EndsWith("\n") && !output.EndsWith("\n\n"), callerTrace);
 
             if (PreviousTick.HasValue)

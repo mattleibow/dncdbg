@@ -2,6 +2,7 @@
 Upcoming changes compared to the previous version.
 
 #### DAP
+- Add the source-logpoint `$TICK` expression token as a monotonic decimal millisecond count, sampled once per hit and shared across expressions without resetting on restart.
 - Add source-logpoint expression tokens `$FILEPOS`, `$FUNCTION`, `$ADDRESS`, `$TID`, `$PID`, `$TNAME`, `$CALLER`, `$CALLSTACK` and `$HITCOUNT`, with ordinal left-to-right expansion, quoted string display, format specifiers and existing count/filter/restart semantics. Resolve method/caller/stack/thread names only when expanded; method signatures include declaring types and parameters, including generic and async user methods. An unavailable immediate caller uses `[Unknown Frame]`; an unavailable stack uses `[Unknown Stack]`. Call stacks preserve native physical-frame filtering, foreign unhandled-exception frames, the configured `DNCDBG_STACKTRACE_LIMIT` truncation marker and Just My Code collapse, without logical async continuations.
 - Add native-proven verbatim string-literal coverage, including literal backslashes, doubled quotes and `u8`/`U8` suffix handling; the existing managed evaluator already supports these cases.
 - Report invalid supported debugger environment settings to the debug console as newline-terminated `stderr` output events as well as engine logs. Preserve parse/range-specific messages, fallback defaults and successful session configuration.

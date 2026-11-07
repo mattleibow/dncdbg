@@ -1008,6 +1008,62 @@ class MobileDapTests(unittest.TestCase):
         self.assert_process_gone(committed["child"])
         self.assertEqual(self.daemon.mappings(), [])
 
+    def test_daemon_ready_marker_is_hidden_until_complete(self):
+        script = """
+import socket, sys
+from pathlib import Path
+from fake_adb import daemon
+state = Path(sys.argv[1])
+control = socket.create_connection(("127.0.0.1", int(sys.argv[2])), timeout=5)
+write, replace = Path.write_text, Path.replace
+def write_text(path, data, *args, **kwargs):
+    if path.name not in ("daemon-ready.json", "daemon-ready.new"):
+        return write(path, data, *args, **kwargs)
+    with path.open("w") as marker:
+        marker.write(data[:1])
+        marker.flush()
+        control.sendall(b"O")
+        if control.recv(1) != b"R":
+            raise RuntimeError("Readiness writer was not released.")
+        result = 1 + marker.write(data[1:])
+    if path.name == "daemon-ready.json":
+        control.sendall(b"P")
+    return result
+def replace_file(path, target):
+    result = replace(path, target)
+    if Path(target).name == "daemon-ready.json":
+        control.sendall(b"P")
+    return result
+Path.write_text, Path.replace = write_text, replace_file
+daemon(state, "ready")
+"""
+        (self.state / "endpoint.json").write_text(json.dumps({"Endpoint": {"Port": 34567}}))
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen()
+            listener.settimeout(5)
+            process = subprocess.Popen([sys.executable, "-c", script, str(self.state),
+                                        str(listener.getsockname()[1])], cwd=Path(__file__).parent)
+            try:
+                with listener.accept()[0] as control:
+                    control.settimeout(5)
+                    self.assertEqual(control.recv(1), b"O")
+                    try:
+                        self.assertFalse((self.state / "daemon-ready.json").exists())
+                    finally:
+                        control.sendall(b"R")
+                    self.assertEqual(control.recv(1), b"P")
+                    ready = json.loads((self.state / "daemon-ready.json").read_text())
+                    self.assertEqual(set(ready), {"port"})
+                    with socket.create_connection(("127.0.0.1", ready["port"]), timeout=5) as connection:
+                        connection.sendall(json.dumps({"args": ["-s", "emulator-5556", "forward", "--list"]}).encode() + b"\n")
+                        response = json.loads(connection.makefile("rb").readline())
+                        self.assertEqual(response, {"result": "emulator-5556 tcp:1 tcp:34567\nemulator-9998 tcp:2 tcp:34567",
+                                                    "error": False})
+            finally:
+                process.terminate()
+                process.wait(timeout=5)
+
     def test_daemon_committed_marker_publishes_exact_mapping_snapshot(self):
         # Pause the writer *after* either direct or atomic marker publication.
         # A marker reader must already see the committed snapshot at that instant.

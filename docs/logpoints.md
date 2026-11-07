@@ -16,6 +16,7 @@ These case-sensitive special tokens are expanded only inside expression parts:
 | `$TNAME` | Current thread name, as a string |
 | `$CALLER` | Immediate caller's method name, including its declaring type and parameters, as a string |
 | `$CALLSTACK` | Newline-separated physical call stack, starting with the current frame, as a string |
+| `$TICK` | Milliseconds elapsed since the monotonic clock epoch, as a decimal integer |
 | `$HITCOUNT` | This breakpoint's unsigned hit count after condition filtering and increment |
 
 For example:
@@ -80,6 +81,13 @@ backslashes; the evaluated value also drops optional `u8`/`U8` suffixes,
 matching the tested native debugger contract. If native-address inspection
 fails, an engine diagnostic is logged and the native-compatible zero address
 is displayed; no address is guessed.
+
+`$TICK` uses the debugger's public .NET `Stopwatch` clock, converted to whole
+milliseconds. It is sampled only when expanded, once per logpoint hit, and
+shared by all expressions and repeated tokens in that message. It is not a
+wall-clock date or time since launch, and does not reset on restart. The clock
+epoch is platform-specific; absolute values need not match another debugger
+process or the native implementation's epoch.
 
 Hit counts retain the existing source-breakpoint replacement semantics and
 reset on restart. This is managed source-logpoint functionality; the separate

@@ -591,6 +591,8 @@ public sealed partial class DebugEngine
             ["$TNAME"] = new(() => VerbatimLiteral(GetLogpointThreadName(frame.ThreadId))),
             ["$CALLER"] = new(() => VerbatimLiteral(GetLogpointCallerName(frame))),
             ["$CALLSTACK"] = new(() => VerbatimLiteral(GetLogpointCallStack(frame.ThreadId))),
+            ["$TICK"] = new(() => (System.Diagnostics.Stopwatch.GetElapsedTime(0).Ticks / TimeSpan.TicksPerMillisecond)
+                .ToString(System.Globalization.CultureInfo.InvariantCulture)),
             ["$HITCOUNT"] = new(() => breakpoint.HitCount.ToString(System.Globalization.CultureInfo.InvariantCulture)),
         };
     }

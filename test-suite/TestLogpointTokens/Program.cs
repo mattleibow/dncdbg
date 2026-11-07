@@ -86,6 +86,7 @@ partial class Context
     {
         var breakpoint = (LineBreakpoint)m_controlInfo.Breakpoints["tokens"];
         string source = m_controlInfo.SourceFilesPath!.Split(';')[0] + ":" + breakpoint.NumLine;
+        string quotedSource = JsonConvert.SerializeObject(source);
         for (int count = 1; count <= 2; count++)
         {
             string output = "";
@@ -100,8 +101,8 @@ partial class Context
             string[] parts = output.TrimEnd('\n').Split('|');
             Assert.Equal(19, parts.Length, callerTrace + ": " + output);
             Assert.Equal("literal=$PID", parts[0], callerTrace);
-            Assert.Equal("file=" + JsonConvert.SerializeObject(source), parts[1], callerTrace);
-            Assert.Equal("plain=" + source, parts[2], callerTrace);
+            Assert.Equal("file=" + quotedSource, parts[1], callerTrace);
+            Assert.Equal("plain=" + quotedSource.Substring(1, quotedSource.Length - 2), parts[2], callerTrace);
             string address = parts[3].Substring("address=".Length);
             Assert.True(address.StartsWith("\"0x") && address.EndsWith("\"") && address.Length == 20, callerTrace);
             Assert.True(ulong.Parse(address.Substring(3, 16), System.Globalization.NumberStyles.HexNumber) != 0, callerTrace);

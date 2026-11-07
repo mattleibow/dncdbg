@@ -103,7 +103,9 @@ def daemon(state, mode):
         listener.bind(("127.0.0.1", 0))
         listener.listen()
         save()
-        (state / "daemon-ready.json").write_text(json.dumps({"port": listener.getsockname()[1]}))
+        replacement = state / "daemon-ready.new"
+        replacement.write_text(json.dumps({"port": listener.getsockname()[1]}))
+        replacement.replace(state / "daemon-ready.json")
         while True:
             connection, _ = listener.accept()
             threading.Thread(target=handle, args=(connection,), daemon=True).start()

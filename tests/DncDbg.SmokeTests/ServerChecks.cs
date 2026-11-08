@@ -266,7 +266,8 @@ internal static class ServerChecks
         IPEndPoint[] matching = listeners.Where(endpoint => endpoint.Port == port).ToArray();
         if (matching.Any(endpoint => endpoint.Address.Equals(IPAddress.Any) || endpoint.Address.Equals(IPAddress.IPv6Any)))
             throw new InvalidOperationException("Server listener is bound to a wildcard address.");
-        if (matching.Any(endpoint => !endpoint.Address.Equals(IPAddress.Loopback) && !endpoint.Address.Equals(guardAddress)))
+        if (matching.Any(endpoint => !endpoint.Address.Equals(IPAddress.Loopback)
+            && (OperatingSystem.IsMacOS() || !endpoint.Address.Equals(guardAddress))))
             throw new InvalidOperationException("Unexpected non-loopback server listener.");
         return matching.Any(endpoint => endpoint.Address.Equals(IPAddress.Loopback));
     }

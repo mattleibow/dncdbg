@@ -87,10 +87,11 @@ internal static class ServerChecks
                     .SelectMany(network => network.GetIPProperties().UnicastAddresses)
                     .Select(address => address.Address)
                     .First(address => address.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(address));
-                // Keep another interface occupied before startup: a wildcard bind must fail.
+                // Keep another interface occupied and observe the adapter's actual binding before connecting.
                 using var otherInterface = Listen(port, nonLoopback);
                 using var server = new Server(executable,
                     [$"--server={port}", "--log=" + engineLog, "--logProtocol=" + protocolLog, "--loglevel=unknown"]);
+                await server.VerifyLoopbackListener(port, nonLoopback);
                 await server.Connect(port);
                 Check(true, "listener is bound to 127.0.0.1, not wildcard");
                 await server.InitializeFragmented();
@@ -208,8 +209,66 @@ internal static class ServerChecks
 
     private static int FreePort()
     {
-        using var listener = Listen(0);
+        using var listener = Listen(0, IPAddress.Any);
         return ((IPEndPoint)listener.LocalEndpoint).Port;
+    }
+
+    private static async Task<bool> LoopbackListenerReady(int processId, int port, IPAddress guardAddress, CancellationToken cancellation)
+    {
+        IEnumerable<IPEndPoint> listeners;
+        if (OperatingSystem.IsMacOS())
+        {
+            // The public .NET endpoint API does not expose the child listener on macOS.
+            var start = new ProcessStartInfo("/usr/sbin/lsof")
+            {
+                UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true,
+            };
+            foreach (string argument in new[] { "-nP", "-a", "-p", processId.ToString(CultureInfo.InvariantCulture), "-iTCP", "-sTCP:LISTEN", "-F", "n" })
+                start.ArgumentList.Add(argument);
+            using Process observer = Process.Start(start) ?? throw new InvalidOperationException("Cannot start listener observation.");
+            Task<string> output = observer.StandardOutput.ReadToEndAsync();
+            Task<string> error = observer.StandardError.ReadToEndAsync();
+            try
+            {
+                await observer.WaitForExitAsync(cancellation);
+            }
+            catch (OperationCanceledException)
+            {
+                if (!observer.HasExited)
+                    observer.Kill();
+                await observer.WaitForExitAsync();
+                throw;
+            }
+            string text = await output;
+            string diagnostic = await error;
+            if (observer.ExitCode == 1 && text.Length == 0 && diagnostic.Length == 0)
+                return false; // lsof reports no matching sockets while the child starts.
+            if (observer.ExitCode != 0 || diagnostic.Length != 0)
+                throw new InvalidOperationException($"Listener observation failed ({observer.ExitCode}): {diagnostic}");
+            var endpoints = new List<IPEndPoint>();
+            foreach (string line in text.Split('\n'))
+            {
+                if (!line.StartsWith('n'))
+                    continue;
+                string endpointText = line[1..];
+                if (endpointText.StartsWith("*:", StringComparison.Ordinal))
+                    endpointText = "0.0.0.0" + endpointText[1..];
+                if (!IPEndPoint.TryParse(endpointText, out IPEndPoint? endpoint))
+                    throw new InvalidOperationException("Cannot parse observed listener: " + line);
+                endpoints.Add(endpoint);
+            }
+            listeners = endpoints;
+        }
+        else
+        {
+            listeners = IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners();
+        }
+        IPEndPoint[] matching = listeners.Where(endpoint => endpoint.Port == port).ToArray();
+        if (matching.Any(endpoint => endpoint.Address.Equals(IPAddress.Any) || endpoint.Address.Equals(IPAddress.IPv6Any)))
+            throw new InvalidOperationException("Server listener is bound to a wildcard address.");
+        if (matching.Any(endpoint => !endpoint.Address.Equals(IPAddress.Loopback) && !endpoint.Address.Equals(guardAddress)))
+            throw new InvalidOperationException("Unexpected non-loopback server listener.");
+        return matching.Any(endpoint => endpoint.Address.Equals(IPAddress.Loopback));
     }
 
     private sealed class Server : IDisposable
@@ -263,6 +322,23 @@ internal static class ServerChecks
                         throw new InvalidOperationException($"Server exited before accepting port {port}: {await Error}");
                     await Task.Delay(20, _timeout.Token);
                 }
+            }
+        }
+
+        public async Task VerifyLoopbackListener(int port, IPAddress guardAddress)
+        {
+            try
+            {
+                while (!await LoopbackListenerReady(Process.Id, port, guardAddress, _timeout.Token))
+                {
+                    if (Process.HasExited)
+                        throw new InvalidOperationException("Server exited before its loopback listener was observed: " + await Error);
+                    await Task.Delay(20, _timeout.Token);
+                }
+            }
+            catch (OperationCanceledException e) when (_timeout.IsCancellationRequested)
+            {
+                throw new TimeoutException($"Server loopback listener was not observed before the startup deadline: pid={Process.Id}, port={port}", e);
             }
         }
 
@@ -330,7 +406,19 @@ internal static class ServerChecks
 
         public async Task Exited(bool success = true)
         {
-            await Process.WaitForExitAsync(_timeout.Token);
+            try
+            {
+                await Process.WaitForExitAsync(_timeout.Token);
+            }
+            catch (OperationCanceledException e) when (_timeout.IsCancellationRequested)
+            {
+                bool exitedBeforeCleanup = Process.HasExited;
+                if (!exitedBeforeCleanup)
+                    Process.Kill(entireProcessTree: true);
+                await Process.WaitForExitAsync();
+                throw new TimeoutException($"Server exit deadline expired: pid={Process.Id}, exitedBeforeCleanup={exitedBeforeCleanup}, "
+                    + $"cleanupExitCode={Process.ExitCode}, stdout: {await Output}, stderr: {await Error}", e);
+            }
             string output = await Output.WaitAsync(_timeout.Token);
             if ((Process.ExitCode == 0) != success || output.Length != 0)
                 throw new InvalidOperationException($"Server exit {Process.ExitCode}, stdout: {output}, stderr: {await Error.WaitAsync(_timeout.Token)}");

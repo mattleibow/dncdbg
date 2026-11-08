@@ -82,14 +82,16 @@ internal static class ServerChecks
             foreach (bool eof in new[] { false, true })
             {
                 int port = FreePort();
-                using var server = new Server(executable,
-                    [$"--server={port}", "--log=" + engineLog, "--logProtocol=" + protocolLog, "--loglevel=unknown"]);
-                await server.Connect(port);
                 IPAddress nonLoopback = NetworkInterface.GetAllNetworkInterfaces()
+                    .Where(network => network.OperationalStatus == OperationalStatus.Up)
                     .SelectMany(network => network.GetIPProperties().UnicastAddresses)
                     .Select(address => address.Address)
                     .First(address => address.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(address));
+                // Keep another interface occupied before startup: a wildcard bind must fail.
                 using var otherInterface = Listen(port, nonLoopback);
+                using var server = new Server(executable,
+                    [$"--server={port}", "--log=" + engineLog, "--logProtocol=" + protocolLog, "--loglevel=unknown"]);
+                await server.Connect(port);
                 Check(true, "listener is bound to 127.0.0.1, not wildcard");
                 await server.InitializeFragmented();
                 await server.Request("configurationDone", new { });

@@ -58,6 +58,26 @@ dotnet run --project tests/DncDbg.SmokeTests -- bin/dncdbg-dap
 These checks do not modify the existing Runner, ScriptContext, fixtures, or
 assertions. Their diagnostic logs are written under `build/validation/cli-smoke`.
 
+The smoke runner includes real TCP server checks: strict port parsing and option
+ordering, IPv4 loopback binding, fragmented DAP framing, one-client transport,
+separate logs, a live target stopped at entry, target output, and owned-target/
+listener cleanup after both `disconnect` and client EOF. The shared checks can
+run unchanged against the managed adapter or exact native `6bae41f9`:
+
+```sh
+dotnet run --project tests/DncDbg.SmokeTests -- --server-checks /path/to/adapter
+```
+
+Port zero is a managed extension, not a native-equivalent assertion. Its standalone
+and repeated-option TCP checks are separate:
+
+```sh
+dotnet run --project tests/DncDbg.SmokeTests -- --server-extensions bin/dncdbg-dap
+```
+
+Run these sequentially: default-port checks require exclusive access to `4711`.
+Real launch gates should inherit a fresh short private `TMPDIR` on Unix.
+
 The smoke runner also exercises startup/unregistration barriers, rejection of
 late startup callbacks, cancellation of a delayed external launcher, a 1 MiB
 stdin write to a non-reading target followed by disconnect, detached-child

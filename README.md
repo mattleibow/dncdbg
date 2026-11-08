@@ -152,6 +152,10 @@ accepts one TCP connection on localhost; repeated debug sessions can share that
 connection. For Unix PAL compatibility, empty target arguments and arguments
 containing spaces that end in a backslash are omitted.
 
+The default TCP port is `4711`; a later bare `--server` preserves an earlier
+explicit port. `--server=0` is a managed extension that selects an unused port
+and reports it on stderr. See [launch options](docs/launch_options.md).
+
 The managed debugger includes launch/attach, restart, repeated sessions, noDebug
 launches, redirected I/O, source/function/conditional breakpoints and logpoints,
 sync/async stepping, expression evaluation and mutation, memory read/write,
@@ -181,6 +185,7 @@ releasing the process.
 
 ### Debugger configuration
 
+- [Launch options](docs/launch_options.md) - configure DAP transport, logging, version and build information.
 - [Configuration environment variables](docs/config_env.md) - configure the debugger process or a session.
 - [Persistent debug server](docs/debug_server.md) - run sequential sessions on one connection.
 - [Launch settings profiles](docs/launch_settings.md) - share target paths, arguments, working directories and environment with other .NET tools.

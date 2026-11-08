@@ -73,12 +73,26 @@ jobs:
               export TMPDIR=$(mktemp -d /tmp/sv.XXXXXX)
               dotnet run --project tests/DncDbg.SmokeTests -c Release --no-build -- --server-checks /opt/native-current/dncdbg > "$evidence/native-server.log" 2>&1
               tail -1 "$evidence/native-server.log"
+              server_red_ref=96b6d67f956d58d8104dae373dbcb446f97ec8df
+              server_main_ref=dab33c9f2f05739417276223f623d27d9c6cd335
+              {
+                printf "CI historical server-red reference: %s\n" "$server_red_ref"
+                printf "Local exact main server-red reference: %s\n" "$server_main_ref"
+                for path in src/DncDbg.Dap/CommandLine.cs src/DncDbg.Dap/Program.cs; do
+                  red_blob=$(git rev-parse "$server_red_ref:$path")
+                  main_blob=$(git rev-parse "$server_main_ref:$path")
+                  printf "%s historical=%s main=%s\n" "$path" "$red_blob" "$main_blob"
+                  if [ "$red_blob" != "$main_blob" ]; then
+                    echo "Historical and exact main server sources differ: $path" >&2; exit 1
+                  fi
+                done
+              } > "$evidence/server-references.txt"
               export TMPDIR=$(mktemp -d /tmp/sv.XXXXXX)
               if dotnet run --project tests/DncDbg.SmokeTests -c Release --no-build -- --server-checks /opt/managed-baseline/dncdbg-dap > "$evidence/managed-server-red.log" 2>&1; then
-                echo "Pre-fix managed server baseline unexpectedly passed"; exit 1
+                echo "Historical managed server baseline unexpectedly passed"; exit 1
               fi
               grep -q "Server exited before accepting port.*Address already in use" "$evidence/managed-server-red.log"
-              echo "Deterministic pre-fix managed server ordering red: CONFIRMED"
+              echo "Deterministic historical managed server ordering red: CONFIRMED"
               export TMPDIR=$(mktemp -d /tmp/sv.XXXXXX)
               dotnet run --project tests/DncDbg.SmokeTests -c Release --no-build -- --server-checks /opt/managed-current/dncdbg-dap > "$evidence/managed-server-green.log" 2>&1
               tail -1 "$evidence/managed-server-green.log"

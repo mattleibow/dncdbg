@@ -34,7 +34,7 @@ internal sealed record CommandLineOptions
                 case "--interpreter=vscode":
                     break; // The managed adapter always speaks DAP.
                 case "--server":
-                    options.Port = 4711;
+                    options.Port ??= 4711;
                     break;
                 default:
                     if (arg.StartsWith("--logProtocol=", StringComparison.Ordinal))

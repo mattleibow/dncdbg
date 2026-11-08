@@ -53,6 +53,16 @@ if (args is ["--resume-handles"])
     Console.WriteLine($"Passed {ResumeHandleChecks.Run()} resume handle checks.");
     return;
 }
+if (args is ["--server-checks", var server])
+{
+    Console.WriteLine($"Passed {await ServerChecks.Run(Path.GetFullPath(server), typeof(Program).Assembly.Location)} shared server checks.");
+    return;
+}
+if (args is ["--server-extensions", var extensionServer])
+{
+    Console.WriteLine($"Passed {await ServerChecks.RunExtensions(Path.GetFullPath(extensionServer))} managed server extension checks.");
+    return;
+}
 
 if (args.Length != 1)
     throw new ArgumentException("Supply the path to the dncdbg-dap apphost.");
@@ -96,6 +106,8 @@ Check(!engineText.Contains("\"command\":\"initialize\""), "engine and protocol l
 await CheckProtocol(["--log=", "--logProtocol=", "--loglevel=ERROR"]);
 await CheckProtocol(["--logProtocol=" + Path.Combine(logDirectory, "missing", "protocol.log")]);
 await CheckProtocol([], deferStart: true);
+passed += await ServerChecks.Run(executable, typeof(Program).Assembly.Location);
+passed += await ServerChecks.RunExtensions(executable);
 passed += await SafetyChecks.Run(executable, typeof(Program).Assembly.Location);
 Console.WriteLine($"Passed {passed} CLI/protocol smoke checks.");
 return;

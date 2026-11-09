@@ -125,13 +125,19 @@ try {
         }
         $assembly = Join-Path $project.Directory "bin/$configuration/$framework/$($project.Name).dll"
 
-        $exitCode = Invoke-DotNet @(
+        $serverArguments = @(switch ($project.Name) {
+            "TestServerDefaultPort" { @("--server", "4711") }
+            "TestServerCustomPort" { @("--server", "22111") }
+            default { @() }
+        })
+        $runnerArguments = @(
             "run", "--project", "Runner/Runner.csproj", "--no-build", "--",
             "--local", $debugger,
             "--test", $project.Name,
             "--sources", $sourceArgument,
             "--assembly", $assembly
         )
+        $exitCode = Invoke-DotNet ($runnerArguments + $serverArguments)
 
         if ($exitCode -eq 0) {
             $passed++

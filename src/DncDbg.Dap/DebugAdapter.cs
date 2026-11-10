@@ -504,7 +504,10 @@ internal sealed class DebugAdapter : IDisposable
             {
                 var args = request.GetArguments<SourceArguments>()!;
                 int reference = args.Source?.SourceReference is > 0 ? args.Source.SourceReference.Value : args.SourceReference;
-                return new SourceResponseBody { Content = _engine.GetSource(reference, args.Source?.Path), MimeType = "text/x-csharp" };
+                string? path = args.Source?.Path is { ValueKind: System.Text.Json.JsonValueKind.String } p ? p.GetString() : null;
+                if (string.IsNullOrEmpty(path))
+                    path = args.Source?.Name is { ValueKind: System.Text.Json.JsonValueKind.String } n ? n.GetString() : null;
+                return new SourceResponseBody { Content = _engine.GetSource(reference, path), MimeType = "text/x-csharp" };
             }
 
             case "dotnet/freezeThread":

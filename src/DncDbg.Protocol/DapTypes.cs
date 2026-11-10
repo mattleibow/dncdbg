@@ -215,8 +215,16 @@ public sealed class Source
 
 public sealed class SourceArguments
 {
-    public Source? Source { get; set; }
+    public SourceRequestSource? Source { get; set; }
     public int SourceReference { get; set; }
+}
+
+// Only source requests tolerate arbitrary JSON in these optional string fields.
+public sealed class SourceRequestSource
+{
+    public JsonElement Name { get; set; }
+    public JsonElement Path { get; set; }
+    public int? SourceReference { get; set; }
 }
 
 public sealed class SourceResponseBody

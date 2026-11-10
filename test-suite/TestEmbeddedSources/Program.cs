@@ -73,6 +73,7 @@ class Program
                 Context.CompareSources(@"__FILE__:__LINE__", "Program.cs", sourceReference: sourceReference, sourcePath: "");
 
                 Context.CheckSourceRequestFallbacks(@"__FILE__:__LINE__", sourceReference);
+                Context.CheckIncomingSourceRequests(@"__FILE__:__LINE__", sourceReference);
 
                 sourceReference = Context.GetSourceReferenceFromLoadedSources(@"__FILE__:__LINE__", sourceName: "Program2.cs");
                 Context.CompareSources(@"__FILE__:__LINE__", "Program2.cs", sourceReference: sourceReference, sourcePath: "");
@@ -180,6 +181,103 @@ namespace DbgTest.Script
                     var body = Newtonsoft.Json.Linq.JObject.Parse(recovered.ResponseStr);
                     if (!recovered.Success || (string?)body["command"] != "source" || (string?)body["body"]?["content"] != main)
                         m_sourceRequestFailures.Add(label + ": source recovery failed");
+                }
+            }
+        }
+
+        public void CheckIncomingSourceRequests(string callerTrace, int sourceReference)
+        {
+            int line = ((LineBreakpoint)m_controlInfo.Breakpoints["bp1"]).NumLine;
+            foreach (string command in new[] { "setBreakpoints", "gotoTargets", "breakpointLocations" })
+            {
+                foreach (string field in new[] { "name", "path" })
+                foreach (string value in new[] { "null", "42", "false", "[]", "{}" })
+                {
+                    var source = new Newtonsoft.Json.Linq.JObject
+                    {
+                        [field == "name" ? "path" : "name"] = "Program.cs",
+                        [field] = Newtonsoft.Json.Linq.JToken.Parse(value),
+                    };
+                    Check(source, true, field + "=" + value);
+                }
+                Check(new Newtonsoft.Json.Linq.JObject { ["path"] = "Program.cs", ["name"] = "missing-source.cs" }, true, "path precedes name");
+                Check(new Newtonsoft.Json.Linq.JObject { ["path"] = "", ["name"] = "Program.cs" }, true, "empty path falls back to name");
+                Check(new Newtonsoft.Json.Linq.JObject { ["name"] = "Program.cs" }, true, "absent path falls back to name");
+                Check(new Newtonsoft.Json.Linq.JObject(), false, "missing source identity");
+                Check(new Newtonsoft.Json.Linq.JObject { ["path"] = 42, ["name"] = false }, false, "unusable source identity");
+                foreach (string value in new[] { "null", "42", "[]" })
+                    Check(Newtonsoft.Json.Linq.JToken.Parse(value), false, "invalid source object " + value);
+                foreach (string value in new[] { "\"invalid\"", "[]", "{}" })
+                    Check(new Newtonsoft.Json.Linq.JObject
+                    {
+                        ["path"] = "Program.cs",
+                        ["sourceReference"] = Newtonsoft.Json.Linq.JToken.Parse(value),
+                    }, false, "invalid source reference " + value);
+                Check(new Newtonsoft.Json.Linq.JObject { ["path"] = "Program.cs" }, false, "required line remains an integer", invalidLine: true);
+                if (command == "setBreakpoints")
+                    Check(new Newtonsoft.Json.Linq.JObject { ["path"] = "Program.cs" }, false, "condition remains a string", invalidCondition: true);
+
+                void Check(Newtonsoft.Json.Linq.JToken source, bool expectedSuccess, string label,
+                           bool invalidLine = false, bool invalidCondition = false)
+                {
+                    var arguments = new Newtonsoft.Json.Linq.JObject { ["source"] = source };
+                    var requestedLine = Newtonsoft.Json.Linq.JToken.Parse(invalidLine ? "\"invalid\"" :
+                        line.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                    if (command == "setBreakpoints")
+                    {
+                        var breakpoint = new Newtonsoft.Json.Linq.JObject { ["line"] = requestedLine };
+                        if (invalidCondition)
+                            breakpoint["condition"] = 42;
+                        arguments["breakpoints"] = new Newtonsoft.Json.Linq.JArray(breakpoint);
+                    }
+                    else
+                        arguments["line"] = requestedLine;
+
+                    var result = m_dapDebugger.Request(new RawSourceRequest { command = command, arguments = arguments });
+                    var response = Newtonsoft.Json.Linq.JObject.Parse(result.ResponseStr);
+                    bool matches = (string?)response["command"] == command && (string?)response["type"] == "response" &&
+                        result.Success == expectedSuccess;
+                    if (expectedSuccess)
+                    {
+                        var locations = response["body"]?[command == "gotoTargets" ? "targets" : "breakpoints"] as Newtonsoft.Json.Linq.JArray;
+                        matches &= locations?.Count == 1 && (int?)locations[0]["line"] == line &&
+                            (int?)locations[0]["column"] == 9 && (int?)locations[0]["endLine"] == line &&
+                            (int?)locations[0]["endColumn"] == 28;
+                        if (command == "setBreakpoints")
+                            matches &= locations?.Count == 1 && (bool?)locations[0]["verified"] == true &&
+                                (string?)locations[0]["source"]?["name"] == "Program.cs";
+                        if (command == "gotoTargets")
+                            matches &= locations?.Count == 1 && (int?)locations[0]["id"] > 0 &&
+                                !string.IsNullOrEmpty((string?)locations[0]["label"]);
+                    }
+                    else
+                        matches &= !string.IsNullOrEmpty((string?)response["message"]) &&
+                            response["body"]?["breakpoints"] == null && response["body"]?["targets"] == null;
+                    if (!matches)
+                        m_sourceRequestFailures.Add(command + ", " + label + ": " +
+                            (result.Success ? "unexpected result" : (string?)response["message"]));
+
+                    // A valid same-command request must recover after every malformed input.
+                    if (!expectedSuccess)
+                    {
+                        var recovery = new RawSourceRequest
+                        {
+                            command = command,
+                            arguments = (Newtonsoft.Json.Linq.JObject)arguments.DeepClone(),
+                        };
+                        recovery.arguments["source"] = new Newtonsoft.Json.Linq.JObject { ["path"] = "Program.cs" };
+                        if (command == "setBreakpoints")
+                            recovery.arguments["breakpoints"] = new Newtonsoft.Json.Linq.JArray(new Newtonsoft.Json.Linq.JObject { ["line"] = line });
+                        else
+                            recovery.arguments["line"] = line;
+                        var recovered = m_dapDebugger.Request(recovery);
+                        var body = Newtonsoft.Json.Linq.JObject.Parse(recovered.ResponseStr);
+                        var locations = body["body"]?[command == "gotoTargets" ? "targets" : "breakpoints"] as Newtonsoft.Json.Linq.JArray;
+                        if (!recovered.Success || (string?)body["command"] != command ||
+                            locations?.Count != 1 || (int?)locations[0]["line"] != line)
+                            m_sourceRequestFailures.Add(command + ", " + label + ": recovery failed");
+                    }
+                    CompareSources(callerTrace, "Program.cs", sourceReference, "");
                 }
             }
         }

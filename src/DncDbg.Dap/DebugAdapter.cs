@@ -104,7 +104,7 @@ internal sealed class DebugAdapter : IDisposable
             switch (message.Command)
             {
                 case "cancel":
-                    Cancel(message);
+                    Handle(message);
                     break;
 
                 case "pause" or "terminate":
@@ -179,6 +179,11 @@ internal sealed class DebugAdapter : IDisposable
     {
         try
         {
+            if (message.Command == "cancel")
+            {
+                Cancel(message);
+                return;
+            }
             object? body = Dispatch(message);
             Action? afterResponse = _afterResponse;
             _afterResponse = null;

@@ -92,6 +92,23 @@ dotnet run --project tests/DncDbg.SmokeTests -- bin/dncdbg-dap
 These checks do not modify the existing Runner, ScriptContext, fixtures, or
 assertions. Their diagnostic logs are written under `build/validation/cli-smoke`.
 
+The raw DAP checks run real adapter processes. Malformed cancel arguments and
+typed evaluation/mutation/memory arguments must produce failed responses with
+the original request sequence and command, a diagnostic, then allow valid
+exception-breakpoint configuration and clean disconnect. Run the same shared
+matrix against either the managed adapter or a native reference:
+
+```sh
+dotnet run --project tests/DncDbg.SmokeTests -- --protocol /path/to/debugger
+```
+
+`--protocol-recovery /path/to/dncdbg-dap` separately preserves managed-only
+behavior: optional/no-op cancel arguments, recovery from invalid/overflowing or
+over-cap Content-Length headers, non-JSON bodies, and malformed JSON with a
+recoverable sequence. It sends only short headers/bodies, never large allocation
+probes. Both groups also run in normal smoke; native's malformed-header
+disconnect policy is intentionally not imposed on the managed adapter.
+
 The smoke runner also exercises startup/unregistration barriers, rejection of
 late startup callbacks, cancellation of a delayed external launcher, a 1 MiB
 stdin write to a non-reading target followed by disconnect, detached-child

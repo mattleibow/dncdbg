@@ -89,6 +89,11 @@ How to read the blocks below:
 ⚪  no additional fields
 ```
 
+The managed adapter processes cancel on the reader thread so it can interrupt
+queued/running work. Malformed arguments use the same logged failed-response
+path as other requests without terminating the session. A missing/null
+`requestId` or an ID with no running request remains a successful no-op.
+
 ## Events
 
 #### InitializedEvent `initialized`

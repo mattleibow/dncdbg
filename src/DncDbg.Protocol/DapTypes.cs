@@ -215,16 +215,23 @@ public sealed class Source
 
 public sealed class SourceArguments
 {
-    public SourceRequestSource? Source { get; set; }
+    public InputSource? Source { get; set; }
     public int SourceReference { get; set; }
 }
 
-// Only source requests tolerate arbitrary JSON in these optional string fields.
-public sealed class SourceRequestSource
+// Local incoming sources tolerate arbitrary JSON in optional path/name fields.
+public sealed class InputSource
 {
     public JsonElement Name { get; set; }
     public JsonElement Path { get; set; }
     public int? SourceReference { get; set; }
+
+    public string? GetPathOrName()
+    {
+        if (Path.ValueKind == JsonValueKind.String && Path.GetString() is { Length: > 0 } path)
+            return path;
+        return Name.ValueKind == JsonValueKind.String && Name.GetString() is { Length: > 0 } name ? name : null;
+    }
 }
 
 public sealed class SourceResponseBody
@@ -235,7 +242,7 @@ public sealed class SourceResponseBody
 
 public sealed class GotoTargetsArguments
 {
-    public Source Source { get; set; } = new();
+    public InputSource Source { get; set; } = new();
     public int Line { get; set; }
     public int? Column { get; set; }
 }
@@ -299,7 +306,7 @@ public sealed class SourceBreakpoint
 
 public sealed class SetBreakpointsArguments
 {
-    public Source Source { get; set; } = new();
+    public InputSource Source { get; set; } = new();
     public SourceBreakpoint[]? Breakpoints { get; set; }
 }
 

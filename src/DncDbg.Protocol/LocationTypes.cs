@@ -2,7 +2,7 @@ namespace DncDbg.Protocol;
 
 public sealed class BreakpointLocationsArguments
 {
-    public Source Source { get; set; } = new();
+    public InputSource Source { get; set; } = new();
     public int Line { get; set; }
     public int? Column { get; set; }
     public int? EndLine { get; set; }

@@ -416,7 +416,7 @@ internal sealed class DebugAdapter : IDisposable
             case "setBreakpoints":
             {
                 var args = request.GetArguments<SetBreakpointsArguments>()!;
-                string path = args.Source.Path ?? throw new DebuggerException("Only breakpoints in files with a path are supported.");
+                string path = args.Source?.GetPathOrName() ?? throw new DebuggerException("A source path or name is required.");
                 BreakpointRequest[] requests = (args.Breakpoints ?? [])
                     .Select(b => new BreakpointRequest(LineFromClient(b.Line), b.Column is { } c ? ColumnFromClient(c) : null,
                         b.Condition, b.HitCondition, b.LogMessage))
@@ -470,7 +470,8 @@ internal sealed class DebugAdapter : IDisposable
             {
                 var args = request.GetArguments<BreakpointLocationsArguments>()!;
                 int line = LineFromClient(args.Line);
-                return new BreakpointLocationsResponseBody(_engine.GetBreakpointLocations(args.Source.Path ?? args.Source.Name ?? "",
+                string path = args.Source?.GetPathOrName() ?? throw new DebuggerException("A source path or name is required.");
+                return new BreakpointLocationsResponseBody(_engine.GetBreakpointLocations(path,
                     line, args.Column is > 0 ? ColumnFromClient(args.Column.Value) : 1,
                     args.EndLine is > 0 ? LineFromClient(args.EndLine.Value) : line,
                     args.EndColumn is > 0 ? ColumnFromClient(args.EndColumn.Value) : int.MaxValue)
@@ -480,7 +481,7 @@ internal sealed class DebugAdapter : IDisposable
             case "gotoTargets":
             {
                 var args = request.GetArguments<GotoTargetsArguments>()!;
-                string path = args.Source.Path ?? throw new DebuggerException("A source path is required.");
+                string path = args.Source?.GetPathOrName() ?? throw new DebuggerException("A source path or name is required.");
                 return new GotoTargetsResponseBody
                 {
                     Targets = _engine.GetGotoTargets(path, LineFromClient(args.Line), args.Column is { } c ? ColumnFromClient(c) : null)
@@ -504,10 +505,7 @@ internal sealed class DebugAdapter : IDisposable
             {
                 var args = request.GetArguments<SourceArguments>()!;
                 int reference = args.Source?.SourceReference is > 0 ? args.Source.SourceReference.Value : args.SourceReference;
-                string? path = args.Source?.Path is { ValueKind: System.Text.Json.JsonValueKind.String } p ? p.GetString() : null;
-                if (string.IsNullOrEmpty(path))
-                    path = args.Source?.Name is { ValueKind: System.Text.Json.JsonValueKind.String } n ? n.GetString() : null;
-                return new SourceResponseBody { Content = _engine.GetSource(reference, path), MimeType = "text/x-csharp" };
+                return new SourceResponseBody { Content = _engine.GetSource(reference, args.Source?.GetPathOrName()), MimeType = "text/x-csharp" };
             }
 
             case "dotnet/freezeThread":

@@ -128,7 +128,8 @@ public sealed partial class DebugEngine
     {
         lock (_lock)
         {
-            var parsed = requests.Select(r => (Request: r, Hit: ParseHitCondition(r.HitCondition))).ToArray();
+            var parsed = requests.Select(r => (Request: r, Name: ParseFunctionBreakpointName(r.Name),
+                Hit: ParseHitCondition(r.HitCondition))).ToArray();
             return WhileSynchronized(() =>
             {
                 UserBreakpoint[] old = _functionBreakpoints.ToArray();
@@ -137,7 +138,7 @@ public sealed partial class DebugEngine
                 var created = parsed.Select(item =>
                 {
                     FunctionBreakpointRequest r = item.Request;
-                    string name = r.Name.Trim();
+                    string name = item.Name;
                     UserBreakpoint? previous = old.FirstOrDefault(b => b.FunctionName == name);
                     return new UserBreakpoint
                     {
@@ -149,6 +150,18 @@ public sealed partial class DebugEngine
                 return Install(created, _functionBreakpoints.AddRange);
             });
         }
+    }
+
+    private static string ParseFunctionBreakpointName(string name)
+    {
+        int open = name.IndexOf('(');
+        if (open >= 0)
+        {
+            int close = name.IndexOf(')', open);
+            if (open == 0 || close < 0 || close != name.Length - 1)
+                throw new DebuggerException($"Cannot parse the function breakpoint name '{name}'. The parameter list must be enclosed in parentheses at the end of the name, e.g. 'Foo(Bar)'.");
+        }
+        return name.Trim();
     }
 
     private static string? NullIfBlank(string? text) => string.IsNullOrWhiteSpace(text) ? null : text;

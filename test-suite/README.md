@@ -82,11 +82,6 @@ because the former `740811da` reference predates `--server`. Its historical
 The preserved-binary native 2/2, managed 2/2 and stdio restart 1/1 results are
 local preparation evidence, not final pull-request qualification. Final CI must
 run the complete current-native and managed suites, including both TCP fixtures.
-This independent test/harness port does not incorporate the separate server
-smoke/production work in PR #31 or close that upstream migration gap; the
-contiguous merged-through marker remains `f15747ae` until the gap is qualified
-and merged. Reviewed upstream revisions and prepared branches are not merged
-coverage.
 
 Run the additional cross-platform CLI/protocol smoke checks from the repository root:
 

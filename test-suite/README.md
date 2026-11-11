@@ -49,6 +49,40 @@ pwsh ./test-suite/run_tests.ps1 TestStepping TestStepping_NoJMCNoFilter TestAsyn
 The debugger's build configuration is independent of each test fixture's
 configuration; the existing scripts continue to select the appropriate fixture.
 
+For the upstream TCP server fixtures:
+
+```sh
+pwsh ./test-suite/run_tests.ps1 TestServerDefaultPort TestServerCustomPort
+```
+
+Only these two fixtures select TCP automatically: the runner launches the adapter
+with bare `--server` for port 4711 and `--server=22111` for the custom port. All
+other tests keep stdio. The PowerShell entrypoint is shared across operating
+systems, replacing both upstream script routes. Its `Runner --server <port>`
+option connects to IPv4 loopback, with a five-second startup deadline, 50 ms
+connection-refused retries and TCP `NoDelay`. It reuses the stdio DAP framing and
+continuous queued reader, retaining back-to-back events across every restart on
+the same connection.
+
+Both `Program.cs` fixtures and project files are unchanged from upstream
+`c2a3846694fed03c5f0d29dda4f978e1bcbce510`: initialization, source/function
+breakpoints, restart while stopped, restart after exit, exact disabled implicit
+evaluation errors, and restart with launch arguments enabling `TestEval()` as
+`5`/`int`, followed by debugger exit. This is test/harness coverage, not a
+production server implementation change. The preserved native reference is
+built from `6bae41f9aa579dd2556ede7094e430e53eb64423` (binary SHA-256
+`a7a6eca33690f0c22c7d16530f727f56fd5f9512a8adca32d37d94a209a988ca`);
+its production source/vendor trees are identical at `c2a3846`. This is a
+source-equivalent binary, not a binary rebuilt or relabeled as `c2a3846`.
+Use a fresh short private inherited `TMPDIR` for each native/managed parity gate.
+
+The evaluator workflow builds its current-native reference from exact `c2a3846`,
+because the former `740811da` reference predates `--server`. Its historical
+`fc643dfc` native and pre-fix `96b6d67f` managed references remain unchanged.
+The preserved-binary native 2/2, managed 2/2 and stdio restart 1/1 results are
+local preparation evidence, not final pull-request qualification. Final CI must
+run the complete current-native and managed suites, including both TCP fixtures.
+
 Run the additional cross-platform CLI/protocol smoke checks from the repository root:
 
 ```sh
@@ -154,7 +188,7 @@ The evaluation recovery contract is proven against preserved native master
 container/runtime for native and managed debugging, proves the immutable pre-fix
 managed baseline fails, and preserves runtime/DBI/DAC hashes, raw protocol and
 engine logs. It requires five native and managed focused/unchanged-suite runs
-under CPU load, followed by full current-native (`740811da`), managed and smoke suites.
+under CPU load, followed by full current-native (`c2a3846`), managed and smoke suites.
 Normal evaluations suspend peer threads. As in native, timeout recovery may
 temporarily run those peers so dependencies can complete before abort settlement;
 their original frozen state is restored afterwards. Cross-thread notification

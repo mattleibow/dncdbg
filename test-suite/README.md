@@ -76,6 +76,18 @@ its production source/vendor trees are identical at `c2a3846`. This is a
 source-equivalent binary, not a binary rebuilt or relabeled as `c2a3846`.
 Use a fresh short private inherited `TMPDIR` for each native/managed parity gate.
 
+The evaluator workflow builds its current-native reference from exact `c2a3846`,
+because the former `740811da` reference predates `--server`. Its historical
+`fc643dfc` native and pre-fix `96b6d67f` managed references remain unchanged.
+The preserved-binary native 2/2, managed 2/2 and stdio restart 1/1 results are
+local preparation evidence, not final pull-request qualification. Final CI must
+run the complete current-native and managed suites, including both TCP fixtures.
+This independent test/harness port does not incorporate the separate server
+smoke/production work in PR #31 or close that upstream migration gap; the
+contiguous merged-through marker remains `f15747ae` until the gap is qualified
+and merged. Reviewed upstream revisions and prepared branches are not merged
+coverage.
+
 Run the additional cross-platform CLI/protocol smoke checks from the repository root:
 
 ```sh
@@ -181,7 +193,7 @@ The evaluation recovery contract is proven against preserved native master
 container/runtime for native and managed debugging, proves the immutable pre-fix
 managed baseline fails, and preserves runtime/DBI/DAC hashes, raw protocol and
 engine logs. It requires five native and managed focused/unchanged-suite runs
-under CPU load, followed by full current-native (`740811da`), managed and smoke suites.
+under CPU load, followed by full current-native (`c2a3846`), managed and smoke suites.
 Normal evaluations suspend peer threads. As in native, timeout recovery may
 temporarily run those peers so dependencies can complete before abort settlement;
 their original frozen state is restored afterwards. Cross-thread notification

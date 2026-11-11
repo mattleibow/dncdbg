@@ -76,8 +76,9 @@ its production source/vendor trees are identical at `c2a3846`. This is a
 source-equivalent binary, not a binary rebuilt or relabeled as `c2a3846`.
 Use a fresh short private inherited `TMPDIR` for each native/managed parity gate.
 
-The evaluator workflow builds its current-native reference from exact `c2a3846`,
-because the former `740811da` reference predates `--server`. Its historical
+The evaluator workflow builds its current-native reference from exact
+`38365ab7b5608cb93f779ea6846c227e310147e7`, retaining the TCP server support
+covered by `c2a3846` and adding the later request-hardening reference. Its historical
 `fc643dfc` native and pre-fix `96b6d67f` managed references remain unchanged.
 The preserved-binary native 2/2, managed 2/2 and stdio restart 1/1 results are
 local preparation evidence, not final pull-request qualification. Final CI must
@@ -91,6 +92,36 @@ dotnet run --project tests/DncDbg.SmokeTests -- bin/dncdbg-dap
 
 These checks do not modify the existing Runner, ScriptContext, fixtures, or
 assertions. Their diagnostic logs are written under `build/validation/cli-smoke`.
+
+The raw DAP checks run real adapter processes. Malformed cancel arguments and
+typed evaluation/mutation/memory arguments must produce failed responses with
+the original request sequence and command, a diagnostic, then allow valid
+exception-breakpoint configuration and clean disconnect. Run the same shared
+matrix against either the managed adapter or a native reference:
+
+```sh
+dotnet run --project tests/DncDbg.SmokeTests -- --protocol /path/to/debugger
+```
+
+`--protocol-recovery /path/to/dncdbg-dap` separately preserves managed-only
+behavior: optional/no-op cancel arguments, recovery from invalid/overflowing or
+over-cap Content-Length headers, non-JSON bodies, and malformed JSON with a
+recoverable sequence. It sends only short headers/bodies, never large allocation
+probes. Both groups also run in normal smoke; native's malformed-header
+disconnect policy is intentionally not imposed on the managed adapter.
+
+The evaluator explicitly runs the 20 shared checks against its exact current-native
+adapter after building the smoke assembly and before managed green checks, saving
+`native-protocol.log` in the official evidence artifact. The canonical `Test*`
+suite alone does not run this selector. Managed smoke separately includes the
+same 20 checks and 12 managed-only recovery cases. Local preparation proved
+native `38365ab7` green, unchanged managed `dab33c9f` red on all ten malformed
+cancel cases, then the minimal fix green. The updated main `94f11ef5` has identical
+managed production sources to `dab33c9f`; its own fresh red proof and the rebased
+fix use SDK 10.0.404/runtime 10.0.15, not the original preparation's SDK
+10.0.403/runtime 10.0.14. These local results are not final CI qualification:
+the evaluator uses its pinned SDK 10.0.401/runtime 10.0.14 and must retain all
+historical, managed-red, repeated-green and full-suite gates.
 
 The smoke runner also exercises startup/unregistration barriers, rejection of
 late startup callbacks, cancellation of a delayed external launcher, a 1 MiB
@@ -188,7 +219,7 @@ The evaluation recovery contract is proven against preserved native master
 container/runtime for native and managed debugging, proves the immutable pre-fix
 managed baseline fails, and preserves runtime/DBI/DAC hashes, raw protocol and
 engine logs. It requires five native and managed focused/unchanged-suite runs
-under CPU load, followed by full current-native (`c2a3846`), managed and smoke suites.
+under CPU load, followed by full current-native (`38365ab7`), managed and smoke suites.
 Normal evaluations suspend peer threads. As in native, timeout recovery may
 temporarily run those peers so dependencies can complete before abort settlement;
 their original frozen state is restored afterwards. Cross-thread notification

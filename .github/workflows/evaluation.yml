@@ -32,12 +32,12 @@ jobs:
           set -euo pipefail
           root=build/validation/evaluation
           mkdir -p "$root/context"/{historical,current,baseline} "$root/evidence"
-          git fetch --no-tags https://github.com/viewizard/dncdbg.git c2a3846694fed03c5f0d29dda4f978e1bcbce510
+          git fetch --no-tags https://github.com/viewizard/dncdbg.git 38365ab7b5608cb93f779ea6846c227e310147e7
           git archive fc643dfcdf8feec45d2700ce6466774323b3032b | tar -x -C "$root/context/historical"
-          git archive c2a3846694fed03c5f0d29dda4f978e1bcbce510 | tar -x -C "$root/context/current"
+          git archive 38365ab7b5608cb93f779ea6846c227e310147e7 | tar -x -C "$root/context/current"
           git archive 96b6d67f956d58d8104dae373dbcb446f97ec8df | tar -x -C "$root/context/baseline"
           git rev-parse HEAD > "$root/evidence/head.txt"
-          printf '%s\n' fc643dfcdf8feec45d2700ce6466774323b3032b c2a3846694fed03c5f0d29dda4f978e1bcbce510 96b6d67f956d58d8104dae373dbcb446f97ec8df > "$root/evidence/references.txt"
+          printf '%s\n' fc643dfcdf8feec45d2700ce6466774323b3032b 38365ab7b5608cb93f779ea6846c227e310147e7 96b6d67f956d58d8104dae373dbcb446f97ec8df > "$root/evidence/references.txt"
           docker build -f tests/DncDbg.SmokeTests/Evaluation.Dockerfile \
             -t dncdbg-evaluation:${{ github.run_id }} "$root/context" 2>&1 | tee "$root/evidence/build.log"
       - name: Native first, deterministic managed red, repeated green and full suites
@@ -70,6 +70,9 @@ jobs:
               echo "Deterministic pre-fix managed red: CONFIRMED"
               dotnet publish src/DncDbg.Dap -c Release -o /opt/managed-current --nologo -v:q > "$evidence/managed-build.log" 2>&1
               dotnet build tests/DncDbg.SmokeTests -c Release --nologo -v:q >> "$evidence/managed-build.log" 2>&1
+              export TMPDIR=$(mktemp -d /tmp/er.XXXXXX)
+              dotnet run --project tests/DncDbg.SmokeTests -c Release --no-build -- --protocol /opt/native-current/dncdbg > "$evidence/native-protocol.log" 2>&1
+              tail -1 "$evidence/native-protocol.log"
               dotnet run --project tests/DncDbg.SmokeTests -c Release --no-build -- --evaluation > "$evidence/callback-green.log" 2>&1
               yes > /dev/null & load1=$!
               yes > /dev/null & load2=$!

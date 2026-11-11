@@ -232,6 +232,55 @@ partial class Context
             noProgram.Remove("program");
             ProfileError(noProgram, "The 'program' option is required.", callerTrace);
 
+            profileEnv["DNCDBG_CONSOLE"] = "remoteConsole";
+            File.WriteAllText(file, new Newtonsoft.Json.Linq.JObject { ["profiles"] = profiles }.ToString());
+            foreach (bool restart in new[] { false, true })
+            {
+                foreach (var scenario in new (bool InvalidConsole, bool InvalidProfile, bool RequestConsole)[]
+                {
+                    (true, true, false),
+                    (true, true, true),
+                    (false, true, false),
+                    (true, false, false),
+                })
+                {
+                    if (restart)
+                        ProfileSuccess(basic, defaultArgs, root, "profile", "added", callerTrace, expectedConsole: "remoteConsole");
+                    else
+                    {
+                        Initialize(callerTrace);
+                        ConfigurationDone(callerTrace);
+                    }
+
+                    var options = (Newtonsoft.Json.Linq.JObject)basic.DeepClone();
+                    options["noDebug"] = true;
+                    options["console"] = scenario.InvalidConsole ? (Newtonsoft.Json.Linq.JToken)42 : "internalConsole";
+                    if (scenario.InvalidProfile)
+                        options["launchSettingsProfile"] = 42;
+                    if (scenario.RequestConsole)
+                        options["env"] = new Newtonsoft.Json.Linq.JObject { ["DNCDBG_CONSOLE"] = "internalConsole" };
+                    var request = new ProfileRequest
+                    {
+                        command = restart ? "restart" : "launch",
+                        arguments = restart ? new Newtonsoft.Json.Linq.JObject { ["arguments"] = options } : options,
+                    };
+                    var result = m_dapDebugger.Request(request, timeout: 10000);
+                    Assert.False(result.Success, callerTrace + ": " + result.ResponseStr);
+                    var response = Newtonsoft.Json.Linq.JObject.Parse(result.ResponseStr);
+                    Assert.Equal("response", (string?)response["type"], callerTrace);
+                    Assert.Equal(request.command, (string?)response["command"], callerTrace);
+                    Assert.Equal(request.seq, (int?)response["request_seq"], callerTrace);
+                    string? error = (string?)(response["body"]?["message"] ?? response["message"]);
+                    Assert.True(!string.IsNullOrWhiteSpace(error), callerTrace + ": " + result.ResponseStr);
+                    // JSON-library diagnostics and precedence between two invalid fields are not a shared contract.
+                    if (!scenario.InvalidConsole || scenario.RequestConsole)
+                        Assert.Equal("The 'launchSettingsProfile' option must be a string or null.", error, callerTrace);
+
+                    ProfileSuccess(basic, defaultArgs, root, "profile", "added", callerTrace,
+                        expectedConsole: "remoteConsole", restart: restart, update: restart, initialize: false);
+                }
+            }
+            profileEnv.Remove("DNCDBG_CONSOLE");
             File.WriteAllText(file, new Newtonsoft.Json.Linq.JObject { ["profiles"] = profiles }.ToString());
             ProfileSuccess(basic, defaultArgs, root, "profile", "added", callerTrace);
             profile["commandLineArgs"] = "changed-after-launch";
@@ -249,9 +298,9 @@ partial class Context
 
     private void ProfileSuccess(Newtonsoft.Json.Linq.JObject options, string[] expectedArgs, string expectedCwd,
         string? value, string? added, string callerTrace, bool checkCwd = true, string? expectedConsole = null,
-        bool restart = false, bool update = false, string? expectedUrl = null)
+        bool restart = false, bool update = false, string? expectedUrl = null, bool initialize = true)
     {
-        if (!restart)
+        if (!restart && initialize)
         {
             Initialize(callerTrace);
             ConfigurationDone(callerTrace);

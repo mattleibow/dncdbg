@@ -214,6 +214,17 @@ breakpoint/function/hit-condition fixtures passed on both adapters with SDK
 10.0.404/runtime 10.0.15. These are local preparation results; final qualification
 still requires the evaluator's pinned SDK 10.0.401/runtime 10.0.14 and full gates.
 
+The launch rejection/recovery additions were first qualified against unchanged
+managed main `94f11ef5`. After updating onto main `e79a5523`, the identical
+`TestLaunchSettingsPrecedence` and `TestLaunchSettings` fixtures passed 2/2
+against preserved exact native `2dcb490e` first, then current-CI native `2d9b3d4c`,
+then archive-built unchanged main `e79a5523`. Each adapter passed all eight new
+correlated failures and immediate same-session recoveries with exact profile
+values, zero exit and termination. Both managed baselines were already correct;
+no production fix, manufactured red or native-pin update was needed. These are
+bounded macOS arm64 results with SDK 10.0.404/runtime 10.0.15, not the evaluator's
+pinned SDK/runtime or full cross-platform qualification.
+
 These are bounded scenarios, not full coverage of hit conditions or exception handling.
 `TestBreakpointWithoutStop` uses target stdin as a synchronization gate: after the
 entry continue, both source and function breakpoints are installed while the

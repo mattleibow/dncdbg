@@ -1,4 +1,3 @@
-using System.Buffers;
 using System.Buffers.Text;
 using System.Globalization;
 using System.Text;
@@ -16,7 +15,7 @@ public sealed class DapConnection : IDisposable
     private readonly Stream _output;
     private readonly object _writeLock = new();
     private readonly Dictionary<int, TaskCompletionSource<DapMessage>> _pendingRequests = [];
-    private ArrayBufferWriter<byte> _outputBuffer = new();
+    private MemoryStream _outputBuffer = new();
     private bool _sending;
     private int _seq;
 
@@ -191,14 +190,16 @@ public sealed class DapConnection : IDisposable
         {
             // A body getter or trace callback can send again under the reentrant monitor.
             bool reuse = !_sending;
-            var buffer = reuse ? _outputBuffer : new ArrayBufferWriter<byte>();
+            var buffer = reuse ? _outputBuffer : new MemoryStream();
             _sending = true;
             try
             {
                 msg.Seq = ++_seq;
-                using (var writer = new Utf8JsonWriter(buffer, new JsonWriterOptions { MaxDepth = OutgoingJsonOptions.MaxDepth }))
-                    JsonSerializer.Serialize(writer, msg, OutgoingJsonOptions);
-                ReadOnlySpan<byte> payload = buffer.WrittenSpan;
+                // Doubling from half the limit keeps any <=64 KiB payload within retained capacity.
+                if (buffer.Capacity == 0)
+                    buffer.Capacity = MaxRetainedOutputCapacity / 2;
+                JsonSerializer.Serialize(buffer, msg, OutgoingJsonOptions);
+                ReadOnlySpan<byte> payload = buffer.GetBuffer().AsSpan(0, (int)buffer.Length);
                 Span<byte> header = stackalloc byte[16 + 10 + 4];
                 "Content-Length: "u8.CopyTo(header);
                 Utf8Formatter.TryFormat(payload.Length, header[16..], out int digits);
@@ -213,21 +214,40 @@ public sealed class DapConnection : IDisposable
             {
                 if (reuse)
                 {
-                    if (buffer.Capacity > MaxRetainedOutputCapacity)
-                        _outputBuffer = new();
-                    else
-                        buffer.ResetWrittenCount();
+                    if (buffer.CanWrite)
+                    {
+                        if (buffer.Capacity > MaxRetainedOutputCapacity)
+                        {
+                            buffer.Dispose();
+                            _outputBuffer = new();
+                        }
+                        else
+                        {
+                            buffer.SetLength(0);
+                            buffer.Position = 0;
+                        }
+                    }
                     _sending = false;
                 }
+                else
+                    buffer.Dispose();
             }
         }
     }
 
     public void Dispose()
     {
-        CancelPendingRequests();
-        _input.Dispose();
-        _output.Dispose();
+        try
+        {
+            CancelPendingRequests();
+            _input.Dispose();
+            _output.Dispose();
+        }
+        finally
+        {
+            lock (_writeLock)
+                _outputBuffer.Dispose();
+        }
     }
 
     public void CancelPendingRequests()

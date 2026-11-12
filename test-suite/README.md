@@ -141,23 +141,31 @@ The same oversized-allocation probe also covers repeated serializer, header,
 payload and flush failures before checking the next clean frame.
 
 The managed implementation mirrors upstream `0d38ab3c` using public .NET APIs:
-an `ArrayBufferWriter<byte>` reuses outgoing capacity under the existing write
-lock, a per-send disposable `Utf8JsonWriter` preserves serializer ownership,
-and a stack header formats the actual UTF-8 byte length. The `finally` block
-resets the written count or drops a buffer whose **capacity**, not payload length,
-exceeds 64 KiB, including failures. Reentrant sends use separate temporary
-storage so existing body-getter/trace behavior cannot corrupt the outer message.
+`JsonSerializer.Serialize(Stream, ...)` owns temporary serialization buffering
+and writes actual content into a reusable `MemoryStream` under the existing
+write lock. A new empty stream lazily starts with 32 KiB of capacity: doubling
+from half the retention limit can accommodate any actual payload up to 64 KiB
+without exceeding that limit. This has a cold allocation cost; it is not an
+allocation-free first-send or reentrant-send claim. A stack header formats the
+actual UTF-8 byte length. The `finally` block resets length/position or disposes
+and drops a stream whose **capacity**, not payload length, exceeds 64 KiB,
+including failures. Reentrant sends use separately disposed temporary streams
+so existing body-getter/trace behavior cannot corrupt the outer message.
+Disposal closes the original input/output streams and cancels pending requests,
+then disposes the owned content stream without masking a trace-disposal failure.
 The 64 KiB capacity comparison is an implementation invariant; public allocation
 probes demonstrate oversized release but do not inspect the private capacity or
-claim an exact payload-size retention cutoff.
+claim an exact payload-size retention cutoff. It bounds connection-owned content
+storage, not the framework's shared serialization pools.
 
 Test-first local preparation on macOS arm64 used SDK 10.0.404/runtime 10.0.15.
 The exact native `b5432b4e` archive (911 tracked blobs verified) passed the same
 56-frame wire selector before production changed. Actual archived managed main
 `9d150bb5` also passed wire and all 315 functional checks; its warmed allocation
-was **8,816 bytes/send**, honestly failing the 1,024-byte ceiling. Buffer reuse
-reduced that to **552 bytes/send**, including after oversized messages, with
-functional and failure-release checks green. This is local preparation evidence,
+was **8,816 bytes/send**, honestly failing the 1,024-byte ceiling. Initial
+`2acd8403` preparation reduced only the measured 8 KiB case to **552 bytes/send**,
+with functional and failure-release checks green; its uncovered mid-size
+regression is documented below. This is local preparation evidence,
 not full native/Linux/Windows or final pull-request qualification. The evaluator's
 current-native pin is deliberately unchanged for this allocation-only port.
 
@@ -175,6 +183,26 @@ main's 25,208/33,400/49,784/62,072. Their actual JSON sizes were only
 24,639/32,831/49,215/61,503 bytes. Worst-case writer size hints inflated the
 retained buffer's capacity past the limit, causing repeated reallocation.
 The original 8 KiB green proof did not cover this regression.
+
+The stream-backed follow-up passes the same matrix at **416 bytes/send** in every
+row, including after oversized sends in the original allocation selector:
+
+| ASCII body | Actual JSON bytes | Archived main bytes/send | Superseded `2acd8403` bytes/send | Stream-backed bytes/send |
+|---|---:|---:|---:|---:|
+| 8 KiB | 8,255 | 8,816 | 552 | 416 |
+| 24 KiB | 24,639 | 25,208 | 74,880 | 416 |
+| 32 KiB | 32,831 | 33,400 | 99,456 | 416 |
+| 48 KiB | 49,215 | 49,784 | 148,608 | 416 |
+| 60 KiB | 61,503 | 62,072 | 185,472 | 416 |
+
+These are warmed .NET 10.0.15 macOS arm64 workstation-GC measurements, not
+latency, native-allocation or exact private-capacity measurements. Generation
+collection counts are diagnostics only. Simply swapping in a zero-capacity
+`MemoryStream` was also measured and rejected: a tiny final write can double
+an exactly sized mid-message allocation past the retention limit. The lazy
+32 KiB floor avoids that repeated discard without weakening the capacity cap.
+All 333 outgoing checks include the new matrix, real failure cleanup, depth,
+reentrancy, async registration and owned-stream/trace-disposal behavior.
 
 `--protocol-recovery /path/to/dncdbg-dap` separately preserves managed-only
 behavior: optional/no-op cancel arguments, recovery from invalid/overflowing or

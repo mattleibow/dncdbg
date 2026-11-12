@@ -136,6 +136,29 @@ demonstrating that oversized storage is not reused; small sends must subsequentl
 return below the same allocation ceiling. This measures allocations, not elapsed
 time or the exact private buffer capacity, and makes no native-allocation claim.
 All managed outgoing checks run in desktop smoke, Docker, and evaluator smoke.
+The same oversized-allocation probe also covers repeated serializer, header,
+payload and flush failures before checking the next clean frame.
+
+The managed implementation mirrors upstream `0d38ab3c` using public .NET APIs:
+an `ArrayBufferWriter<byte>` reuses outgoing capacity under the existing write
+lock, a per-send disposable `Utf8JsonWriter` preserves serializer ownership,
+and a stack header formats the actual UTF-8 byte length. The `finally` block
+resets the written count or drops a buffer whose **capacity**, not payload length,
+exceeds 64 KiB, including failures. Reentrant sends use separate temporary
+storage so existing body-getter/trace behavior cannot corrupt the outer message.
+The 64 KiB capacity comparison is an implementation invariant; public allocation
+probes demonstrate oversized release but do not inspect the private capacity or
+claim an exact payload-size retention cutoff.
+
+Test-first local preparation on macOS arm64 used SDK 10.0.404/runtime 10.0.15.
+The exact native `b5432b4e` archive (911 tracked blobs verified) passed the same
+56-frame wire selector before production changed. Actual archived managed main
+`9d150bb5` also passed wire and all 315 functional checks; its warmed allocation
+was **8,816 bytes/send**, honestly failing the 1,024-byte ceiling. Buffer reuse
+reduced that to **552 bytes/send**, including after oversized messages, with
+functional and failure-release checks green. This is local preparation evidence,
+not full native/Linux/Windows or final pull-request qualification. The evaluator's
+current-native pin is deliberately unchanged for this allocation-only port.
 
 `--protocol-recovery /path/to/dncdbg-dap` separately preserves managed-only
 behavior: optional/no-op cancel arguments, recovery from invalid/overflowing or

@@ -1,3 +1,5 @@
+using System.Buffers;
+using System.Buffers.Text;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
@@ -14,6 +16,8 @@ public sealed class DapConnection : IDisposable
     private readonly Stream _output;
     private readonly object _writeLock = new();
     private readonly Dictionary<int, TaskCompletionSource<DapMessage>> _pendingRequests = [];
+    private ArrayBufferWriter<byte> _outputBuffer = new();
+    private bool _sending;
     private int _seq;
 
     /// <summary>Optional sink that receives every raw message ("-> " sent, "<- " received).</summary>
@@ -27,6 +31,7 @@ public sealed class DapConnection : IDisposable
 
     /// <summary>Frames larger than this are not believed: the header is ignored as malformed.</summary>
     private const int MaxContentLength = 64 * 1024 * 1024;
+    private const int MaxRetainedOutputCapacity = 64 * 1024;
     // Exception chains are debugger-generated; the incoming message depth limit remains unchanged.
     private static readonly JsonSerializerOptions OutgoingJsonOptions = new(DapJson.Options) { MaxDepth = int.MaxValue };
 
@@ -184,14 +189,37 @@ public sealed class DapConnection : IDisposable
     {
         lock (_writeLock)
         {
-            msg.Seq = ++_seq;
-            byte[] payload = JsonSerializer.SerializeToUtf8Bytes(msg, OutgoingJsonOptions);
-            byte[] header = Encoding.ASCII.GetBytes($"Content-Length: {payload.Length}\r\n\r\n");
-            Trace?.Invoke("-> " + Encoding.UTF8.GetString(payload));
-            _output.Write(header);
-            _output.Write(payload);
-            _output.Flush();
-            return msg.Seq;
+            // A body getter or trace callback can send again under the reentrant monitor.
+            bool reuse = !_sending;
+            var buffer = reuse ? _outputBuffer : new ArrayBufferWriter<byte>();
+            _sending = true;
+            try
+            {
+                msg.Seq = ++_seq;
+                using (var writer = new Utf8JsonWriter(buffer, new JsonWriterOptions { MaxDepth = OutgoingJsonOptions.MaxDepth }))
+                    JsonSerializer.Serialize(writer, msg, OutgoingJsonOptions);
+                ReadOnlySpan<byte> payload = buffer.WrittenSpan;
+                Span<byte> header = stackalloc byte[16 + 10 + 4];
+                "Content-Length: "u8.CopyTo(header);
+                Utf8Formatter.TryFormat(payload.Length, header[16..], out int digits);
+                "\r\n\r\n"u8.CopyTo(header[(16 + digits)..]);
+                Trace?.Invoke("-> " + Encoding.UTF8.GetString(payload));
+                _output.Write(header[..(16 + digits + 4)]);
+                _output.Write(payload);
+                _output.Flush();
+                return msg.Seq;
+            }
+            finally
+            {
+                if (reuse)
+                {
+                    if (buffer.Capacity > MaxRetainedOutputCapacity)
+                        _outputBuffer = new();
+                    else
+                        buffer.ResetWrittenCount();
+                    _sending = false;
+                }
+            }
         }
     }
 

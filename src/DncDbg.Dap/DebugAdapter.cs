@@ -445,10 +445,9 @@ internal sealed class DebugAdapter : IDisposable
             case "setExceptionBreakpoints":
             {
                 var args = request.GetArguments<SetExceptionBreakpointsArguments>() ?? new SetExceptionBreakpointsArguments();
-                _exceptionFilterRequests = args.Filters.Select(f => new ExceptionFilterRequest(f))
-                    .Concat((args.FilterOptions ?? []).Select(o => new ExceptionFilterRequest(o.FilterId, o.Condition)))
-                    .ToArray();
-                _engine.SetExceptionFilters(_exceptionFilterRequests);
+                var filters = args.GetFilters().Select(o => new ExceptionFilterRequest(o.FilterId, o.Condition)).ToArray();
+                _engine.SetExceptionFilters(filters);
+                _exceptionFilterRequests = filters;
                 return null;
             }
 

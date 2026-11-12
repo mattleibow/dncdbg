@@ -291,9 +291,7 @@ internal sealed class RemoteSession : IDisposable
             {
                 Require("exceptions");
                 var args = request.GetArguments<SetExceptionBreakpointsArguments>() ?? new();
-                var filterOptions = args.FilterOptions ?? [];
-                var rules = args.Filters.Select(f => new RemoteExceptionRule(f))
-                    .Concat(filterOptions.Select(f => new RemoteExceptionRule(f.FilterId, f.Condition))).Distinct().ToArray();
+                var rules = args.GetFilters().Select(f => new RemoteExceptionRule(f.FilterId, f.Condition)).Distinct().ToArray();
                 if (rules.Any(r => r.Filter is not ("all" or "unhandled")) ||
                     rules.Any(r => r.Type != null && !System.Text.RegularExpressions.Regex.IsMatch(r.Type, @"\A[A-Za-z_][A-Za-z0-9_.+`]*\z")))
                     throw new NotSupportedException("Remote exception filters support first-chance 'all' and 'unhandled', each with an optional exact CLR type; user-unhandled and wildcards are not supported.");

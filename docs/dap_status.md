@@ -330,6 +330,19 @@ Trailing `*` matches an exception type-name prefix, including in negated tokens;
 literal, not arbitrary-position globs. See [exception conditions](exception_conditions.md)
 for examples and VsDbg mappings.
 
+Both arrays are optional, but a present `filters` or `filterOptions` must be an
+array, not `null`. Every filter ID must be a nonempty recognized string.
+An option's absent, empty, null or non-string `condition` is ignored, making that
+entry unconditional; unrelated JSON properties are also ignored. The complete
+request is validated before replacing the previous rules, so a failed replacement
+leaves the active rules intact.
+
+The same input tolerance applies to remote DAP sessions, but their existing
+capability boundary remains: only `all` and `unhandled`, with an optional exact
+CLR type, are supported. Remote wildcard/negated conditions and `user-unhandled`
+still fail before sending a private-protocol request. The private target protocol
+and outgoing metadata remain strongly typed.
+
 #### SetExceptionBreakpointsResponse
 ```text
 ✅  breakpoints?: Breakpoint[];

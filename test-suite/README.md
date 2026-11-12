@@ -77,9 +77,12 @@ source-equivalent binary, not a binary rebuilt or relabeled as `c2a3846`.
 Use a fresh short private inherited `TMPDIR` for each native/managed parity gate.
 
 The evaluator workflow builds its current-native reference from exact
-`2d9b3d4c99c5c91a31964dcd94ca0d2f750e69a5`, retaining the TCP server support
+`b5432b4ef39980463178b0db404f1b315c805599`, retaining the TCP server support
 covered by `c2a3846`, the `38365ab7` request hardening and the `be345423`
-function-breakpoint name validation. Its historical
+function-breakpoint name validation, and adding the `b5432b4e` exception option
+JSON tolerance required by `TestExceptionOptionTolerance`. The earlier current
+reference rejects non-string optional conditions and cannot pass this new fixture.
+Its historical
 `fc643dfc` native and pre-fix `96b6d67f` managed references remain unchanged.
 The preserved-binary native 2/2, managed 2/2 and stdio restart 1/1 results are
 local preparation evidence, not final pull-request qualification. Final CI must
@@ -176,9 +179,9 @@ for prerequisites, deadlines, isolated cleanup and coverage limitations.
 Run the same tests against either adapter without changing the debuggee or assertions:
 
 ```powershell
-pwsh ./test-suite/run_tests.ps1 TestHitConditionSyntax TestContinueResponse TestUnhandledExceptionCondition TestExceptionConditionMatching TestUnhandledExceptionFilter
+pwsh ./test-suite/run_tests.ps1 TestHitConditionSyntax TestContinueResponse TestUnhandledExceptionCondition TestExceptionConditionMatching TestExceptionOptionTolerance TestUnhandledExceptionFilter
 $env:DNCDBG = "/absolute/path/to/another/debugger"
-pwsh ./test-suite/run_tests.ps1 TestHitConditionSyntax TestContinueResponse TestUnhandledExceptionCondition TestExceptionConditionMatching TestUnhandledExceptionFilter
+pwsh ./test-suite/run_tests.ps1 TestHitConditionSyntax TestContinueResponse TestUnhandledExceptionCondition TestExceptionConditionMatching TestExceptionOptionTolerance TestUnhandledExceptionFilter
 ```
 
 These tests preserve observable native behavior, not assumptions about DAP syntax:
@@ -203,6 +206,7 @@ These tests preserve observable native behavior, not assumptions about DAP synta
 | `TestRemoteConsoleConfiguration` | Sixteen real TCP ready/input/echo cases cover `DNCDBG_REMOTECONSOLE_PORT`: custom/default ports, leading zeroes, 65535, invalid-number/range fallback to 22534, and the ignored former spelling. Also prove a changed-port restart, an occupied-port launch failure and a successful retry after release. Running the identical fixture with a valid debugger-process port override proves session precedence, invalid-override fallback to 22534 and reset to the inherited baseline. |
 | `TestUnhandledExceptionCondition` | With `!System.InvalidOperationException` on `all` and `user-unhandled`, a caught exception does not stop execution. An uncaught exception of the same type still stops at the throw line, with `exceptionInfo.breakMode == "unhandled"`, `exceptionId == "CLR/System.InvalidOperationException"`, and the matching full type name. These two filters do not suppress the final unhandled stop. |
 | `TestExceptionConditionMatching` | Thirty-seven cases cover per-token negation, negative-only conditions, positive/negative order, exclusion priority, ignored lone `!`, empty conditions, additive unconditional entries, duplicate filter options, comma/ASCII-whitespace separators, and wildcard prefixes. Wildcard cases include `*`, `!*`, positive/negative prefix conflicts across entries, ordinal case sensitivity, duplicate prefixes, zero-length suffixes, and literal internal/repeated asterisks and `?`. Every stop and its exact exception details/source line is collected before comparing the complete matrix. |
+| `TestExceptionOptionTolerance` | Exact native `b5432b4e` proves 39 accepted raw-JSON configurations and 46 rejected replacements. Absent/empty/null/number/Boolean/array/object conditions and arbitrary extra fields retain actual exception/source stops. Recognized IDs, strict array/entry/ID validation, additive filters, duplicate order and exclusion priority are preserved. Each rejected replacement must leave the previous exact-type rule active, then a valid same-command recovery must stop on the other exact type. All 131 passes require exact source lines, exception type/break mode and normal target exit. The original 37 typed-condition cases remain unchanged. |
 | `TestExceptionWildcardCondition` | The unchanged upstream fixture checks `*`, `System.*`, `!System.Null*, *`, broader negated prefixes overriding specific positive prefixes, and `!*` overriding a positive prefix. Exact exception source/type/break-mode assertions and both source-breakpoint checkpoints are preserved. |
 | `TestUnhandledExceptionFilter` | Eighteen sessions cover the default unhandled stop, nonmatching positive conditions, matching/nonmatching exact and prefix exclusions, conflicting conditions in both orders, unconditional entries, lone `!`, and `!*`. Upstream scenarios include an exact nonmatching `!System.Exception` (no base-type matching) and a thrown stop followed by a suppressed final stop. Observed unhandled stops are continued through actual process exit rather than terminated by the test. Suppressed final stops require a nonzero exit code and both exited/terminated events. |
 | `TestInnerExceptionLimit` | Preserve the upstream 65-node fixture's default first/last inner messages (`level 62`/`level 31`) and assert every node's type/message plus the exact 32-inner cutoff. All twenty-two original launch/attach configuration cases remain, including the 50-inner cutoff (`level 62`/`level 13`) and limit 100 exposing the complete finite chain (`level 62`/`innermost`). They prove zero, small and unsigned-maximum limits, invalid/overflow fallback, complete unsigned-decimal parsing, request overrides and reset to the default. Trailing characters (`2suffix`, `2 `) require the default 32 in both launch and attach. Five additional launches retain both upstream revisions: `1f7fe078` uses a 50-depth chain with first inner `level 48`, default 32 ending at `level 17`, limit 16 at `level 33`, and limit 100 at `innermost`; `740811da` returns to 64 depth with limit 16 ending at `level 47` and limit 128 at `innermost`. Every node has its exact type/message and zero/one-child count checked, including fully populated terminal nodes without empty placeholders. The same assertions pass exact native `740811da` and managed; the JSON move-semantics change needs no managed production fix. |
@@ -224,6 +228,16 @@ values, zero exit and termination. Both managed baselines were already correct;
 no production fix, manufactured red or native-pin update was needed. These are
 bounded macOS arm64 results with SDK 10.0.404/runtime 10.0.15, not the evaluator's
 pinned SDK/runtime or full cross-platform qualification.
+
+The exception-option fixture passed exact archive-built native `b5432b4e` first,
+then failed against archive-built unchanged managed main `9d150bb5` when a numeric
+optional condition was rejected as a string conversion error, and passed with the
+shared input-boundary fix. The original 37-case fixture passed on all three.
+These are local macOS arm64 results with SDK 10.0.404/runtime 10.0.15; they do not
+replace final CI's full native/managed, platform or artifact gates. Portable
+remote DAP contracts additionally check typed outgoing rules, unsupported-feature
+rejection and no private request on invalid input; they are not device/runtime
+proof.
 
 These are bounded scenarios, not full coverage of hit conditions or exception handling.
 `TestBreakpointWithoutStop` uses target stdin as a synchronization gate: after the

@@ -341,8 +341,43 @@ public sealed class SetBreakpointsResponseBody
 
 public sealed class SetExceptionBreakpointsArguments
 {
-    public string[] Filters { get; set; } = [];
-    public ExceptionFilterOptions[]? FilterOptions { get; set; }
+    public JsonElement Filters { get; set; }
+    public JsonElement FilterOptions { get; set; }
+
+    public ExceptionFilterOptions[] GetFilters()
+    {
+        var filters = new List<ExceptionFilterOptions>();
+        if (Filters.ValueKind != JsonValueKind.Undefined)
+        {
+            if (Filters.ValueKind != JsonValueKind.Array)
+                throw new ArgumentException("Exception filters must be an array.");
+            foreach (JsonElement filter in Filters.EnumerateArray())
+                filters.Add(new ExceptionFilterOptions { FilterId = ReadFilterId(filter) });
+        }
+        if (FilterOptions.ValueKind != JsonValueKind.Undefined)
+        {
+            if (FilterOptions.ValueKind != JsonValueKind.Array)
+                throw new ArgumentException("Exception filterOptions must be an array.");
+            foreach (JsonElement option in FilterOptions.EnumerateArray())
+            {
+                if (option.ValueKind != JsonValueKind.Object || !option.TryGetProperty("filterId", out JsonElement id))
+                    throw new ArgumentException("An exception filter option requires a filterId.");
+                string filterId = ReadFilterId(id);
+                string? condition = option.TryGetProperty("condition", out JsonElement value) &&
+                    value.ValueKind == JsonValueKind.String && value.GetString() is { Length: > 0 } text ? text : null;
+                filters.Add(new ExceptionFilterOptions { FilterId = filterId, Condition = condition });
+            }
+        }
+        return filters.ToArray();
+
+        static string ReadFilterId(JsonElement value)
+        {
+            string? filter = value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+            if (filter is not ("all" or "user-unhandled" or "unhandled"))
+                throw new ArgumentException("Unknown or invalid exception filterId.");
+            return filter;
+        }
+    }
 }
 
 public sealed class ThreadArguments

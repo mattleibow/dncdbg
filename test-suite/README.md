@@ -77,8 +77,9 @@ source-equivalent binary, not a binary rebuilt or relabeled as `c2a3846`.
 Use a fresh short private inherited `TMPDIR` for each native/managed parity gate.
 
 The evaluator workflow builds its current-native reference from exact
-`38365ab7b5608cb93f779ea6846c227e310147e7`, retaining the TCP server support
-covered by `c2a3846` and adding the later request-hardening reference. Its historical
+`2d9b3d4c99c5c91a31964dcd94ca0d2f750e69a5`, retaining the TCP server support
+covered by `c2a3846`, the `38365ab7` request hardening and the `be345423`
+function-breakpoint name validation. Its historical
 `fc643dfc` native and pre-fix `96b6d67f` managed references remain unchanged.
 The preserved-binary native 2/2, managed 2/2 and stdio restart 1/1 results are
 local preparation evidence, not final pull-request qualification. Final CI must
@@ -185,6 +186,7 @@ These tests preserve observable native behavior, not assumptions about DAP synta
 | Test | Exact contract |
 | --- | --- |
 | `TestEmbeddedSources` | Retrieve exact compressed/uncompressed embedded file text while stopped, including twenty raw JSON source requests with nested/top-level positive references and null/number/Boolean/array/object optional `path`/`name` values. Two name-only requests cover absent/empty paths. The same incoming-source boundary is exercised by `setBreakpoints`, `gotoTargets` and `breakpointLocations`: valid paths with malformed names and reciprocal valid names with malformed paths must return the exact breakpoint/target location. Path/name precedence, malformed source objects/references, required expression/line/condition validation, correlated failed responses, same-command recovery and exact source text remain covered. Non-string optional-field tolerance is native `38365ab7`; name-only fallback predates that revision. |
+| `TestFunctionBreakpointValidation` | Exact native `2d9b3d4c` proves twelve accepted names, including plain/type/fully qualified names, empty and typed parameter lists, unmatched `)` without `(` and deliberately unvalidated identifier/nesting forms. Twelve malformed names are rejected individually and between valid entries, both before launch and after binding. All 56 failures require exact diagnostics and per-entry name-before-hit-condition ordering. A real source stop after the first counted function hit proves rejected replacements preserve the bound set and count: the second hit, expression-conditioned function, empty-parameter method and int/string overloads still stop at their exact source lines; neither replacement-only method stops. The target then exits normally. |
 | `TestExceptionInfoGetters` | Exact native `25ba8eb4` covers throwing `StackTrace`/`Source` getters, a throwing `Source` after a valid stack, non-string/non-reference and null member shadows, and an ordinary exception. Repeated `exceptionInfo` requests retain the base message, exact type/break mode and complete inner chains; throwing/null stack getters produce no exception-object text, while valid stacks retain the real throw frame. Managed getter-failure recovery was already equivalent; wrong-type/null `_message` shadows exposed a separate message-loss regression. Old native `089db8c9` fails the empty-stack assertion by printing `{System.InvalidOperationException}` on this fixture, not by crashing. |
 | `TestLogpointCallStack` | Exact native `089db8c9` physical stacks cover generic signatures, collapsed adjacent non-user frames, async kickoff/builder filtering and a deterministically suspended async caller that must not appear as a logical continuation. Quoted/`nq` newlines, escaped compound strings, literal token text, repeated expansion, hit counts and restart are preserved. Disabling Just My Code and step filtering retains non-user methods and physical framework frames, but still excludes async kickoff/builder frames and logical continuations. Deep recursion proves the default 250-frame limit, zero/one/two and exact-limit boundaries, the unsigned maximum, malformed-setting diagnostics and reset, with counting before JMC collapse. A real EDI unhandled-handler logpoint requires foreign `[Exception]` frames; a caught-rethrow finally logpoint must omit them. `TestLogpoints` retains the exact upstream three-frame CALLSTACK assertion alongside every existing assertion. |
 | `TestLogpointNames` | Native-proven `$FUNCTION` signatures for the entry method, a parameterized method, a concrete generic method and an async method after suspension. `$TNAME` checks default main, explicitly named main, unnamed worker and renamed worker, including quotes/backslashes and embedded token text that must not be rescanned. `$CALLER` checks generic and suspended-async callers, quoted/`nq` display, literal text, repeated substitution and hit counts. Quoted and escaped `nq` displays, mixed name/file-position concatenations with verbatim backslashes, repeated counts and the complete sequence after restart are exact. `TestLogpoints` retains every upstream function/thread/file-position assertion and the exact `3549d009` missing/Main/nested-caller assertions; `TestEvaluate` includes the upstream verbatim `text` cases alongside prior coverage. |
@@ -205,6 +207,13 @@ These tests preserve observable native behavior, not assumptions about DAP synta
 | `TestUnhandledExceptionFilter` | Eighteen sessions cover the default unhandled stop, nonmatching positive conditions, matching/nonmatching exact and prefix exclusions, conflicting conditions in both orders, unconditional entries, lone `!`, and `!*`. Upstream scenarios include an exact nonmatching `!System.Exception` (no base-type matching) and a thrown stop followed by a suppressed final stop. Observed unhandled stops are continued through actual process exit rather than terminated by the test. Suppressed final stops require a nonzero exit code and both exited/terminated events. |
 | `TestInnerExceptionLimit` | Preserve the upstream 65-node fixture's default first/last inner messages (`level 62`/`level 31`) and assert every node's type/message plus the exact 32-inner cutoff. All twenty-two original launch/attach configuration cases remain, including the 50-inner cutoff (`level 62`/`level 13`) and limit 100 exposing the complete finite chain (`level 62`/`innermost`). They prove zero, small and unsigned-maximum limits, invalid/overflow fallback, complete unsigned-decimal parsing, request overrides and reset to the default. Trailing characters (`2suffix`, `2 `) require the default 32 in both launch and attach. Five additional launches retain both upstream revisions: `1f7fe078` uses a 50-depth chain with first inner `level 48`, default 32 ending at `level 17`, limit 16 at `level 33`, and limit 100 at `innermost`; `740811da` returns to 64 depth with limit 16 ending at `level 47` and limit 128 at `innermost`. Every node has its exact type/message and zero/one-child count checked, including fully populated terminal nodes without empty placeholders. The same assertions pass exact native `740811da` and managed; the JSON move-semantics change needs no managed production fix. |
 
+The unchanged function-name fixture was first proven against exact native
+`2d9b3d4c`, then failed against actual unchanged managed main `c77cc22e` on the
+first malformed `()` request, and passed with the rebased fix. The seven focused
+breakpoint/function/hit-condition fixtures passed on both adapters with SDK
+10.0.404/runtime 10.0.15. These are local preparation results; final qualification
+still requires the evaluator's pinned SDK 10.0.401/runtime 10.0.14 and full gates.
+
 These are bounded scenarios, not full coverage of hit conditions or exception handling.
 `TestBreakpointWithoutStop` uses target stdin as a synchronization gate: after the
 entry continue, both source and function breakpoints are installed while the
@@ -220,7 +229,7 @@ The evaluation recovery contract is proven against preserved native master
 container/runtime for native and managed debugging, proves the immutable pre-fix
 managed baseline fails, and preserves runtime/DBI/DAC hashes, raw protocol and
 engine logs. It requires five native and managed focused/unchanged-suite runs
-under CPU load, followed by full current-native (`38365ab7`), managed and smoke suites.
+under CPU load, followed by full current-native (`2d9b3d4c`), managed and smoke suites.
 Normal evaluations suspend peer threads. As in native, timeout recovery may
 temporarily run those peers so dependencies can complete before abort settlement;
 their original frozen state is restored afterwards. Cross-thread notification

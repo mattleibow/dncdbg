@@ -739,6 +739,13 @@ semantics.
 ✅  hitCondition?: string;
 ```
 The same [hit count syntax](hit_count_breakpoints.md) applies to function breakpoints.
+Names may include a parameter suffix, for example `Foo(int)` or `Type.Foo()`.
+If a name contains `(`, it must have a nonempty method name before it, and the
+first `)` after it must be the final character. A malformed suffix rejects the
+whole request before replacing existing breakpoints or their hit counts.
+Each name is validated before its hit condition, in request order. This is not
+an identifier or nested-parenthesis grammar check: names without `(`, including
+unmatched `)`, retain their existing handling.
 
 #### Breakpoint
 ```text

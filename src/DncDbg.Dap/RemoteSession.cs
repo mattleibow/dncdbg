@@ -7,6 +7,14 @@ namespace DncDbg.Dap;
 /// <summary>Platform-independent DAP/model translation; execution belongs to the target-native owner.</summary>
 internal sealed class RemoteSession : IDisposable
 {
+    // Remote binding requires strict local source identity and checksum validation.
+    private sealed class RemoteSetBreakpointsArguments
+    {
+        public RemoteSetBreakpointsArguments() { }
+        public Source Source { get; set; } = new();
+        public SourceBreakpoint[]? Breakpoints { get; set; }
+    }
+
     private readonly RemoteLaunchArguments options;
     private readonly Func<RemoteLifecycle> createLifecycle;
     private readonly DapConnection connection;
@@ -269,7 +277,7 @@ internal sealed class RemoteSession : IDisposable
             case "setBreakpoints":
             {
                 Require("sourceBreakpoints");
-                var args = request.GetArguments<SetBreakpointsArguments>()!;
+                var args = request.GetArguments<RemoteSetBreakpointsArguments>()!;
                 if ((args.Breakpoints ?? []).Any(b => b.Condition != null || b.HitCondition != null || b.LogMessage != null || b.Column != null))
                     throw new NotSupportedException("Remote supports source line breakpoints, not conditions, hit counts, logpoints or columns.");
                 string path = args.Source.Path ?? throw new ArgumentException("A local source path is required.");

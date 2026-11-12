@@ -689,6 +689,38 @@ class MobileDapTests(unittest.TestCase):
         self.assertEqual(changed["source"]["path"], str(source))
         self.assertTrue(changed["verified"])
 
+    def test_remote_source_binding_keeps_strict_typed_path_validation(self):
+        self.launch("android")
+        source = ROOT / "tests/RemoteBreakpointApp/Program.cs"
+        line = next(i + 1 for i, text in enumerate(source.read_text().splitlines()) if "// REMOTE_BREAKPOINT" in text)
+        invalid_sources = [{"name": str(source)}, {"path": None, "name": str(source)}]
+        for value in (42, False, [], {}):
+            invalid_sources.extend(({"path": str(source), "name": value},
+                                    {"path": value, "name": str(source)}))
+        invalid_sources.extend({"path": str(source), "sourceReference": value}
+                               for value in ("invalid", [], {}))
+        invalid_arguments = [{"source": item, "breakpoints": [{"line": line}]} for item in invalid_sources]
+        invalid_arguments.append({"source": {"path": str(source)}, "breakpoints": [{"line": "invalid"}]})
+        for arguments in invalid_arguments:
+            with self.subTest(arguments=arguments):
+                sequence = self.dap.send("setBreakpoints", arguments)
+                response = self.dap.wait(lambda m: m.get("type") == "response" and m.get("request_seq") == sequence)
+                self.assertEqual(response["command"], "setBreakpoints")
+                self.assertFalse(response["success"])
+                self.assertTrue(response.get("message"))
+                self.assertNotIn("breakpoints", response.get("body", {}))
+                recovered = self.dap.request("setBreakpoints", {"source": {"path": str(source)},
+                                                               "breakpoints": [{"line": line}]})["breakpoints"]
+                self.assertEqual(len(recovered), 1)
+                self.assertEqual((recovered[0]["line"], recovered[0]["source"]["path"],
+                                  recovered[0]["source"]["name"], recovered[0]["source"]["sourceReference"]),
+                                 (line, str(source), source.name, 0))
+                self.assertIsInstance(recovered[0]["verified"], bool)
+        self.dap.request("disconnect")
+        self.dap.close()
+        self.assertEqual(self.dap.process.returncode, 0)
+        self.assertEqual(self.dap.stderr, "")
+
     def test_module_reload_and_context_stops_keep_source_breakpoint_identity(self):
         self.remote = Remote(self.state, "Android")
         launch = self.dap.send("launch", self.arguments(self.options("android")))

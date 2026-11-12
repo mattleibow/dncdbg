@@ -5,8 +5,11 @@ on:
     branches: [main]
     paths:
       - src/DncDbg.Engine/**
+      - src/DncDbg.Dap/**
+      - src/DncDbg.Protocol/**
       - tests/DncDbg.SmokeTests/**
-      - test-suite/TestCrossThreadEvaluation/**
+      - tests/DncDbg.RemoteTests/**
+      - test-suite/**
       - .github/workflows/evaluation.yml
   workflow_dispatch:
 

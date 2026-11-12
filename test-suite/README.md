@@ -107,6 +107,36 @@ matrix against either the managed adapter or a native reference:
 dotnet run --project tests/DncDbg.SmokeTests -- --protocol /path/to/debugger
 ```
 
+Outgoing framing has its own shared black-box selector:
+
+```sh
+dotnet run --project tests/DncDbg.SmokeTests -c Release -- --outgoing-wire /path/to/debugger
+dotnet run --project tests/DncDbg.SmokeTests -c Release -- --outgoing functional
+dotnet run --project tests/DncDbg.SmokeTests -c Release -- --outgoing allocation
+```
+
+The shared selector checks exact UTF-8 byte framing, Unicode/escaped command
+round-trips, an outgoing response over 64 KiB followed by small responses,
+concurrent request-worker/cancel responses, contiguous outgoing sequences,
+and exact protocol-log/wire correspondence. It runs in normal smoke and Docker;
+the evaluator also runs it against its existing immutable current-native pin.
+Managed checks preserve the previous JSON shape/escaping, outgoing depth over
+64, trace-before-write/flush ordering, concurrent events and registered async
+requests, reentrant serializer/trace sends, and clean recovery after real
+serializer, trace, header, payload and flush exceptions. A partial failed stream
+write cannot be undone: recovery resets the test stream before inspecting the
+next frame, not the production transport.
+
+The allocation selector warms serializer caches and the connection with 2,048
+sends, then measures current-thread allocated bytes across 1,024 prebuilt 8 KiB
+event bodies with tracing disabled and `Stream.Null`. Its 1,024-byte/send ceiling
+rejects a fresh payload allocation while allowing message/runtime bookkeeping.
+Eight repeated 128 KiB sends must each allocate at least their payload size,
+demonstrating that oversized storage is not reused; small sends must subsequently
+return below the same allocation ceiling. This measures allocations, not elapsed
+time or the exact private buffer capacity, and makes no native-allocation claim.
+All managed outgoing checks run in desktop smoke, Docker, and evaluator smoke.
+
 `--protocol-recovery /path/to/dncdbg-dap` separately preserves managed-only
 behavior: optional/no-op cancel arguments, recovery from invalid/overflowing or
 over-cap Content-Length headers, non-JSON bodies, and malformed JSON with a

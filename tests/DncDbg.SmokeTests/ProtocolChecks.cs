@@ -5,6 +5,45 @@ using System.Text.Json;
 
 internal static class ProtocolChecks
 {
+    public static async Task<int> RunOutgoing(string executable)
+    {
+        using var session = new Session(executable, outgoing: true);
+        await session.Request("initialize", "{}", success: true);
+        foreach (string command in new[]
+        {
+            "unknown-\"\\\r\n-\u03bb-\u4e2d-\ud83d\ude80",
+            "unknown-" + new string('\u03bb', 48 * 1024),
+            "small-after-large",
+        })
+            await session.Request(command, "{}", success: false);
+
+        var pending = new Dictionary<int, string>();
+        for (int i = 0; i < 48; i++)
+        {
+            string command = i % 2 == 0 ? $"unknown-{i}-\u03bb" : "cancel";
+            int seq = session.NextSequence();
+            pending.Add(seq, command);
+            await session.WriteFrame(JsonSerializer.Serialize(new
+            {
+                seq, type = "request", command, arguments = new { requestId = "invalid" },
+            }));
+        }
+        while (pending.Count != 0)
+        {
+            using JsonDocument document = await session.ReadMessage();
+            JsonElement response = document.RootElement;
+            if (response.GetProperty("type").GetString() != "response")
+                continue;
+            int seq = response.GetProperty("request_seq").GetInt32();
+            if (!pending.Remove(seq, out string? command))
+                throw new InvalidOperationException("Unexpected burst response: " + response);
+            Session.CheckResponse(response, seq, command, success: false);
+        }
+        await session.Request("setExceptionBreakpoints", """{"filters":[]}""", success: true);
+        await session.Disconnect();
+        return session.CheckOutgoingTrace();
+    }
+
     public static async Task<int> Run(string executable, bool managedRecovery = false)
     {
         int passed = 0;
@@ -90,9 +129,12 @@ internal static class ProtocolChecks
         private readonly Process _process;
         private readonly Task<string> _error;
         private readonly CancellationTokenSource _timeout = new(TimeSpan.FromSeconds(15));
+        private readonly string? _protocolLog;
+        private readonly List<string> _outgoing = [];
+        private int _outgoingSequence;
         private int _sequence;
 
-        public Session(string executable)
+        public Session(string executable, bool outgoing = false)
         {
             var start = new ProcessStartInfo(Path.GetFullPath(executable))
             {
@@ -105,6 +147,11 @@ internal static class ProtocolChecks
             string logs = Path.GetFullPath("build/validation/cli-smoke");
             Directory.CreateDirectory(logs);
             start.ArgumentList.Add("--log=" + Path.Combine(logs, $"protocol-{Guid.NewGuid():N}.log"));
+            if (outgoing)
+            {
+                _protocolLog = Path.Combine(logs, $"outgoing-{Guid.NewGuid():N}.log");
+                start.ArgumentList.Add("--logProtocol=" + _protocolLog);
+            }
             _process = Process.Start(start) ?? throw new InvalidOperationException("Cannot start debugger.");
             _error = _process.StandardError.ReadToEndAsync();
         }
@@ -114,7 +161,7 @@ internal static class ProtocolChecks
         public async Task Request(string command, string arguments, bool success)
         {
             int sequence = NextSequence();
-            await WriteFrame($$"""{"seq":{{sequence}},"type":"request","command":"{{command}}","arguments":{{arguments}}}""");
+            await WriteFrame($$"""{"seq":{{sequence}},"type":"request","command":{{JsonSerializer.Serialize(command)}},"arguments":{{arguments}}}""");
             await Response(sequence, command, success);
         }
 
@@ -135,36 +182,93 @@ internal static class ProtocolChecks
         {
             while (true)
             {
-                var header = new StringBuilder();
-                var single = new byte[1];
-                while (!header.ToString().EndsWith("\r\n\r\n", StringComparison.Ordinal))
-                {
-                    await _process.StandardOutput.BaseStream.ReadExactlyAsync(single, _timeout.Token);
-                    header.Append((char)single[0]);
-                }
-                int length = int.Parse(header.ToString().Split(':')[1].Trim(), CultureInfo.InvariantCulture);
-                if (length is < 0 or > 1024 * 1024)
-                    throw new InvalidOperationException("Invalid response length: " + length);
-                var body = new byte[length];
-                await _process.StandardOutput.BaseStream.ReadExactlyAsync(body, _timeout.Token);
-                using JsonDocument document = JsonDocument.Parse(body);
+                using JsonDocument document = await ReadMessage();
                 JsonElement response = document.RootElement;
                 if (response.GetProperty("type").GetString() != "response")
                     continue;
-                if (response.GetProperty("request_seq").GetInt32() != sequence
-                    || response.GetProperty("command").GetString() != command
-                    || response.GetProperty("success").GetBoolean() != success
-                    || !success && (!response.TryGetProperty("message", out JsonElement message)
-                        || string.IsNullOrWhiteSpace(message.GetString())))
-                    throw new InvalidOperationException("Unexpected response: " + response);
+                CheckResponse(response, sequence, command, success);
                 return;
             }
+        }
+
+        public async Task<JsonDocument> ReadMessage() =>
+            await ReadMessageOrEnd() ?? throw new EndOfStreamException("Debugger closed before the next message.");
+
+        private async Task<JsonDocument?> ReadMessageOrEnd()
+        {
+            var header = new StringBuilder();
+            var single = new byte[1];
+            while (!header.ToString().EndsWith("\r\n\r\n", StringComparison.Ordinal))
+            {
+                if (await _process.StandardOutput.BaseStream.ReadAsync(single, _timeout.Token) == 0)
+                {
+                    if (header.Length == 0)
+                        return null;
+                    throw new EndOfStreamException("Debugger closed within an outgoing header.");
+                }
+                header.Append((char)single[0]);
+                if (header.Length > 64)
+                    throw new InvalidOperationException("Invalid outgoing header: " + header);
+            }
+            const string prefix = "Content-Length: ";
+            string text = header.ToString();
+            if (!text.StartsWith(prefix, StringComparison.Ordinal)
+                || !int.TryParse(text.AsSpan(prefix.Length, text.Length - prefix.Length - 4),
+                    NumberStyles.None, CultureInfo.InvariantCulture, out int length)
+                || length is < 1 or > 1024 * 1024)
+                throw new InvalidOperationException("Invalid outgoing header: " + text);
+            var body = new byte[length];
+            await _process.StandardOutput.BaseStream.ReadExactlyAsync(body, _timeout.Token);
+            JsonDocument document = JsonDocument.Parse(body);
+            if (_protocolLog != null)
+            {
+                if (document.RootElement.GetProperty("seq").GetInt32() != ++_outgoingSequence)
+                {
+                    document.Dispose();
+                    throw new InvalidOperationException("Outgoing sequence is not contiguous.");
+                }
+                _outgoing.Add(new UTF8Encoding(false, true).GetString(body));
+            }
+            return document;
+        }
+
+        public static void CheckResponse(JsonElement response, int sequence, string command, bool success)
+        {
+            if (response.GetProperty("request_seq").GetInt32() != sequence
+                || response.GetProperty("command").GetString() != command
+                || response.GetProperty("success").GetBoolean() != success
+                || !success && (!response.TryGetProperty("message", out JsonElement message)
+                    || string.IsNullOrWhiteSpace(message.GetString())))
+                throw new InvalidOperationException("Unexpected response: " + response);
+        }
+
+        public int CheckOutgoingTrace()
+        {
+            string[] logged = File.ReadLines(_protocolLog!).Select(line =>
+            {
+                foreach (string prefix in new[] { "-> {", "<- (R) {", "<- (E) {" })
+                {
+                    int start = line.IndexOf(prefix, StringComparison.Ordinal);
+                    if (start >= 0)
+                        return line[(start + prefix.Length - 1)..];
+                }
+                return null;
+            }).Where(line => line != null).Select(line => line!).ToArray();
+            if (!logged.SequenceEqual(_outgoing))
+                throw new InvalidOperationException("Protocol trace does not exactly match outgoing wire order/payloads.");
+            if (!_outgoing.Any(message => Encoding.UTF8.GetByteCount(message) > 64 * 1024))
+                throw new InvalidOperationException("The wire test did not exercise an oversized outgoing message.");
+            Console.WriteLine($"Outgoing wire: {_outgoing.Count} contiguous frames, exact UTF-8 framing and trace; max payload {_outgoing.Max(Encoding.UTF8.GetByteCount)} bytes.");
+            return _outgoing.Count;
         }
 
         public async Task Disconnect()
         {
             await Request("disconnect", "{}", success: true);
             _process.StandardInput.Close();
+            if (_protocolLog != null)
+                while (await ReadMessageOrEnd() is { } document)
+                    document.Dispose();
             await _process.WaitForExitAsync(_timeout.Token);
             string error = await _error.WaitAsync(_timeout.Token);
             if (_process.ExitCode != 0 || error.Length != 0)

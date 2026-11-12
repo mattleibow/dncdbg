@@ -76,6 +76,9 @@ jobs:
               export TMPDIR=$(mktemp -d /tmp/er.XXXXXX)
               dotnet run --project tests/DncDbg.SmokeTests -c Release --no-build -- --protocol /opt/native-current/dncdbg > "$evidence/native-protocol.log" 2>&1
               tail -1 "$evidence/native-protocol.log"
+              export TMPDIR=$(mktemp -d /tmp/er.XXXXXX)
+              dotnet run --project tests/DncDbg.SmokeTests -c Release --no-build -- --outgoing-wire /opt/native-current/dncdbg > "$evidence/native-outgoing.log" 2>&1
+              tail -1 "$evidence/native-outgoing.log"
               dotnet run --project tests/DncDbg.SmokeTests -c Release --no-build -- --evaluation > "$evidence/callback-green.log" 2>&1
               yes > /dev/null & load1=$!
               yes > /dev/null & load2=$!

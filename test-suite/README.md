@@ -152,7 +152,9 @@ and drops a stream whose **capacity**, not payload length, exceeds 64 KiB,
 including failures. Reentrant sends use separately disposed temporary streams
 so existing body-getter/trace behavior cannot corrupt the outer message.
 Disposal closes the original input/output streams and cancels pending requests,
-then disposes the owned content stream without masking a trace-disposal failure.
+then disposes and drops the owned content stream without masking a
+trace-disposal failure. Dropping the reference matters because a disposed
+`MemoryStream` still holds its backing array.
 The 64 KiB capacity comparison is an implementation invariant; public allocation
 probes demonstrate oversized release but do not inspect the private capacity or
 claim an exact payload-size retention cutoff. It bounds connection-owned content

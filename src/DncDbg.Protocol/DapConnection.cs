@@ -15,7 +15,7 @@ public sealed class DapConnection : IDisposable
     private readonly Stream _output;
     private readonly object _writeLock = new();
     private readonly Dictionary<int, TaskCompletionSource<DapMessage>> _pendingRequests = [];
-    private MemoryStream _outputBuffer = new();
+    private MemoryStream? _outputBuffer = new();
     private bool _sending;
     private int _seq;
 
@@ -188,9 +188,10 @@ public sealed class DapConnection : IDisposable
     {
         lock (_writeLock)
         {
+            MemoryStream retainedBuffer = _outputBuffer ?? throw new ObjectDisposedException(nameof(DapConnection));
             // A body getter or trace callback can send again under the reentrant monitor.
             bool reuse = !_sending;
-            var buffer = reuse ? _outputBuffer : new MemoryStream();
+            var buffer = reuse ? retainedBuffer : new MemoryStream();
             _sending = true;
             try
             {
@@ -246,7 +247,10 @@ public sealed class DapConnection : IDisposable
         finally
         {
             lock (_writeLock)
-                _outputBuffer.Dispose();
+            {
+                _outputBuffer?.Dispose();
+                _outputBuffer = null;
+            }
         }
     }
 

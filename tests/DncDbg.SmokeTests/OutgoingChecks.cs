@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Runtime;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
@@ -12,13 +13,14 @@ internal static class OutgoingChecks
     public static int Run(params string[] scenarios)
     {
         if (scenarios.Length == 0)
-            scenarios = ["functional", "allocation"];
+            scenarios = ["functional", "allocation", "sizes"];
         int checks = 0;
         foreach (string scenario in scenarios)
             checks += scenario switch
             {
                 "functional" => Functional(),
                 "allocation" => Allocation(),
+                "sizes" => Sizes(),
                 _ => throw new ArgumentException("Unknown outgoing scenario: " + scenario),
             };
         return checks;
@@ -150,6 +152,29 @@ internal static class OutgoingChecks
                 && outer.RootElement.GetProperty("event").GetString() == "outer"
                 && outer.RootElement.GetProperty("seq").GetInt32() == 1, "existing reentrant wire order is preserved");
         }
+        using var ownedInput = new MemoryStream();
+        using var ownedOutput = new RecordingStream();
+        var disposed = new DapConnection(ownedInput, ownedOutput);
+        Task<DapMessage> pending = disposed.SendRequestAsync("runInTerminal");
+        disposed.Dispose();
+        Check(pending.IsCanceled && !ownedInput.CanRead && !ownedOutput.CanWrite,
+            "disposal cancels pending requests and closes both owned streams");
+
+        using var closingOutput = new RecordingStream();
+        using var closing = new DapConnection(Stream.Null, closingOutput);
+        var closedWrite = new InvalidOperationException("intentional write after trace disposal");
+        closingOutput.Failure = "header";
+        closingOutput.Error = closedWrite;
+        closing.Trace = _ => closing.Dispose();
+        try
+        {
+            closing.SendEvent("closing");
+            throw new InvalidOperationException("A trace-disposed send unexpectedly succeeded.");
+        }
+        catch (InvalidOperationException error) when (ReferenceEquals(error, closedWrite))
+        {
+            checks++;
+        }
         return checks;
 
         void Check(bool condition, string name)
@@ -231,6 +256,46 @@ internal static class OutgoingChecks
             }
         }
         return 11;
+    }
+
+    private static int Sizes()
+    {
+        Console.WriteLine($"Outgoing size matrix runtime: {RuntimeInformation.FrameworkDescription}; {RuntimeInformation.RuntimeIdentifier}; server GC={GCSettings.IsServerGC}; latency={GCSettings.LatencyMode}; {typeof(object).Assembly.Location}");
+        var failures = new List<string>();
+        foreach (int kib in new[] { 8, 24, 32, 48, 60 })
+        {
+            using var output = new MemoryStream();
+            using var connection = new DapConnection(Stream.Null, output);
+            object body = new { text = new string('x', kib * 1024) };
+            for (int i = 0; i < 2048; i++)
+                Send();
+            const int count = 1024;
+            int gen0 = GC.CollectionCount(0), gen1 = GC.CollectionCount(1), gen2 = GC.CollectionCount(2);
+            long start = GC.GetAllocatedBytesForCurrentThread();
+            for (int i = 0; i < count; i++)
+                Send();
+            long allocated = GC.GetAllocatedBytesForCurrentThread() - start;
+            gen0 = GC.CollectionCount(0) - gen0;
+            gen1 = GC.CollectionCount(1) - gen1;
+            gen2 = GC.CollectionCount(2) - gen2;
+            int payloadBytes = Encoding.UTF8.GetByteCount(Frames(output.ToArray()).Single());
+            Console.WriteLine(FormattableString.Invariant(
+                $"Outgoing size matrix: body={kib} KiB; actual payload={payloadBytes} bytes; sends={count}; allocated={allocated}; bytes/send={(double)allocated / count:F1}; collections={gen0}/{gen1}/{gen2}; limit=1024 bytes/send."));
+            if (payloadBytes >= 64 * 1024)
+                throw new InvalidOperationException("Mid-size probe unexpectedly exceeded 64 KiB of actual JSON.");
+            if (allocated > count * 1024L)
+                failures.Add($"{kib} KiB");
+
+            void Send()
+            {
+                output.SetLength(0);
+                output.Position = 0;
+                connection.SendEvent("output", body);
+            }
+        }
+        if (failures.Count != 0)
+            throw new InvalidOperationException("Outgoing size matrix exceeds 1024 bytes per warmed send: " + string.Join(", ", failures));
+        return 5;
     }
 
     private static List<string> Frames(byte[] wire)

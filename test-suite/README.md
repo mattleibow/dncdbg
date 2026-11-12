@@ -113,6 +113,7 @@ Outgoing framing has its own shared black-box selector:
 dotnet run --project tests/DncDbg.SmokeTests -c Release -- --outgoing-wire /path/to/debugger
 dotnet run --project tests/DncDbg.SmokeTests -c Release -- --outgoing functional
 dotnet run --project tests/DncDbg.SmokeTests -c Release -- --outgoing allocation
+dotnet run --project tests/DncDbg.SmokeTests -c Release -- --outgoing sizes
 ```
 
 The shared selector checks exact UTF-8 byte framing, Unicode/escaped command
@@ -159,6 +160,21 @@ reduced that to **552 bytes/send**, including after oversized messages, with
 functional and failure-release checks green. This is local preparation evidence,
 not full native/Linux/Windows or final pull-request qualification. The evaluator's
 current-native pin is deliberately unchanged for this allocation-only port.
+
+A subsequent test-first size matrix checks prebuilt 8/24/32/48/60 KiB ASCII
+bodies, each with 2,048 warmups and 1,024 measured sends. A reused, reset
+`MemoryStream` captures the actual last wire frame without allocating capture
+storage during measurement; its JSON payload must remain below 64 KiB and
+allocation must remain below 1,024 bytes/send. Runtime/GC identity, actual
+payload bytes and generation collection counts are printed. This selector runs
+by default with the other outgoing checks in all existing managed gates.
+The original `2acd8403` implementation is **superseded preparation**, not a
+general allocation improvement: the same new tests measured 24/32/48/60 KiB
+allocations of 74,880/99,456/148,608/185,472 bytes/send, versus actual archived
+main's 25,208/33,400/49,784/62,072. Their actual JSON sizes were only
+24,639/32,831/49,215/61,503 bytes. Worst-case writer size hints inflated the
+retained buffer's capacity past the limit, causing repeated reallocation.
+The original 8 KiB green proof did not cover this regression.
 
 `--protocol-recovery /path/to/dncdbg-dap` separately preserves managed-only
 behavior: optional/no-op cancel arguments, recovery from invalid/overflowing or

@@ -1179,6 +1179,35 @@ daemon(state, sys.argv[2])
         self.assertIsNone(body["Rules"][0].get("Type"))
         self.assertEqual(body["Rules"][1], {"Filter": "all", "Type": "System.ArgumentException"})
 
+    def test_exception_option_json_tolerance_stays_at_the_dap_boundary(self):
+        self.launch("android")
+        for condition in [None, "", 42, False, [], {"ignored": True}]:
+            with self.subTest(condition=condition):
+                self.dap.request("setExceptionBreakpoints", {"filters": ["unhandled"], "filterOptions": [
+                    {"filterId": "all", "condition": condition, "extra": {"arbitrary": [None, 42, False]}}]})
+                body = next(body for op, body in reversed(self.remote.requests) if op == 18)
+                self.assertEqual(body, {"Rules": [{"Filter": "unhandled", "Type": None},
+                                                {"Filter": "all", "Type": None}]})
+        self.dap.request("setExceptionBreakpoints", {"filterOptions": [{"filterId": "all", "extra": []}]})
+        body = next(body for op, body in reversed(self.remote.requests) if op == 18)
+        self.assertEqual(body, {"Rules": [{"Filter": "all", "Type": None}]})
+        invalid = [{"filterOptions": value} for value in [None, 42, False, "all", {}]]
+        invalid += [{"filterOptions": [entry]} for entry in
+                    [None, 42, False, [], "all", {}, {"filterId": ""}, {"filterId": "missing"},
+                     {"filterId": None}, {"filterId": 42}, {"filterId": False}, {"filterId": []}, {"filterId": {}}]]
+        invalid += [{"filters": value} for value in [None, 42, False, "all", {}, [None], ["missing"]]]
+        invalid += [{"filterOptions": [{"filterId": "all", "condition": value}]} for value in
+                    ["System.*", "!System.Exception", "System.Exception,System.ArgumentException"]]
+        for arguments in invalid:
+            with self.subTest(arguments=arguments):
+                count = sum(op == 18 for op, _ in self.remote.requests)
+                self.dap.request("setExceptionBreakpoints", arguments, success=False)
+                self.assertEqual(count, sum(op == 18 for op, _ in self.remote.requests))
+                self.dap.request("setExceptionBreakpoints", {"filters": [], "filterOptions": [
+                    {"filterId": "all", "condition": "System.ArgumentException"}]})
+                body = next(body for op, body in reversed(self.remote.requests) if op == 18)
+                self.assertEqual(body, {"Rules": [{"Filter": "all", "Type": "System.ArgumentException"}]})
+
 
 if __name__ == "__tool__":
     tool()

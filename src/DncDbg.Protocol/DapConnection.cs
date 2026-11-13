@@ -30,6 +30,7 @@ public sealed class DapConnection : IDisposable
 
     /// <summary>Frames larger than this are not believed: the header is ignored as malformed.</summary>
     private const int MaxContentLength = 64 * 1024 * 1024;
+    private const int ReadChunkSize = 64 * 1024;
     private const int MaxRetainedOutputCapacity = 64 * 1024;
     // Exception chains are debugger-generated; the incoming message depth limit remains unchanged.
     private static readonly JsonSerializerOptions OutgoingJsonOptions = new(DapJson.Options) { MaxDepth = int.MaxValue };
@@ -77,30 +78,42 @@ public sealed class DapConnection : IDisposable
                 }
             }
 
-            var buffer = new byte[contentLength];
+            byte[] buffer = [];
             int read = 0;
-            while (read < contentLength)
-            {
-                int n = _input.Read(buffer, read, contentLength - read);
-                if (n == 0)
-                    return null;
-                read += n;
-            }
-
-            Trace?.Invoke("<- " + Encoding.UTF8.GetString(buffer));
             try
             {
-                if (JsonSerializer.Deserialize<DapMessage>(buffer, DapJson.Options) is { } message)
+                while (read < contentLength)
+                {
+                    // Grow only after received bytes fill the buffer, without quadratic copying.
+                    if (read == buffer.Length)
+                        Array.Resize(ref buffer, Math.Min(contentLength, Math.Max(ReadChunkSize, buffer.Length * 2)));
+                    int n = _input.Read(buffer, read, Math.Min(ReadChunkSize, buffer.Length - read));
+                    if (n == 0)
+                        return null;
+                    read += n;
+                }
+            }
+            catch (OutOfMemoryException)
+            {
+                Trace?.Invoke("<- (ignored) Cannot allocate incoming DAP body.");
+                return null;
+            }
+
+            ReadOnlySpan<byte> body = buffer.AsSpan(0, read);
+            Trace?.Invoke("<- " + Encoding.UTF8.GetString(body));
+            try
+            {
+                if (JsonSerializer.Deserialize<DapMessage>(body, DapJson.Options) is { } message)
                     return message;
             }
             catch (JsonException e)
             {
-                RejectMalformed(buffer, e.Message);
+                RejectMalformed(body, e.Message);
             }
         }
     }
 
-    private void RejectMalformed(byte[] body, string reason)
+    private void RejectMalformed(ReadOnlySpan<byte> body, string reason)
     {
         // whatever can be told about the frame: it may be JSON of the wrong shape, or no JSON at all
         string text = Encoding.UTF8.GetString(body);

@@ -7,6 +7,9 @@ internal static class TunnelChecks
     public static async Task RunAsync(Action<bool, string> check, CancellationToken token)
     {
         await DirectAsync();
+        await PendingReceiveCloseAsync();
+        await ResetIsNotEofAsync();
+        await ReceiveCancellationAsync();
         await FragmentedHalfCloseAsync();
         await BackpressureAsync();
         await TargetEofAsync();
@@ -16,6 +19,7 @@ internal static class TunnelChecks
         await CollisionAsync();
         await AcquisitionRaceAsync();
         await RefusedTargetAsync();
+        await DisposedRouteAsync();
 
         async Task DirectAsync()
         {
@@ -26,6 +30,59 @@ internal static class TunnelChecks
             await direct.DisposeAsync();
             try { await direct.OpenAsync(endpoint, token); throw new InvalidOperationException("Disposed direct route reopened."); }
             catch (ObjectDisposedException) { check(true, "disposed direct generation cannot be reopened"); }
+        }
+
+        async Task PendingReceiveCloseAsync()
+        {
+            using var target = Listen();
+            using var client = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            await client.ConnectAsync(IPAddress.Loopback, Endpoint(target).Port, token);
+            using Socket peer = await target.AcceptSocketAsync(token);
+            ValueTask<int> pending = peer.ReceiveAsync(new byte[1], SocketFlags.None, token);
+            check(!pending.IsCompleted && peer.Available == 0 && peer.LingerState is { Enabled: false },
+                "proxy close regression starts with a connected, empty socket and a pending native receive");
+            LocalTcpProxy.CloseConnectionSocket(peer);
+            try { await pending; }
+            catch (SocketException error) when (error.SocketErrorCode == SocketError.OperationAborted) { }
+            catch (ObjectDisposedException) { }
+            check((await ReadAllAsync(client, token)).Length == 0,
+                "proxy closes a pending receive with graceful EOF, not a TCP reset");
+        }
+
+        async Task ResetIsNotEofAsync()
+        {
+            using var target = Listen();
+            using var client = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            await client.ConnectAsync(IPAddress.Loopback, Endpoint(target).Port, token);
+            using Socket peer = await target.AcceptSocketAsync(token);
+            ValueTask<int> reading = client.ReceiveAsync(new byte[1], SocketFlags.None, token);
+            check(!reading.IsCompleted, "reset control has a pending native peer read");
+            peer.LingerState = new LingerOption(true, 0);
+            peer.Dispose();
+            try { await reading; throw new InvalidOperationException("Abortive close was mistaken for EOF."); }
+            catch (SocketException error) when (error.SocketErrorCode == SocketError.ConnectionReset)
+            {
+                check(true, "a genuine TCP reset remains an error, never successful EOF");
+            }
+        }
+
+        async Task ReceiveCancellationAsync()
+        {
+            using var target = Listen();
+            using var client = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            await client.ConnectAsync(IPAddress.Loopback, Endpoint(target).Port, token);
+            using Socket peer = await target.AcceptSocketAsync(token);
+            using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(token);
+            ValueTask<int> reading = peer.ReceiveAsync(new byte[1], SocketFlags.None, cancellation.Token);
+            check(!reading.IsCompleted, "cancellation control has a pending native receive");
+            cancellation.Cancel();
+            try { await reading; throw new InvalidOperationException("Canceled receive was mistaken for EOF."); }
+            catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
+            await SendAllAsync(client, new byte[] { 42 }, 1, token);
+            byte[] received = new byte[1];
+            check(await peer.ReceiveAsync(received, SocketFlags.None, token) == 1 && received[0] == 42,
+                "canceling a native receive is distinct from closing or resetting the connection");
+            client.Shutdown(SocketShutdown.Send);
         }
         async Task FragmentedHalfCloseAsync()
         {
@@ -189,6 +246,24 @@ internal static class TunnelChecks
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
             deadline.CancelAfter(TimeSpan.FromSeconds(3));
             check((await ReadAllAsync(client, deadline.Token)).Length == 0, "refused target connection closes the acquired host channel");
+        }
+
+        async Task DisposedRouteAsync()
+        {
+            using var target = Listen();
+            await using var proxy = new LocalTcpProxy();
+            RemoteEndpoint route = await proxy.OpenAsync(Endpoint(target), token);
+            using var client = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            await client.ConnectAsync(IPAddress.Loopback, route.Port, token);
+            using Socket peer = await target.AcceptSocketAsync(token);
+            await SendAllAsync(peer, new byte[] { 42 }, 1, token);
+            byte[] received = new byte[1];
+            check(await client.ReceiveAsync(received, SocketFlags.None, token) == 1 && received[0] == 42,
+                "route-death barrier proves the target connected and the response pump forwarded data");
+            Task<byte[]> clientEof = ReadAllAsync(client, token), targetEof = ReadAllAsync(peer, token);
+            await proxy.DisposeAsync();
+            check((await clientEof).Length == 0 && (await targetEof).Length == 0 && Closed(route.Port),
+                "owned route disposal settles both idle peers with EOF and removes the listener");
         }
     }
 

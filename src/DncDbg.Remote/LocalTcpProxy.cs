@@ -104,18 +104,31 @@ public sealed class LocalTcpProxy(LocalTcpProxyOptions? options = null) : ITunne
             Task first = await Task.WhenAny(request, response);
             if (first.IsFaulted || first.IsCanceled)
             {
-                incoming.Dispose();
-                outgoing.Dispose();
+                CloseConnectionSocket(incoming);
+                CloseConnectionSocket(outgoing);
             }
             await Task.WhenAll(request, response);
         }
         catch (Exception error) when (error is IOException or SocketException or OperationCanceledException or ObjectDisposedException) { }
         finally
         {
-            incoming.Dispose();
+            CloseConnectionSocket(incoming);
             sockets.TryRemove(incoming, out _);
             sockets.TryRemove(outgoing, out _);
         }
+    }
+
+    internal static void CloseConnectionSocket(Socket socket)
+    {
+        try
+        {
+            // Disposing with a pending receive otherwise requests an abortive close in the Unix BCL.
+            socket.Shutdown(SocketShutdown.Send);
+        }
+        catch (SocketException error) when (error.SocketErrorCode is SocketError.NotConnected or
+            SocketError.ConnectionReset or SocketError.ConnectionAborted or SocketError.Shutdown) { }
+        catch (ObjectDisposedException) { }
+        finally { socket.Dispose(); }
     }
 
     private async Task PumpAsync(Socket source, Socket destination)
@@ -151,7 +164,7 @@ public sealed class LocalTcpProxy(LocalTcpProxyOptions? options = null) : ITunne
     {
         lifetime.Cancel();
         listener?.Stop();
-        foreach (Socket socket in sockets.Keys) socket.Dispose();
+        foreach (Socket socket in sockets.Keys) CloseConnectionSocket(socket);
         if (accepting != null) await accepting;
         await Task.WhenAll(workers.Keys);
         lifetime.Dispose();

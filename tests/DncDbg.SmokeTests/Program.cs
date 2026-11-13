@@ -73,6 +73,16 @@ if (args is ["--outgoing", .. var outgoingScenarios])
     Console.WriteLine($"Passed {OutgoingChecks.Run(outgoingScenarios)} managed outgoing checks.");
     return;
 }
+if (args is ["--incoming", .. var incomingScenarios])
+{
+    Console.WriteLine($"Passed {IncomingChecks.Run(incomingScenarios)} managed incoming checks.");
+    return;
+}
+if (args is ["--incoming-wire", var incomingDebugger])
+{
+    Console.WriteLine($"Passed {await ProtocolChecks.RunIncoming(incomingDebugger)} shared incoming wire checks.");
+    return;
+}
 
 if (args.Length != 1)
     throw new ArgumentException("Supply the path to the dncdbg-dap apphost.");
@@ -81,6 +91,8 @@ string logDirectory = Path.GetFullPath("build/validation/cli-smoke");
 Directory.CreateDirectory(logDirectory);
 int passed = EvaluationChecks.Run() + LaunchArgumentChecks.Run() + ResumeHandleChecks.Run();
 passed += OutgoingChecks.Run();
+passed += IncomingChecks.Run();
+passed += await ProtocolChecks.RunIncoming(executable);
 passed += await ProtocolChecks.RunOutgoing(executable);
 passed += await ProtocolChecks.Run(executable);
 passed += await ProtocolChecks.Run(executable, managedRecovery: true);

@@ -107,6 +107,45 @@ matrix against either the managed adapter or a native reference:
 dotnet run --project tests/DncDbg.SmokeTests -- --protocol /path/to/debugger
 ```
 
+Incoming framing and body resources have separate selectors:
+
+```sh
+dotnet run --project tests/DncDbg.SmokeTests -c Release -- --incoming-wire /path/to/debugger
+dotnet run --project tests/DncDbg.SmokeTests -c Release -- --incoming functional
+dotnet run --project tests/DncDbg.SmokeTests -c Release -- --incoming allocation
+dotnet run --project tests/DncDbg.SmokeTests -c Release -- --incoming chunks
+dotnet run --project tests/DncDbg.SmokeTests -c Release -- --incoming failures
+```
+
+The shared wire selector sends exact 64 KiB boundary and multi-chunk requests,
+including fragmented UTF-8 bytes and adjacent frames. It also checks clean EOF
+with zero-length bodies and announced 64 MiB bodies supplying only 0, 1, 65535,
+65536, 65537 or 131089 bytes. Actual input vectors are saved as `incoming-*.bin`
+under `build/validation/cli-smoke`. This is a functional contract, not a native
+allocation measurement: the unchanged managed baseline can already pass it.
+
+Managed checks additionally preserve complete-body trace timing/text, request,
+response and event shapes, explicit async response ownership, malformed JSON
+error correlation/recovery, the existing JSON depth limit, invalid-header
+resynchronization and the intentional 64 MiB incoming cap. Header/body EOF and
+I/O errors must disconnect without tracing or responding to partial messages.
+The allocation selector uses prebuilt small truncated inputs, tracing disabled,
+and current-thread allocated bytes, not RSS, timing or private buffer capacity.
+Total allocation must stay below `4 * (received + 65536) + 16384`; allocation
+ahead of observed input must stay below `4 * 65536 + 16384`. The chunks selector
+measures actual requested read sizes and requires every body read to be at most
+65536 bytes, including when a stream returns short reads.
+The failures selector uses controlled `OutOfMemoryException`s from the input
+stream to verify logged disconnects; it does not exhaust the real heap or claim
+to measure native allocation failures.
+
+All incoming selectors run in desktop smoke and Docker. The evaluator explicitly
+runs the shared wire contract against its existing current-native pin, before
+managed smoke. No new native behavior is required for these shared assertions,
+so its historical/current native pins and pre-fix evaluator baseline are unchanged.
+The managed resource change mirrors upstream `12379046` without adopting native's
+unbounded header-size or malformed-header disconnect policies.
+
 Outgoing framing has its own shared black-box selector:
 
 ```sh

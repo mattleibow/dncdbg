@@ -64,6 +64,10 @@ try
         "/opt/smoke/DncDbg.SmokeTests.dll", "--outgoing"], 60));
     Console.WriteLine(await Commands.Run("docker", ["exec", container, "dotnet",
         "/opt/smoke/DncDbg.SmokeTests.dll", "--outgoing-wire", "/opt/dncdbg/dncdbg-dap"], 60));
+    Console.WriteLine(await Commands.Run("docker", ["exec", container, "dotnet",
+        "/opt/smoke/DncDbg.SmokeTests.dll", "--incoming"], 60));
+    Console.WriteLine(await Commands.Run("docker", ["exec", container, "dotnet",
+        "/opt/smoke/DncDbg.SmokeTests.dll", "--incoming-wire", "/opt/dncdbg/dncdbg-dap"], 60));
     await DebugContainer(container, fixture);
     await DebugNativeHost();
 

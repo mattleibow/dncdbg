@@ -5,6 +5,63 @@ using System.Text.Json;
 
 internal static class ProtocolChecks
 {
+    public static async Task<int> RunIncoming(string executable)
+    {
+        const int chunk = 64 * 1024;
+        int checks = 0;
+        using (var session = new Session(executable, incoming: true))
+        {
+            await session.Request("initialize", "{}", success: true);
+            foreach (int length in new[] { chunk - 1, chunk, chunk + 1, 2 * chunk, 2 * chunk + 17 })
+            {
+                int seq = session.NextSequence();
+                string prefix = "{\"seq\":" + seq + ",\"type\":\"request\",\"command\":\"";
+                const string suffix = "\",\"arguments\":{}}";
+                const string unicode = "\u03bb\u4e2d\ud83d\ude80";
+                int padding = length - Encoding.UTF8.GetByteCount(prefix + unicode + suffix);
+                int before = Math.Min(padding, chunk - 1 - Encoding.UTF8.GetByteCount(prefix));
+                string command = new string('x', before) + unicode + new string('y', padding - before);
+                byte[] body = Encoding.UTF8.GetBytes(prefix + command + suffix);
+                await session.Write(Encoding.ASCII.GetBytes($"Content-Length: {body.Length}\r\n\r\n"));
+                // Deliberately split Unicode bytes as well as crossing the production chunk boundary.
+                for (int offset = 0; offset < body.Length;)
+                {
+                    int count = Math.Min(offset is >= chunk - 2 and <= chunk + 8 ? 1 : 8191, body.Length - offset);
+                    count = offset < chunk - 2 ? Math.Min(count, chunk - 2 - offset) : count;
+                    await session.Write(body.AsSpan(offset, count).ToArray());
+                    offset += count;
+                }
+                int next = session.NextSequence();
+                await session.WriteFrame($$$"""{"seq":{{{next}}},"type":"request","command":"setExceptionBreakpoints","arguments":{"filters":[]}}""");
+                await session.Response(seq, command, success: false);
+                await session.Response(next, "setExceptionBreakpoints", success: true);
+                Console.WriteLine($"Passed incoming wire: exact {body.Length}-byte UTF-8 request and adjacent frame.");
+                checks += 2;
+            }
+            await session.Disconnect();
+        }
+        foreach (int received in new[] { 0, 1, chunk - 1, chunk, chunk + 1, 2 * chunk + 17 })
+        {
+            using var session = new Session(executable, incoming: true);
+            await session.Request("initialize", "{}", success: true);
+            await session.Write(Encoding.ASCII.GetBytes("Content-Length: 67108864\r\n\r\n"));
+            if (received != 0)
+                await session.Write(Enumerable.Repeat((byte)' ', received).ToArray());
+            await session.CloseInput();
+            Console.WriteLine($"Passed incoming wire: announced 67108864 bytes, received {received}, clean EOF without a response.");
+            checks++;
+        }
+        using (var session = new Session(executable, incoming: true))
+        {
+            await session.Request("initialize", "{}", success: true);
+            await session.WriteFrame("");
+            await session.CloseInput();
+            Console.WriteLine("Passed incoming wire: zero-length body followed by EOF.");
+            checks++;
+        }
+        return checks;
+    }
+
     public static async Task<int> RunOutgoing(string executable)
     {
         using var session = new Session(executable, outgoing: true);
@@ -130,11 +187,12 @@ internal static class ProtocolChecks
         private readonly Task<string> _error;
         private readonly CancellationTokenSource _timeout = new(TimeSpan.FromSeconds(15));
         private readonly string? _protocolLog;
+        private readonly FileStream? _inputLog;
         private readonly List<string> _outgoing = [];
         private int _outgoingSequence;
         private int _sequence;
 
-        public Session(string executable, bool outgoing = false)
+        public Session(string executable, bool outgoing = false, bool incoming = false)
         {
             var start = new ProcessStartInfo(Path.GetFullPath(executable))
             {
@@ -152,6 +210,8 @@ internal static class ProtocolChecks
                 _protocolLog = Path.Combine(logs, $"outgoing-{Guid.NewGuid():N}.log");
                 start.ArgumentList.Add("--logProtocol=" + _protocolLog);
             }
+            if (incoming)
+                _inputLog = File.Create(Path.Combine(logs, $"incoming-{Guid.NewGuid():N}.bin"));
             _process = Process.Start(start) ?? throw new InvalidOperationException("Cannot start debugger.");
             _error = _process.StandardError.ReadToEndAsync();
         }
@@ -168,6 +228,7 @@ internal static class ProtocolChecks
         public async Task Write(byte[] bytes)
         {
             await _process.StandardInput.BaseStream.WriteAsync(bytes, _timeout.Token);
+            _inputLog?.Write(bytes);
             await _process.StandardInput.BaseStream.FlushAsync(_timeout.Token);
         }
 
@@ -275,12 +336,28 @@ internal static class ProtocolChecks
                 throw new InvalidOperationException($"Debugger shutdown failed ({_process.ExitCode}): {error}");
         }
 
+        public async Task CloseInput()
+        {
+            _process.StandardInput.Close();
+            while (await ReadMessageOrEnd() is { } document)
+            {
+                using (document)
+                    if (document.RootElement.GetProperty("type").GetString() == "response")
+                        throw new InvalidOperationException("Incomplete/empty incoming body produced a response: " + document.RootElement);
+            }
+            await _process.WaitForExitAsync(_timeout.Token);
+            string error = await _error.WaitAsync(_timeout.Token);
+            if (_process.ExitCode != 0 || error.Length != 0)
+                throw new InvalidOperationException($"Debugger EOF shutdown failed ({_process.ExitCode}): {error}");
+        }
+
         public void Dispose()
         {
             if (!_process.HasExited)
                 _process.Kill(entireProcessTree: true);
             _process.WaitForExit();
             _process.Dispose();
+            _inputLog?.Dispose();
             _timeout.Dispose();
         }
     }

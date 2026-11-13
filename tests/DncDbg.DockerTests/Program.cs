@@ -46,6 +46,7 @@ try
     Console.WriteLine($"Docker integration: daemon-native {rid}, {container}");
 
     await Publish(Path.Combine(root, "src", "DncDbg.Dap"), "adapter");
+    await Publish(Path.Combine(root, "tests", "DncDbg.SmokeTests"), "smoke");
     await Publish(Path.Combine(fixture, "DockerTarget.csproj"), "app",
         "-p:PathMap=" + fixture + "=/_/dncdbg-docker");
     Directory.Delete(Path.Combine(context, "artifacts"), recursive: true);
@@ -59,6 +60,10 @@ try
     string running = await Commands.Run("docker", ["inspect", "--format", "{{.State.Running}}", container], 15);
     Require(running.Trim() == "true", "The test container must be running.");
 
+    Console.WriteLine(await Commands.Run("docker", ["exec", container, "dotnet",
+        "/opt/smoke/DncDbg.SmokeTests.dll", "--outgoing"], 60));
+    Console.WriteLine(await Commands.Run("docker", ["exec", container, "dotnet",
+        "/opt/smoke/DncDbg.SmokeTests.dll", "--outgoing-wire", "/opt/dncdbg/dncdbg-dap"], 60));
     await DebugContainer(container, fixture);
     await DebugNativeHost();
 

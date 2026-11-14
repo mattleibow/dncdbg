@@ -5,4 +5,7 @@
     <IsPackable>true</IsPackable>
     <Description>Platform-neutral DNCDbg target manifests, transport and lifecycle contracts.</Description>
   </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="DncDbg.RemoteTests" />
+  </ItemGroup>
 </Project>

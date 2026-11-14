@@ -87,7 +87,10 @@ generation and route ports; credentials are never DAP output.
   complete reverse responses, reconnects, multi-MiB backpressure with bounded
   buffers, target EOF, I/O timeout, connection refusal, listener cancellation,
   delayed publication, collision, repeated disposal and allocation/disposal
-  races. These use live sockets, not canned ADB replies.
+  races. A synchronized pending-native-receive regression requires the proxy's
+  owned socket close to produce EOF rather than an abortive reset, independently
+  of timer scheduling. Genuine reset and canceled-receive controls must remain
+  distinct from EOF. These use live sockets, not canned ADB replies.
 - **Through the same DAP/native-agent path:** cancellation after proxy listener
   allocation but before publication, startup timeout, occupied host port,
   tunnel death while running/stopped, explicit termination while running/stopped,

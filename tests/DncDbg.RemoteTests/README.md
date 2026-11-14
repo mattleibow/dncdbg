@@ -14,6 +14,13 @@ project (`test_dap.py`, `fake_adb.py`, `NativeContracts.cpp`,
 `test_mobile_processes.py`, `test_mobile_runner.py`, shared `process_tools.py`).
 `--tunnel-contracts` additionally runs real socket fragmentation, half-close,
 backpressure, reconnect, timeout and transactional listener ownership checks.
+The shutdown regression first queues a native receive on an empty connected
+socket, then invokes the proxy's actual close path. It requires zero-byte EOF,
+not `ConnectionReset` or cancellation, with no timing sleeps. Separate controls
+require an abortive peer close to remain a reset and receive cancellation to
+leave the connection usable. Owned route disposal must close both connected
+peers and remove its listener; target refusal and idle I/O timeout remain
+separate end-to-end proxy cases.
 Run the whole portable host group
 through the same documented console entrypoint used by CI:
 
